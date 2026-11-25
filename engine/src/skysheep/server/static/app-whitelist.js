@@ -745,15 +745,29 @@ async function saveProvider(row, name, setDefault, kind) {
       await renderSettings();
       providerStatus(`✓ 已保存「${name}」` + (r.rebuilt ? "，使用中的模型已热更新" : ""));
     }
+    return true; // 供「保存后再切换」判断：保存没成功就别接着切，免得改动一起丢
   } catch (e) {
     msg.textContent = "✗ " + e.message;
     msg.className = "pr-msg bad";
+    return false;
   }
 }
 
 // 切换当前对话使用的模型（立即生效，写进 agent.provider）
 async function switchProvider(row, name) {
   const msg = row.querySelector(".pr-msg");
+  // 与详情页按钮同一道门：没配 Key 的服务切不过去（构建 provider 时会直接报错）。
+  // 详情页的「切换使用」已置灰，这里兜住其它入口
+  const target = providerCfg && providerCfg.providers ? providerCfg.providers[name] : null;
+  if (target && !target.has_key) {
+    const tip = "先在上面填 API Key 并保存";
+    if (msg) {
+      msg.textContent = "✗ " + tip;
+      msg.className = "pr-msg bad";
+    }
+    providerStatus(`✗ 切不到「${name}」：${tip}`, false);
+    return;
+  }
   msg.textContent = "切换中…";
   msg.className = "pr-msg";
   try {

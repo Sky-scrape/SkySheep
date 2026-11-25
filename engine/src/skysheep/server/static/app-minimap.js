@@ -170,7 +170,7 @@ function createChatMinimap(host, opts = {}) {
       }
       d.title = txt;
       // onclick 每轮重绑：闭包捕获的是本条消息的滚动目标，复用元素时必须跟着换
-      d.onclick = () => log.scrollTo({ top: miniScrollTarget(log, el), behavior: "smooth" });
+      d.onclick = () => log.scrollTo({ top: miniScrollTarget(log, el), behavior: smoothBehavior() });
       targets.push(el);
       tops.push(miniTopOf(log, el, logRect));
     }

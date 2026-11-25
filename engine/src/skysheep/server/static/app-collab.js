@@ -21,10 +21,22 @@ const COLLAB_BUILTIN_NAMES = ["圆桌·多模型评审", "团队·交付小组",
 // 合并后的模板册（内置 + 我的；团队模板已转成协作模板形状）。协作菜单同步读它，
 // 所以设置页与菜单共用一份缓存，保存/删除后一起刷新。
 let collabTplAll = [];
-// 编辑器状态：{ draft, source, builtin, isNew, teamTools }
+// 编辑器状态：{ draft, source, builtin, isNew, kind, teamTools, perKind, baseline }
 let collabEditorState = null;
 // config.providers 缓存（只用于服务/模型候选提示，不做任何可用性判定）
 let collabProvidersCache = null;
+// 零工具提示的一键挂载：只读档只挂只读工具，读写档含写/改。
+const COLLAB_DEFAULT_TOOLS = {
+  read: ["read_file", "list_dir", "glob", "grep"],
+  write: ["read_file", "list_dir", "glob", "grep", "write_file", "edit_file"],
+};
+// 只读团队可以声明的只读工具（写/执行工具仍要求「可写」以上档位）
+const COLLAB_READONLY_TOOLS = new Set(COLLAB_DEFAULT_TOOLS.read.concat([
+  "read_image", "read_document", "search_documents", "search_history",
+  "web_search", "web_fetch", "load_skill",
+]));
+// 零工具团队已确认「就按只能对话保存」：只在本次编辑器会话里有效
+let collabEditorZeroAck = false;
 
 function collabClone(v) {
   try { return JSON.parse(JSON.stringify(v)); } catch (e) { return v; }
@@ -317,10 +329,25 @@ function collabFillProviderOptions() {
   modelDl.innerHTML = [...models].map((m) => `<option value="${escapeHtml(m)}"></option>`).join("");
 }
 
-/** 打开编辑器：template 为空 = 新建；opts.copy = 以现有模板为底另存。 */
-function openCollabTemplateEditor(template, opts = {}) {
+/** 打开编辑器：template 为空 = 新建；opts.copy = 以现有模板为底另存。
+ *  已开着编辑器时：同一张模板重开恢复上次草稿；换模板/新建先做脏检查。 */
+async function openCollabTemplateEditor(template, opts = {}) {
   const box = document.getElementById("collab-tpl-editor");
   if (!box) return;
+  const isOpen = !box.classList.contains("hidden");
+  // 同一张模板重开：编辑器里还有这份草稿，原样恢复（不重读盘、不丢改动）
+  if (template && !opts.copy && isOpen && collabEditorState && collabEditorState.draft
+      && collabEditorState.draft.name === String(template.name || "")
+      && String(collabEditorState.draft.kind || "") === String(template.kind || "")) {
+    try { box.scrollIntoView({ block: "nearest", behavior: smoothBehavior() }); } catch (e) {}
+    return;
+  }
+  // 换一张 / 新建前先问一次：有未保存改动不做静默清空
+  if (isOpen && collabEditorState && collabEditorDirty()) {
+    const ok = await confirmModal("模板还有没保存的改动，打开另一份会丢掉这些改动。继续吗？",
+      { title: "放弃未保存的修改", okLabel: "放弃并打开", danger: true });
+    if (!ok) return;
+  }
   const src = template ? collabClone(template) : null;
   let draft;
   if (src && opts.copy) {
@@ -339,23 +366,42 @@ function openCollabTemplateEditor(template, opts = {}) {
     source: src ? String(src.source || "collab") : "collab",
     builtin: !!(src && src.builtin),
     isNew: !src,
+    kind: COLLAB_KIND_LABELS[draft.kind] ? draft.kind : "team",
     teamTools: { allow: [], deny: [] },
+    perKind: {},
+    baseline: "",
   };
+  collabEditorZeroAck = false;
+  collabEditorStatus("");
   const title = document.getElementById("collab-tpl-editor-title");
   if (title) title.textContent = src ? (opts.copy ? "复制模板" : "编辑模板") : "新建模板";
-  // 已有模板锁类型：跨类型会跨模板册（团队住 teams.json），改名另存即可
-  collabFillEditorForm(draft, { lockKind: !!src });
+  // 已有模板锁类型：跨类型会跨模板册（团队住 teams.json），改名另存即可；
+  // 复制出来的是新模板，可以不锁（切类型即存进另一册）
+  collabFillEditorForm(draft, { lockKind: !!src && !opts.copy });
+  if (collabEditorState) collabEditorState.baseline = collabDraftSignature(collabReadEditorForm());
   box.classList.remove("hidden");
-  try { box.scrollIntoView({ block: "nearest", behavior: "smooth" }); } catch (e) {}
+  try { box.scrollIntoView({ block: "nearest", behavior: smoothBehavior() }); } catch (e) {}
   collabLoadProviders().then(() => {
     if (document.getElementById("collab-tpl-form")) collabFillProviderOptions();
   }).catch(() => {});
 }
 
-function collabCloseEditor() {
+async function collabCloseEditor(force) {
   const box = document.getElementById("collab-tpl-editor");
-  if (box) box.classList.add("hidden");
+  if (!box || box.classList.contains("hidden")) {
+    collabEditorState = null;
+    return;
+  }
+  if (!force && collabEditorState && collabEditorDirty()) {
+    const ok = await confirmModal("模板还有没保存的改动，收起后这些改动会丢失。确定收起吗？",
+      { title: "放弃未保存的修改", okLabel: "放弃并收起", danger: true });
+    if (!ok) return;
+  }
+  box.classList.add("hidden");
   collabEditorState = null;
+  collabEditorStatus("");
+  const hint = document.getElementById("collab-tpl-zerotool");
+  if (hint) hint.remove();
 }
 
 function collabRenderRoleRow(role, index, kind) {
@@ -454,11 +500,167 @@ function collabSyncKindUi(kind) {
   }
 }
 
+/** 编辑器头部（表单上方）的状态行：保存结果与校验错误就地显示，
+ *  不再写到画廊上方的 #collab-tpl-status（那里只报模板册的加载问题）。 */
+function collabEditorStatus(text, ok = true) {
+  const form = document.getElementById("collab-tpl-form");
+  if (!form) return;
+  let el = document.getElementById("collab-tpl-editor-status");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "collab-tpl-editor-status";
+    el.setAttribute("role", "status");
+    form.parentNode.insertBefore(el, form);
+  }
+  el.textContent = text || "";
+  el.className = "card-status " + (ok ? "ok" : "bad");
+  el.hidden = !text;
+}
+
+/** 草稿的可比较签名（脏检查用）：只取用户能改的字段。 */
+function collabDraftSignature(t) {
+  if (!t) return "";
+  const arr = (v) => (Array.isArray(v) ? v.map((x) => String(x)) : []);
+  return JSON.stringify({
+    name: String(t.name || ""),
+    kind: String(t.kind || ""),
+    desc: String(t.desc || ""),
+    roles: (Array.isArray(t.roles) ? t.roles : []).map((r) => [
+      String(r.key || ""), String(r.name || ""), String(r.provider || ""),
+      String(r.model || ""), String(r.prompt || ""), String(r.needs || ""),
+      ...arr(r.tools_allow), "|", ...arr(r.tools_deny),
+    ]),
+    aggregator: t.aggregator || {},
+    limits: t.limits || {},
+    budget: t.budget || {},
+  });
+}
+
+/** 编辑器里是否有未保存改动（表单当前值与打开/保存时的基线比）。 */
+function collabEditorDirty() {
+  const st = collabEditorState;
+  if (!st || !st.baseline) return false;
+  return collabDraftSignature(collabReadEditorForm()) !== st.baseline;
+}
+
+/** 切类型前把团队的每个角色 needs 与团队级工具按角色 key 存下来：
+ *  圆桌 / 对抗把 needs 收到只读、工具收起，切回团队时原样恢复。 */
+function collabCaptureKind(kind) {
+  const st = collabEditorState;
+  if (!st || kind !== "team") return; // 非团队表单不承载 needs/工具，保留已存的那份
+  const form = document.getElementById("collab-tpl-form");
+  if (!form) return;
+  const roles = [];
+  [...form.querySelectorAll(".collab-role-row")].forEach((row, i) => {
+    const needsEl = row.querySelector(".collab-role-needs");
+    roles.push({
+      key: String(row.dataset.key || ("r" + i)),
+      needs: String((needsEl && needsEl.value) || "read"),
+    });
+  });
+  const val = (id) => {
+    const el = document.getElementById(id);
+    return el ? String(el.value || "").trim() : "";
+  };
+  st.perKind = st.perKind || {};
+  st.perKind.team = {
+    roles,
+    tools: {
+      allow: collabSplitTools(val("collab-tpl-f-tools-allow")),
+      deny: collabSplitTools(val("collab-tpl-f-tools-deny")),
+    },
+  };
+}
+
+/** 切回某个类型时把存下的团队 needs / 工具还原到草稿上（按角色 key 对齐）。 */
+function collabApplyKindMemory(draft) {
+  const st = collabEditorState;
+  const mem = st && st.perKind && st.perKind.team;
+  if (!mem || !draft) return;
+  const byKey = {};
+  (mem.roles || []).forEach((r) => {
+    if (r && r.key) byKey[r.key] = r.needs;
+  });
+  (draft.roles || []).forEach((r) => {
+    if (r && byKey[r.key] && COLLAB_NEEDS_LABELS[byKey[r.key]]) r.needs = byKey[r.key];
+  });
+  const tools = mem.tools || {};
+  st.teamTools = {
+    allow: Array.isArray(tools.allow) ? tools.allow.slice() : [],
+    deny: Array.isArray(tools.deny) ? tools.deny.slice() : [],
+  };
+}
+
+/** 零工具团队的提示块：说明「只能对话」，并给一键挂默认工具与显式保存入口。 */
+function collabShowZeroToolsHint() {
+  const editor = document.getElementById("collab-tpl-editor");
+  const form = document.getElementById("collab-tpl-form");
+  if (!editor || !form) return;
+  let box = document.getElementById("collab-tpl-zerotool");
+  if (!box) {
+    box = document.createElement("div");
+    box.id = "collab-tpl-zerotool";
+    form.parentNode.insertBefore(box, form);
+  }
+  box.innerHTML = "";
+  const text = document.createElement("p");
+  text.className = "dim small";
+  text.textContent = "这支团队还没有挂任何工具：成员只能对话，读不了文件、也跑不了命令。";
+  box.appendChild(text);
+  const ops = document.createElement("div");
+  ops.className = "collab-tpl-ops";
+  const mk = (label, fn) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "btn-ghost";
+    b.textContent = label;
+    b.onclick = fn;
+    ops.appendChild(b);
+  };
+  mk("挂默认只读工具", () => collabAttachDefaultTools("read"));
+  mk("挂默认读写工具", () => collabAttachDefaultTools("write"));
+  mk("仍然保存（只能对话）", () => {
+    collabEditorZeroAck = true;
+    collabSaveTemplate(true);
+  });
+  box.appendChild(ops);
+  box.hidden = false;
+  box.tabIndex = -1; // 校验失败时能把焦点带过来（可聚焦的提示块）
+  return box;
+}
+
+/** 一键挂默认工具：只读档只挂只读工具；读写档把仍全是只读的角色抬到「可写」
+ *  （工具声明要求最高档至少为可写，与保存校验同一口径）。 */
+function collabAttachDefaultTools(level) {
+  const allowEl = document.getElementById("collab-tpl-f-tools-allow");
+  if (allowEl) allowEl.value = COLLAB_DEFAULT_TOOLS[level].join(", ");
+  if (level === "write") {
+    const form = document.getElementById("collab-tpl-form");
+    const rows = form ? [...form.querySelectorAll(".collab-role-row")] : [];
+    let top = "read";
+    rows.forEach((row) => {
+      const sel = row.querySelector(".collab-role-needs");
+      const v = String((sel && sel.value) || "read");
+      if ((COLLAB_NEEDS_ORDER[v] || 0) > (COLLAB_NEEDS_ORDER[top] || 0)) top = v;
+    });
+    if (top === "read") {
+      const target = rows[rows.length - 1];
+      const sel = target && target.querySelector(".collab-role-needs");
+      if (sel) sel.value = "write";
+    }
+  }
+  collabEditorZeroAck = false;
+  const hint = document.getElementById("collab-tpl-zerotool");
+  if (hint) hint.hidden = true;
+  collabEditorStatus(`已挂上默认${level === "write" ? "读写" : "只读"}工具，点「保存模板」生效`);
+}
+
 function collabFillEditorForm(draft, opts = {}) {
   const form = document.getElementById("collab-tpl-form");
   if (!form) return;
   const d = draft || {};
   const kind = COLLAB_KIND_LABELS[d.kind] ? d.kind : "team";
+  if (collabEditorState) collabEditorState.kind = kind;
   const budget = d.budget || {};
   const agg = d.aggregator || {};
   const aggLabel = kind === "team" ? "总管" : kind === "roundtable" ? "融合主席" : "终审裁判";
@@ -529,6 +731,9 @@ function collabFillEditorForm(draft, opts = {}) {
     '<span class="dim small">秒；0 = 不限</span></div>' +
     '<p class="settings-hint collab-tpl-note">模板只能<b>收窄</b>权限：它不能关闭权限确认，' +
     "也不能把删除、引擎主目录写入、工作目录外写入变成免确认。</p>";
+  // 上一次表单里的零工具提示随重画收起（表单内容已换新）
+  const staleHint = document.getElementById("collab-tpl-zerotool");
+  if (staleHint) staleHint.remove();
   const kindSel = form.querySelector("#collab-tpl-f-kind");
   if (kindSel) kindSel.value = kind;
   const rolesBox = form.querySelector("#collab-tpl-roles");
@@ -539,19 +744,50 @@ function collabFillEditorForm(draft, opts = {}) {
     const list = document.getElementById("collab-tpl-roles");
     if (!list) return;
     if (list.querySelectorAll(".collab-role-row").length >= 12) {
-      collabStatus("角色最多 12 个", false);
+      collabEditorStatus("✗ 角色最多 12 个", false);
       return;
     }
     list.appendChild(collabRenderRoleRow({ key: "r" + Date.now().toString(36) }, list.children.length, collabCurrentKind()));
   };
+  // 手改工具输入：零工具确认作废，提示条收起（下次保存再按实际情况重判）
+  ["collab-tpl-f-tools-allow", "collab-tpl-f-tools-deny"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.oninput = () => {
+      collabEditorZeroAck = false;
+      const hint = document.getElementById("collab-tpl-zerotool");
+      if (hint) hint.hidden = true;
+    };
+  });
   if (kindSel && !opts.lockKind) {
     kindSel.onchange = () => {
+      // 先按「切换前」的类型把 needs/工具存起来，再读表单（select 值已变，
+      // 直接读会把团队档位读成只读、把工具读成空）
+      const prevKind = (collabEditorState && collabEditorState.kind) || (COLLAB_KIND_LABELS[d.kind] ? d.kind : "team");
+      collabCaptureKind(prevKind);
+      const prevDraft = collabEditorState && collabEditorState.draft;
       const cur = collabReadEditorForm();
       const draftNext = cur || collabClone(d) || {};
+      // 限额输入随类型换字段：当前类型没有的那几项读不到，沿用切换前的值，
+      // 免得来回切一次就把模板里已存的限额清零
+      const keepLimit = (key, id) => {
+        if (document.getElementById(id)) return;
+        const old = prevDraft && prevDraft.limits ? Number(prevDraft.limits[key]) || 0 : 0;
+        draftNext.limits[key] = cur && cur.limits ? (Number(cur.limits[key]) || old) : old;
+      };
+      draftNext.limits = draftNext.limits || {};
+      keepLimit("max_members", "collab-tpl-f-max-members");
+      keepLimit("member_timeout_s", "collab-tpl-f-member-timeout");
+      keepLimit("debate_rounds", "collab-tpl-f-debate-rounds");
+      keepLimit("max_findings", "collab-tpl-f-max-findings");
+      keepLimit("role_timeout_s", "collab-tpl-f-role-timeout");
       draftNext.kind = kindSel.value;
+      collabEditorZeroAck = false; // 换类型后零工具确认作废，保存时按新类型重判
       if (collabEditorState) {
         collabEditorState.draft = draftNext;
         collabEditorState.teamTools = { allow: [], deny: [] };
+        // 切回团队：按角色 key 恢复 needs 与团队级工具；圆桌/对抗只影响呈现，
+        // 保存时仍由 collabReadEditorForm 收口成只读、无工具
+        collabApplyKindMemory(draftNext);
       }
       collabFillEditorForm(draftNext, { lockKind: false });
     };
@@ -674,22 +910,40 @@ function collabReadEditorForm() {
   };
 }
 
-/** 前端即时校验（中文原文；最终以后端校验为准，两边口径一致）。 */
+/** 前端即时校验（中文原文；最终以后端校验为准，两边口径一致）。
+ *  失败时就地写编辑器头部状态行，并把焦点/滚动带到出错字段。 */
 function collabTemplatePayload() {
   const t = collabReadEditorForm();
   if (!t) return null;
-  const fail = (msg) => { collabStatus("✗ " + msg, false); return null; };
-  if (!t.name) return fail("模板名不能为空");
-  if (t.name.length > 60) return fail("模板名过长（最多 60 字）");
-  if (/[\/\\:]/.test(t.name)) return fail("模板名不能包含路径分隔符（/ 或 \\）或冒号");
+  const form = document.getElementById("collab-tpl-form");
+  const roleRows = form ? [...form.querySelectorAll(".collab-role-row")] : [];
+  const focusEl = (el) => {
+    if (!el) return;
+    try { el.scrollIntoView({ block: "center", behavior: smoothBehavior() }); } catch (e) {}
+    try { el.focus({ preventScroll: true }); } catch (e) {}
+  };
+  const fail = (msg, el) => {
+    collabEditorStatus("✗ " + msg, false);
+    focusEl(el);
+    return null;
+  };
+  const nameEl = document.getElementById("collab-tpl-f-name");
+  const toolsEl = document.getElementById("collab-tpl-f-tools-allow");
+  if (!t.name) return fail("模板名不能为空", nameEl);
+  if (t.name.length > 60) return fail("模板名过长（最多 60 字）", nameEl);
+  if (/[\/\\:]/.test(t.name)) return fail("模板名不能包含路径分隔符（/ 或 \\）或冒号", nameEl);
   if (COLLAB_BUILTIN_NAMES.includes(t.name)) {
-    return fail(`「${t.name}」是内置模板名，请换一个名字再保存（可点「复制」再改名）`);
+    return fail(`「${t.name}」是内置模板名，请换一个名字再保存（可点「复制」再改名）`, nameEl);
   }
-  if (t.roles.length < 1) return fail("至少要有一个角色");
-  if (t.roles.length > 12) return fail("角色最多 12 个");
-  for (const r of t.roles) {
-    if (!r.name) return fail("每个角色都要有名字");
-    if (r.prompt.length > 4000) return fail(`角色「${r.name}」的提示词超过 4000 字`);
+  if (t.roles.length < 1) return fail("至少要有一个角色", document.getElementById("collab-tpl-add-role"));
+  if (t.roles.length > 12) return fail("角色最多 12 个", document.getElementById("collab-tpl-add-role"));
+  for (let i = 0; i < t.roles.length; i++) {
+    const r = t.roles[i];
+    const row = roleRows[i];
+    if (!r.name) return fail(`第 ${i + 1} 个角色还没有名字`, row && row.querySelector(".collab-role-name"));
+    if (r.prompt.length > 4000) {
+      return fail(`角色「${r.name}」的提示词超过 4000 字`, row && row.querySelector(".collab-role-prompt textarea"));
+    }
   }
   if (t.kind === "team") {
     const tools = (collabEditorState && collabEditorState.teamTools) || { allow: [], deny: [] };
@@ -697,20 +951,29 @@ function collabTemplatePayload() {
     for (const r of t.roles) {
       if ((COLLAB_NEEDS_ORDER[r.needs] || 0) > (COLLAB_NEEDS_ORDER[top] || 0)) top = r.needs;
     }
-    if (top === "read" && (tools.allow.length || tools.deny.length)) {
-      return fail("团队的整体权限是只读，不能声明工具：先把某个角色的权限改成「可写」或「可执行」");
+    // 只读团队只能声明只读工具：写/执行工具要求「可写」以上档位
+    const badTool = tools.allow.find((x) => !COLLAB_READONLY_TOOLS.has(String(x).split(":")[0]));
+    if (top === "read" && badTool) {
+      return fail("团队的整体权限是只读，只能声明只读工具；要挂写/执行工具，先把某个角色的权限改成「可写」或「可执行」", toolsEl);
+    }
+    // 反向检查：团队没挂任何工具，成员只能对话——提示并给一键挂默认工具，
+    // 或显式点「仍然保存（只能对话）」再走校验
+    if (!tools.allow.length && !tools.deny.length && !collabEditorZeroAck) {
+      const hint = collabShowZeroToolsHint();
+      return fail("这支团队没有挂任何工具：成员只能对话（读不了文件、跑不了命令）。点上面的按钮挂默认工具，或选「仍然保存（只能对话）」", hint);
     }
     // 只对「允许」拦裸 run_command：deny 里写 run_command 是合法语义（整个工具禁用），
     // 后端 _normalize_tool_list 对 deny 也允许裸名
     const bare = tools.allow.find((x) => x === "run_command");
     if (bare) {
-      return fail("允许的工具里 run_command 必须写成 run_command:命令前缀（例如 run_command:git status），不能整个工具放行");
+      return fail("允许的工具里 run_command 必须写成 run_command:命令前缀（例如 run_command:git status），不能整个工具放行", toolsEl);
     }
   }
   return t;
 }
 
-async function collabSaveTemplate() {
+async function collabSaveTemplate(force) {
+  if (force) collabEditorZeroAck = true;
   const t = collabTemplatePayload();
   if (!t) return;
   const btn = document.getElementById("collab-tpl-save");
@@ -721,7 +984,8 @@ async function collabSaveTemplate() {
     // 团队模板可能回 teams.json 形状（members/persona）：统一转回协作模板形状再回填
     if (saved && !Array.isArray(saved.roles)) saved = collabTemplateFromTeam(saved);
     const warns = Array.isArray(r.warnings) ? r.warnings : [];
-    if (warns.length) collabStatus("保存时有提醒：" + warns.join("；"), false);
+    if (warns.length) collabEditorStatus("✓ 已保存（有提醒：" + warns.join("；") + "）", false);
+    else collabEditorStatus("✓ 已保存", true);
     await renderCollabTemplates();
     if (collabEditorState) {
       collabEditorState.draft = collabClone(saved);
@@ -729,12 +993,14 @@ async function collabSaveTemplate() {
       collabEditorState.builtin = false;
       collabEditorState.isNew = false;
       collabEditorState.teamTools = { allow: [], deny: [] };
+      collabEditorState.perKind = {};
     }
     const title = document.getElementById("collab-tpl-editor-title");
     if (title) title.textContent = "编辑模板";
     collabFillEditorForm(saved, { lockKind: true });
+    if (collabEditorState) collabEditorState.baseline = collabDraftSignature(collabReadEditorForm());
   } catch (e) {
-    collabStatus("✗ 保存失败：" + e.message, false);
+    collabEditorStatus("✗ 保存失败：" + e.message, false);
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -751,7 +1017,8 @@ async function collabRemoveTemplate(name, source) {
     await request("collab.template_remove", source ? { name: label, source } : { name: label });
     collabStatus();
     if (collabEditorState && collabEditorState.draft && collabEditorState.draft.name === label) {
-      collabCloseEditor();
+      // 模板已经删掉了：不再问「未保存改动」，直接收起
+      collabCloseEditor(true);
     }
     await renderCollabTemplates();
   } catch (e) {
@@ -918,7 +1185,7 @@ function collabPreviewHtml(pv) {
       : '<p class="dim small">命令前缀：无（本次不授权运行任何命令）</p>') +
     (toolRows
       ? `<table class="collab-preview-table"><thead><tr><th>工具</th><th>本次</th><th>说明</th></tr></thead><tbody>${toolRows}</tbody></table>`
-      : '<p class="dim small">工具：无（本次不挂任何工具）。</p>') +
+      : '<p class="dim small">模板没有声明工具：本次成员只对话，不读写文件、不执行命令（照常可以开始）。</p>') +
     (always.length
       ? `<p class="dim small">始终逐次确认：${always.map((x) => `<code>${escapeHtml(String(x))}</code>`).join("、")}</p>`
       : "") +

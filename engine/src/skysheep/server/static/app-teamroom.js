@@ -235,6 +235,15 @@ function trSyncSideBadge() {
     el.className = cls + (n ? "" : " hidden");
     el.textContent = n ? String(n) : "";
   });
+  // 角标含义写进悬停提示：n 是「常驻登记 ∪ 本会话进行中」，不只指本会话——
+  // 切到没有进行中协作的会话仍可能看到数字，先在这里说清楚
+  const title = n
+    ? `协作：${n} 支团队在场（常驻登记的团队 + 本会话进行中的团队）`
+    : "协作：频道、工单板与成员分区";
+  const nav = document.getElementById("nav-team");
+  if (nav) nav.title = title;
+  const rail = document.getElementById("rail-team");
+  if (rail) rail.title = title;
 }
 
 // 五团队事件同源喂角标（trRoomFeed 入口转发，与团队卡/页签同一事件流）：
@@ -409,6 +418,13 @@ function trRenderEmpty(root, opts) {
   status.appendChild(tcEl("div", "tr-empty-title", "本会话没有进行中的协作"));
   status.appendChild(tcEl("p", "dim small tr-empty-hint",
     "选一个模板开始；团队模板会在这里展开频道与工单板。"));
+  // 角标与空态说同一件事：本会话没有进行中的协作，但侧栏角标计的是
+  // 常驻登记 ∪ 本会话进行中——把「另有 N 支常驻团队」说清楚，数字才有解释
+  const residentN = trSideBadgeCount();
+  if (residentN) {
+    status.appendChild(tcEl("p", "dim small tr-empty-resident",
+      `另有 ${residentN} 支常驻团队（跨会话保留在侧栏「协作」里，角标计的就是它们 + 本会话进行中的团队）。`));
+  }
   root.appendChild(status);
 
   trRenderQuickStart(root);
@@ -445,23 +461,41 @@ function trRenderQuickStart(root) {
     return;
   }
   const selected = activeTab ? String(activeTab.template || "") : "";
-  const grid = tcEl("div", "tr-tpl-grid");
-  for (const t of list.slice(0, 6)) {
-    const kind = (typeof COLLAB_KIND_LABELS === "object" && COLLAB_KIND_LABELS[t.kind]) || String(t.kind || "");
-    const needs = (typeof collabTplNeeds === "function") ? collabTplNeeds(t) : "read";
-    const needsLabel = (typeof COLLAB_NEEDS_LABELS === "object" && COLLAB_NEEDS_LABELS[needs]) || needs;
-    const b = tcEl("button", "tr-tpl-card" + (selected === t.name ? " active" : ""));
-    b.innerHTML = `<span class="tr-tpl-name">${escapeHtml(String(t.name || ""))}</span>` +
-      `<span class="tr-tpl-meta">${escapeHtml(kind)} · ${escapeHtml(needsLabel)}</span>`;
-    b.title = `使用模板「${t.name}」：已选到输入框，写下任务发送即可`;
-    b.onclick = () => {
-      if (typeof collabApplyTemplate === "function") collabApplyTemplate(t);
-      const input = document.getElementById("input");
-      if (input) input.focus();
-    };
-    grid.appendChild(b);
+  // 团队室的快速开始只摆团队模板：圆桌 / 对抗模板在这里点开也不会展开频道，
+  // 统一收进对话输入框的「协作」菜单，「查看全部」给入口
+  const teamList = list.filter((t) => t && t.kind === "team");
+  if (teamList.length) {
+    const grid = tcEl("div", "tr-tpl-grid");
+    for (const t of teamList.slice(0, 6)) {
+      const kind = (typeof COLLAB_KIND_LABELS === "object" && COLLAB_KIND_LABELS[t.kind]) || String(t.kind || "");
+      const needs = (typeof collabTplNeeds === "function") ? collabTplNeeds(t) : "read";
+      const needsLabel = (typeof COLLAB_NEEDS_LABELS === "object" && COLLAB_NEEDS_LABELS[needs]) || needs;
+      const b = tcEl("button", "tr-tpl-card" + (selected === t.name ? " active" : ""));
+      b.innerHTML = `<span class="tr-tpl-name">${escapeHtml(String(t.name || ""))}</span>` +
+        `<span class="tr-tpl-meta">${escapeHtml(kind)} · ${escapeHtml(needsLabel)}</span>`;
+      b.title = `使用模板「${t.name}」：已选到输入框，写下任务发送即可`;
+      b.onclick = () => {
+        if (typeof collabApplyTemplate === "function") collabApplyTemplate(t);
+        const input = document.getElementById("input");
+        if (input) input.focus();
+      };
+      grid.appendChild(b);
+    }
+    block.appendChild(grid);
+  } else {
+    block.appendChild(tcEl("div", "dim small",
+      "还没有团队模板；圆桌 / 对抗模板在对话输入框的「协作」菜单里直接选。"));
   }
-  block.appendChild(grid);
+  if (teamList.length > 6 || teamList.length !== list.length) {
+    const more = tcEl("button", "rp-mini tr-tpl-more", `查看全部（${list.length}）`);
+    more.title = "打开对话输入框的「协作」菜单，按圆桌 / 团队 / 对抗分组选模板";
+    more.onclick = (ev) => {
+      // showCoopMenu 要 stopPropagation（否则同一次点击冒泡到 document 立刻关菜单）
+      if (typeof showCoopMenu === "function") showCoopMenu(ev);
+      else if (typeof openSettings === "function") openSettings("collab");
+    };
+    block.appendChild(more);
+  }
   root.appendChild(block);
 }
 

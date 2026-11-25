@@ -25,6 +25,14 @@ pytestmark = [pytest.mark.acceptance, pytest.mark.e2e, pytest.mark.slow]
 
 @contextlib.asynccontextmanager
 async def browser_page(base_url: str, **viewport):
+    # live_server 给的是 ws://host:port/ws（那是给 WS 客户端用的）；浏览器要的是
+    # 同一个服务的 http 根地址。此前直接把 ws:// 交给 page.goto，Chromium 报
+    # ERR_UNKNOWN_URL_SCHEME——这组用例一直没在装过 playwright 的环境里跑，所以
+    # 没被发现（CI 的 browser job 只跑 tests/test_browser_ui.py 与 test_relay_browser.py）。
+    url = base_url
+    if url.startswith("ws://") or url.startswith("wss://"):
+        url = url.replace("ws://", "http://", 1).replace("wss://", "https://", 1)
+        url = url.rsplit("/ws", 1)[0]
     async with async_playwright() as pw:
         try:
             browser = await pw.chromium.launch()
@@ -33,7 +41,7 @@ async def browser_page(base_url: str, **viewport):
                 f"Chromium 不可用（先跑 playwright install chromium）：{e}"
             ) from e
         page = await browser.new_page(viewport=viewport or {"width": 1280, "height": 800})
-        await page.goto(base_url, wait_until="domcontentloaded")
+        await page.goto(url, wait_until="domcontentloaded")
         try:
             yield page
         finally:

@@ -488,14 +488,20 @@ function importMcpModal(prefill = "") {
       ))) return;
       r = await request("mcp.import", { ...baseParams, confirmed: true });
     }
+    // 一个都没导入：多半是同名服务已存在。原先这里只写状态行就关窗，粘贴的内容
+    // 全丢、还得从头再粘一遍。现在留在弹窗里报错，顺手勾上「覆盖同名服务」——
+    // 再点一次「导入」就完成替换（showModal 收到 throw 会显示行内错误、不关窗）
+    if (!r.added.length) {
+      const who = (r.skipped || []).join("、");
+      if (!who) throw new Error("没有导入任何服务：检查粘贴的配置里是否带了 name 字段。");
+      const ow = box.querySelector('input[data-f="overwrite"]');
+      if (ow) ow.checked = true;
+      throw new Error(`没有新增：${who} 已存在。已勾选「覆盖同名服务」，再点一次「导入」即可替换。`);
+    }
     await renderSettings();
     boot();
-    const where = r.scope === "project" ? "本项目" : "全局";
-    if (r.added.length) {
-      const bad = (r.mcp_warnings || []).length;
-      if (bad) mcpStatus("有服务没连上，详情见列表里的红色提示", false);
-    } else {
-      mcpStatus(`没有新增：${r.skipped.join("、")} 已存在。勾选「覆盖同名服务」再试即可替换。`, false);
+    if ((r.mcp_warnings || []).length) {
+      mcpStatus("有服务没连上，详情见列表里的红色提示", false);
     }
   }, "导入");
 }
@@ -526,16 +532,16 @@ function addMcpModal() {
       <label>服务名（英文标识）
         <input data-f="name" placeholder="fetch" autocomplete="off">
       </label>
-      <label class="wide">启动命令 command（本地服务填这个）
+      <label class="wide" data-row="command">启动命令 command（本地服务填这个）
         <input data-f="command" placeholder="uvx" autocomplete="off">
       </label>
-      <label class="wide">命令参数 args（每行一个）
+      <label class="wide" data-row="args">命令参数 args（每行一个）
         <textarea data-f="args" rows="3" placeholder="mcp-server-fetch"></textarea>
       </label>
-      <label class="wide">服务地址 url（远程服务填这个）
+      <label class="wide" data-row="url">服务地址 url（远程服务填这个）
         <input data-f="url" placeholder="http://localhost:8000/mcp" autocomplete="off">
       </label>
-      <label class="wide">请求头 headers（仅远程服务；每行一个 <code>名称: 值</code>）
+      <label class="wide" data-row="headers">请求头 headers（仅远程服务；每行一个 <code>名称: 值</code>）
         <textarea data-f="headers" rows="3" placeholder="Authorization: Bearer xxxxx"></textarea>
       </label>
       <label>单次调用超时（秒，留空默认 120）
@@ -553,10 +559,39 @@ function addMcpModal() {
       <p class="dim small" style="margin:4px 0 0">远程服务的 token（如 Bearer）过期时会报「鉴权失败」：回到这里更新 headers 重新保存即可。详见 docs/mcp-远程服务鉴权.md。</p>
       <div class="form-status"></div>
     </div>`;
+  const val = (f) => box.querySelector(`[data-f="${f}"]`).value.trim();
+  // 按已填内容分栏：本地命令只露「命令 + 参数」，远程只露「地址 + 请求头」。
+  // 四个框同时摆着时，用户会把请求头填在本地命令上——后端只对 url 服务写 headers，
+  // 于是静默丢掉。两个都填 = 四格全露，保存时拦下让二选一
+  const showRow = (k, on) => {
+    const el = box.querySelector(`[data-row="${k}"]`);
+    if (el) el.hidden = !on;
+  };
+  const syncIoRows = () => {
+    const hasCmd = !!val("command") || !!val("args");
+    const hasUrl = !!val("url") || !!val("headers");
+    const hideCmd = hasUrl && !hasCmd; // 只填了远程 → 收起本地那两格
+    const hideUrl = hasCmd && !hasUrl; // 只填了本地 → 收起远程那两格
+    showRow("command", !hideCmd);
+    showRow("args", !hideCmd);
+    showRow("url", !hideUrl);
+    showRow("headers", !hideUrl);
+  };
+  ["command", "args", "url", "headers"].forEach((f) => {
+    box.querySelector(`[data-f="${f}"]`).addEventListener("input", syncIoRows);
+  });
+  syncIoRows();
   showModal("手动添加 MCP 服务", box, async () => {
-    const val = (f) => box.querySelector(`[data-f="${f}"]`).value.trim();
     const args = val("args").split(/\n+/).map((s) => s.trim()).filter(Boolean);
     const headers = parseHeaderLines(val("headers"));
+    // 命令与地址二选一：两者都填时后端只会用上其中一个，另一个静默丢，先在这里拦住
+    if (val("command") && val("url")) {
+      throw new Error("本机命令和服务地址只能填一个：本地服务填「启动命令」，远程服务填「服务地址」。");
+    }
+    // 请求头只对 url 服务生效（后端不会给 stdio 服务写 headers），别让它白填
+    if (!val("url") && Object.keys(headers).length) {
+      throw new Error("请求头只对远程服务有效：请先填「服务地址」，或清空请求头。");
+    }
     const timeoutNum = Number(val("timeout"));
     const r = await request("mcp.save_server", {
       name: val("name"),
@@ -591,6 +626,7 @@ function deleteMcpModal(name) {
 // ---------- 设置  技能页：列表与使用范围 ----------
 let skillProjects = [];     // 最近一次拉取到的项目列表（范围勾选用）
 let skillManageOpen = false; // 是否停在独立技能页
+let skillFocusPending = null; // 点开关时先记下的焦点行（按钮一禁用焦点就掉到 body，画完再放回）
 
 // 路径归一化：与后端 normcase 对齐（Windows 大小写不敏感）
 function normPathJs(p) {
@@ -618,7 +654,7 @@ function openSkillManage() {
   document.getElementById("skill-list-view").hidden = !inPanel;
   document.getElementById("skill-manage-view").hidden = false;
   if (inPanel) {
-    document.getElementById("skill-manage-view").scrollIntoView({ block: "nearest", behavior: "smooth" });
+    document.getElementById("skill-manage-view").scrollIntoView({ block: "nearest", behavior: smoothBehavior() });
   }
   // 范围勾选需要项目列表（切项目后路径会变，每次都重新拉）
   request("project.list")
@@ -738,9 +774,47 @@ function renderScopePicker(li, s) {
   return panel;
 }
 
+// 列表重画后的「回到原处」：记下滚动位置与焦点所在的行的名字，重画后放回去。
+// 技能 / Mod 一多，点第 20 个的开关会让整表重画——不记就跳回顶部、焦点掉到 body，
+// 手要重新找回去。按「行名 + 控件类名」定位，不依赖重画后是不是同一个节点。
+function captureListFocus(container) {
+  const el = document.activeElement;
+  if (!el || !container || !container.contains(el)) return null;
+  const row = el.closest("li");
+  if (!row) return null;
+  const name = listRowName(row);
+  if (!name) return null;
+  const cls = ["skill-pick", "skill-name", "skill-toggle", "mod-enabled"]
+    .find((c) => el.classList.contains(c));
+  if (!cls) return null;
+  return { name, cls };
+}
+
+function listRowName(row) {
+  if (row.dataset && row.dataset.name) return row.dataset.name;
+  const named = row.querySelector("[data-name]");
+  return named ? named.dataset.name || "" : "";
+}
+
+function restoreListFocus(container, focus, scrollTop) {
+  if (!container) return;
+  if (scrollTop) container.scrollTop = scrollTop;
+  if (!focus) return;
+  const row = [...container.querySelectorAll("li")]
+    .find((li) => listRowName(li) === focus.name);
+  if (!row) return;
+  const target = row.querySelector("." + focus.cls);
+  // preventScroll：焦点一进来会把行滚进视野，别把刚恢复的滚动位置又抢走
+  if (target) target.focus({ preventScroll: true });
+}
+
 function renderSkillList(skills) {
   const sul = document.getElementById("settings-skill-list");
   if (!sul) return;
+  // 重画前记下滚动位置与焦点行（点开关会整表重画）
+  const keepScroll = sul.scrollTop;
+  const keepFocus = skillFocusPending || captureListFocus(sul);
+  skillFocusPending = null;
   sul.innerHTML = "";
   // 空态要给出路：技能页是「从零开始」的常见落点，只留空白会让人以为加载失败
   if (!skills.length) {
@@ -851,6 +925,8 @@ function renderSkillList(skills) {
       toggle.textContent = s.enabled ? "🟢 已启用" : "⚪ 已停用";
       toggle.title = "只影响当前项目";
       toggle.onclick = async () => {
+        // 按钮一禁用浏览器就把焦点丢给 body：先记下这一行，等 renderSkillList 画完放回去
+        skillFocusPending = captureListFocus(sul);
         toggle.disabled = true;
         try {
           await request("skills.toggle", { name: s.name, enabled: !s.enabled });
@@ -858,6 +934,7 @@ function renderSkillList(skills) {
           toggle.disabled = false;
           toggle.textContent = "✗ 切换失败";
           toggle.title = e.message;
+          skillFocusPending = null; // 这一轮不重画，别把记号留给下一次无关的渲染
           return;
         }
         boot();
@@ -888,4 +965,5 @@ function renderSkillList(skills) {
   if (syncPicks) syncPicks(); // 提示行（面板里带计数前缀）首 render 就要就位，不等第一次勾选
   if (!skills.length)
     sul.innerHTML = '<li class="empty-hint">还没有技能：点右上角「＋ 导入技能」选文件夹 / 粘贴链接，或点「本机现存」查看本机已装的技能</li>';
+  restoreListFocus(sul, keepFocus, keepScroll);
 }

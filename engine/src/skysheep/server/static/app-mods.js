@@ -220,10 +220,15 @@ function renderModsList(mods) {
     ul.innerHTML = '<li class="dim small">还没有安装任何 Mod。装官方示例试试，或点右上角「＋ 安装 Mod」。</li>';
     return;
   }
+  // 重画前记下滚动位置与焦点行：拨某个 Mod 的启用勾会引起整表重画，
+  // 不记就跳回顶部、焦点掉到 body（捕获/恢复在 app-skills.js，两处列表共用）
+  const keepScroll = ul.scrollTop;
+  const keepFocus = captureListFocus(ul);
   ul.innerHTML = "";
   mods.forEach((m) => {
     const li = document.createElement("li");
     li.className = "mod-row";
+    li.dataset.name = m.name || ""; // 重画后按名字把焦点放回同一行
     const hooks = (m.hooks || []).map((h) => MOD_HOOK_LABELS[h] || h).join(" / ");
     const decl = [];
     if (m.declarative && (m.declarative.deny_tools || []).length) {
@@ -283,6 +288,7 @@ function renderModsList(mods) {
     };
     ul.appendChild(li);
   });
+  restoreListFocus(ul, keepFocus, keepScroll);
 }
 
 async function showModDetail(modId) {

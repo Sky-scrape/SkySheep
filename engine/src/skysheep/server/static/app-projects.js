@@ -122,11 +122,15 @@ function resetWorkspaceState() {
   usageOut = 0;
   renderUsage();
   setContextUsage(0, 0);
-  document.getElementById("btn-send").textContent = "发送";
+  // 文案只写 .send-txt（与 app.js 的 setRunning 同一写法）：整按钮 textContent
+  // 会把常驻的纸飞机图标一起清掉，挤压档只剩「发送」两字挤在 34px 的图标按钮里
+  const sendBtn = document.getElementById("btn-send");
+  (sendBtn.querySelector(".send-txt") || sendBtn).textContent = "发送";
   document.getElementById("btn-stop").hidden = true;
 
   // —— 会话列表与搜索 ——
   sessionSearchActive = false;
+  sessionSearchSeq += 1; // 切项目前发出的搜索响应晚到时作废：不能画到新项目的侧栏上
   classicViewGk = null; // 旧项目“正在看快聊”的状态随切项目作废
   groupedClickGk = null; // 分组视图「点组头」的落点也按旧项目作废
   searchEl.value = "";
@@ -277,15 +281,17 @@ async function refreshProjects(prefetched) {
       rerender: () => refreshProjects(),
     });
     li.dataset.pid = p.id; // commitProjectOrder 从 DOM 收集当前序
-    // 移除按钮：当前项目也能删（清空会话与记录后用同一目录重置重新开始）；
-    // 远程连接同样可移除——渠道再用时会自动重建，不丢自动恢复能力
+    // 彻底删除按钮：当前项目也能删（会话与记录一起清掉，删完切到其他项目）；
+    // 远程连接同样可删——渠道再用时会自动重建，不丢自动恢复能力
     {
       const del = document.createElement("button");
       del.className = "p-del";
       del.textContent = "✕";
       del.title = remote
-        ? "从列表中移除「远程连接」（其中的渠道对话会一并删除；渠道再用时自动重建）"
-        : p.is_current ? "重置这个项目（清空会话与记录）" : "从列表中移除这个项目";
+        ? "彻底删除「远程连接」（含其中的渠道对话，不可恢复；渠道再用时会自动重建）"
+        : p.is_current
+          ? "彻底删除当前项目（含它的全部会话，不可恢复）"
+          : "彻底删除这个项目（含它的全部会话，不可恢复）";
       del.onclick = (e) => {
         e.stopPropagation();
         deleteProjectModal(p);
@@ -345,6 +351,27 @@ async function refreshProjects(prefetched) {
     ul.appendChild(li);
   });
   placeQuickRow();
+  // 各项目的会话数（✕ 的悬停提示要说清「会删掉几条」）：列表先画完，数字回来再
+  // 补进对应行的 title，不挡渲染；远程端拿不到跨项目数据，提示保持不带数字的说法
+  if (classicQuickAvailable) refreshProjectSessionCounts(ul);
+}
+
+/** 项目列表画完后补 ✕ 的会话数（refreshProjects 调用）：project.list 不带计数，
+    这里取一次 project.admin_list（与 project.delete 同一口径、同为本机专属），
+    把「含 N 个会话」写进各行的删除提示。取不到就保持不带数字的说法。 */
+async function refreshProjectSessionCounts(ul) {
+  const r = await request("project.admin_list").catch(() => null);
+  if (!r || !ul || !ul.isConnected) return;
+  const counts = new Map(
+    (r.projects || []).concat(r.removed || []).map((p) => [String(p.id), p.session_count || 0]),
+  );
+  ul.querySelectorAll("li[data-pid]").forEach((li) => {
+    if (li.classList.contains("remote-fixed")) return; // 远程连接有自己的提示口径
+    const n = counts.get(String(li.dataset.pid));
+    const del = li.querySelector(".p-del");
+    if (n == null || !del) return;
+    del.title = `彻底删除这个项目（含 ${n} 个会话，不可恢复；文件夹保留在电脑上）`;
+  });
 }
 
 /** 项目区「快聊」行的可用性探测：本机桌面端才拿得到跨项目会话列表，远程端
@@ -405,19 +432,31 @@ function buildQuickRow(ul) {
   ul.appendChild(li);
 }
 
-// 删除项目：确认后连带删掉它的会话与白名单（磁盘文件夹不动）
-function deleteProjectModal(p) {
+// 删除项目：彻底删除——确认后连带删掉它的会话、白名单与任务（磁盘文件夹不动）。
+// 侧栏的 ✕ 是「彻底删除」，与设置页里可恢复的「移除」（project.remove）不是
+// 同一件事——两边用词必须分开，否则用户以为删掉的会话还能在「已移除的项目」里找回。
+async function deleteProjectModal(p) {
+  // 会话数以点开确认框这一刻为准（project.admin_list 与 project.delete 同一口径、
+  // 同为本机专属；project.list 不带计数，列表渲染时缓存的数字可能已经过期）。
+  // 断线时不发请求、直接用「全部会话」的说法，别让确认框卡在等连接上
+  const admin = wsConnOn ? await request("project.admin_list").catch(() => null) : null;
+  const hit = admin
+    ? ((admin.projects || []).concat(admin.removed || [])).find((x) => x.id === p.id)
+    : null;
+  const countText = hit && hit.session_count != null ? `${hit.session_count} 个会话` : "全部会话";
   const box = document.createElement("div");
   const cur = !!p.is_current;
   box.innerHTML =
-    `<p>确定从列表中移除项目 <b>${escapeHtml(p.name)}</b> 吗？</p>` +
+    `<p>确定彻底删除项目 <b>${escapeHtml(p.name)}</b> 吗？</p>` +
     (cur
-      ? `<p class="dim small">这是<b>当前正在使用的项目</b>：它的全部会话、白名单与事项会被删除，` +
+      ? `<p class="dim small">这是<b>当前正在使用的项目</b>：它的 <b>${countText}</b>、白名单与事项会被删除，` +
         `然后切换到其他项目（没有其他项目就进入快聊）。</p>`
-      : `<p class="dim small">该项目下的<b>会话记录与白名单会一并删除</b>；电脑上的文件夹和文件` +
-        `<b>不受影响</b>，以后随时可以重新添加回来。</p>`) +
+      : `<p class="dim small">该项目下的 <b>${countText}</b>、白名单规则与任务会一并删除；` +
+        `电脑上的文件夹和文件<b>不受影响</b>。</p>`) +
+    `<p class="dim small">删除后<b>不可恢复</b>；只想从列表里拿掉并保留会话，` +
+    `请用「设置 → 项目」里的「移除」。</p>` +
     `<span class="mono-path">${escapeHtml(p.root_path)}</span>`;
-  showModal("删除项目", box, async () => {
+  showModal("彻底删除项目", box, async () => {
     const r = await request("project.delete", { id: p.id });
     await applyWorkspaceData(await fetchWorkspaceData());
     if (r.switched_to) {
@@ -425,7 +464,7 @@ function deleteProjectModal(p) {
     } else {
       addNotice("文件夹仍保留在电脑上，当前处于快聊。");
     }
-  }, "移除");
+  }, "彻底删除项目");
 }
 
 // ---------- 设置·项目：全局管理（软移除 / 恢复 / 闲置复核） ----------

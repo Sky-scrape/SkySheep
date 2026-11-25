@@ -1689,7 +1689,9 @@ def test_process_timeline_rows_are_chronological():
     assert "function buildProcBox(folded)" in js
     assert "const box = buildProcBox(true);" in js
     assert "box.classList.add(\"folded\");" in js
-    assert ".proc-box.folded .proc-box-body { display: none; }" in css
+    # 折叠意图不变（folded 时正文收起），机制改为可过渡的 grid 0fr↔1fr
+    assert ".proc-box.folded .proc-box-body {" in css
+    assert "grid-template-rows: 0fr; grid-auto-rows: 0fr; row-gap: 0; padding-bottom: 0;" in css
     # 工具行有图标 + 中文动作名（读起来像一条操作时间线）
     assert 'run_command: { ico: "▣", label: "终端"' in js
     assert 'write_file: { ico: "✎", label: "编辑"' in js

@@ -7,6 +7,7 @@
 
 let relayDual = null;          // 最近一次快照 {pair|null, turns, main, peer, defaults}
 let relayDualPairId = null;    // 当前接力的 pair id（没有则为 null）
+let relayDualFilledPairId = null; // 已把 pair 的任务输入回填到界面上的那次 pair id
 let relayDualOpenFor = null;   // 这份快照属于哪个主屏会话
 let relayDualBusy = false;     // 控制请求在飞（防连点）
 let relayDualPerm = null;      // 某一屏在等权限确认 {side,sessionId,toolName,requestId} | null
@@ -16,6 +17,7 @@ let relayDualLoading = null;   // 正在进行的 dual_open（并发入口合流
 let relayDualSeq = 0;
 let relayTurnOpen = new Set(); // 展开了「详细内容」的轮次号（重渲染后保持）
 let relayTurnOpenPair = null;  // 上面那组展开状态属于哪个 pair
+let relayTurnsSig = "";        // 上一次画出的轮次签名（状态帧不变就不重建 DOM）
 
 const RELAY_SIDE_LABEL = { main: "主屏", peer: "副屏" };
 const RELAY_STATE_LABEL = {
@@ -135,17 +137,23 @@ async function relayOpenWithPeer() {
   if (data && data.peer) await relayDualShowPeer(data.peer);
 }
 
-function relayDualFillInputs() {
+function relayDualFillInputs(force) {
   const pair = relayPair();
   const apply = (id, value) => {
     const el = relayEl(id);
     if (!el || document.activeElement === el) return; // 正在输入时不抢
     el.value = value || "";
   };
-  apply("relay-goal", pair ? pair.goal : "");
-  apply("relay-main-task", pair ? pair.main_task : "");
-  apply("relay-peer-task", pair ? pair.peer_task : "");
-  apply("relay-next-note", relayDual ? relayDual.next_note : "");
+  // 任务三格只在「换了 pair」或显式 force 时回填：切页签重画、状态帧重画
+  // 不能把用户刚填的草稿写成库里的旧值；没有 pair 时更不写空串
+  if (pair && (force || relayDualFilledPairId !== relayDualPairId)) {
+    apply("relay-goal", pair.goal);
+    apply("relay-main-task", pair.main_task);
+    apply("relay-peer-task", pair.peer_task);
+  }
+  relayDualFilledPairId = pair ? relayDualPairId : null;
+  // 附言是另一条生命周期：后端消费后会广播空串，有 pair 时才随帧回填
+  if (pair) apply("relay-next-note", relayDual ? relayDual.next_note : "");
   const auto = relayEl("relay-auto-alternate");
   if (auto && document.activeElement !== auto) {
     auto.checked = !!(pair && pair.auto_alternate);
@@ -192,13 +200,33 @@ function relayDualRenderTurns() {
   const box = relayEl("relay-turn-list");
   const count = relayEl("relay-turn-count");
   if (!box) return;
-  while (box.firstChild) box.removeChild(box.firstChild);
   const turns = (relayDual && relayDual.turns) || [];
   const pid = relayDual && relayDual.pair ? relayDual.pair.id : "";
   if (relayTurnOpenPair !== pid) {
     relayTurnOpenPair = pid;
     relayTurnOpen.clear();
+    relayTurnsSig = "";
   }
+  // 高频状态帧：轮次内容没变就只更新计数，不重建 DOM（阅读位置原样不动）
+  const sig = turns.map((t) => [
+    t.turn_no, t.status, String(t.output || "").length,
+    t.verify_state || "", Number(t.verify_attempts || 0), String(t.error || "").length,
+  ].join(":")).join("|");
+  if (sig === relayTurnsSig && box.childElementCount) {
+    if (count) count.textContent = turns.length ? `共 ${turns.length} 轮` : "";
+    return;
+  }
+  relayTurnsSig = sig;
+  // 重画前记住阅读位置：列表本身与各轮「详细内容」的内滚都在重画后恢复，
+  // 下一轮开始时不会把正在读的那一轮拽回顶部
+  const prevScroll = box.scrollTop;
+  const fullScrolls = {};
+  box.querySelectorAll(".relay-turn").forEach((row) => {
+    const no = row.dataset.turnNo;
+    const full = row.querySelector(".relay-turn-full");
+    if (no && full && full.scrollTop) fullScrolls[no] = full.scrollTop;
+  });
+  while (box.firstChild) box.removeChild(box.firstChild);
   if (count) count.textContent = turns.length ? `共 ${turns.length} 轮` : "";
   if (!turns.length) {
     const p = document.createElement("p");
@@ -211,6 +239,7 @@ function relayDualRenderTurns() {
     const row = document.createElement("div");
     row.className = "relay-turn" + (turn.status === "running" ? " running" : "")
       + (turn.status === "error" ? " failed" : "");
+    row.dataset.turnNo = String(turn.turn_no);
     const head = document.createElement("div");
     head.className = "relay-turn-head";
     const no = document.createElement("b");
@@ -265,6 +294,12 @@ function relayDualRenderTurns() {
       row.appendChild(det);
     }
     box.appendChild(row);
+  });
+  // 恢复阅读位置（内容还在则精确还原；内容变短时浏览器自动夹到可滚范围）
+  if (prevScroll) box.scrollTop = prevScroll;
+  Object.keys(fullScrolls).forEach((no) => {
+    const full = box.querySelector(`.relay-turn[data-turn-no="${no}"] .relay-turn-full`);
+    if (full) full.scrollTop = fullScrolls[no];
   });
 }
 
@@ -582,6 +617,8 @@ function relayOnReconnect() {
 function relayResetForProject() {
   relayDual = null;
   relayDualPairId = null;
+  relayDualFilledPairId = null;
+  relayTurnsSig = "";
   relayDualOpenFor = null;
   relayDualRender();
 }

@@ -122,7 +122,7 @@ function renderTabs() {
   });
   bound.forEach((t) => { if (!seen.has(t.sid)) ordered.push(t); });
   ordered.push(...blanks);
-  ordered.forEach((t) => {
+  ordered.forEach((t, i) => {
     const el = document.createElement("div");
     el.className = "chat-tab" + (t === activeTab ? " active" : "") +
       (t.running ? " running" : "") + (t.needsPerm ? " needs-perm" : "");
@@ -130,7 +130,10 @@ function renderTabs() {
     el.setAttribute("aria-selected", t === activeTab ? "true" : "false");
     el.tabIndex = t === activeTab ? 0 : -1; // roving tabindex：只有当前标签在 Tab 链上
     const title = t.title || (t.sid ? (sessionMeta[t.sid] || {}).title || "会话" : "新会话");
-    el.innerHTML = `<span class="tab-title">${escapeHtml(title)}</span>` +
+    // 序号只在窄屏（CSS ≤520px）露出来：手机上标题截得只剩两三个字、又没有
+    // 悬停提示，同一句话开出来的几个会话标题本来就一样——序号是唯一的区分手段
+    el.innerHTML = `<span class="tab-idx" aria-hidden="true">${i + 1}</span>` +
+      `<span class="tab-title">${escapeHtml(title)}</span>` +
       (t.running ? '<span class="tab-dot" title="运行中"></span>' : "") +
       (t.needsPerm ? '<span class="tab-perm" title="等待你确认">🔒</span>' : "") +
       `<button class="tab-close" title="关闭标签${t.running ? "（运行中的会话会一并停止）" : ""}">✕</button>`;
@@ -557,7 +560,12 @@ function addUser(text, images, refs) {
       img.classList.add("img-pending");
       lazyImgObserve(img);
     }
-    img.onclick = () => { if (img.src) window.open(img.src, "_blank"); };
+    // 与工具截图同一套页内放大：点一下原地展开、再点收回，不顶层导航 data URL
+    // （历史占位图还没拉回真身时没什么可放大，点了保持无反应）
+    img.onclick = () => {
+      if (!img.src || img.classList.contains("img-pending")) return;
+      img.classList.toggle("zoom");
+    };
     bubble.appendChild(img);
   });
   if (refs && refs.length) {
@@ -596,11 +604,12 @@ function beginAssistant() {
 }
 
 // ---------- 流式增量渲染 ----------
-// 流式期间每 80ms 的重渲只对「未定稿尾块」做：已定稿前缀按段落（空行）切块，
+// 流式期间每 180ms 的重渲只对「未定稿尾块」做：已定稿前缀按段落（空行）切块，
 // 且要求块内 ``` 围栏配对，保证每块单独 renderMarkdown 与整文渲染同构
 // （本渲染器里列表/表格/引用块都止于空行，见 mdTables/mdLists）；块一定稿
 // 就只渲染一次、不再动它，单次渲染成本从「全量文本」降到「尾块」，整轮流式
-// 的渲染总开销从 O(n²) 降为线性。光标 ▍ 是独立兄弟元素，不再拼进 HTML。
+// 的渲染总开销从 O(n²) 降为线性。光标不在 DOM 里：正文容器带 streaming 类，
+// 由 CSS 在最后一个块末尾生成（见 app.css 的 .md.streaming 段）。
 // 找最靠后的可定稿切点：[from, cut) 以空行结尾且围栏配对；找不到返回 from。
 function streamSealCut(text, from) {
   let end = text.length;
@@ -619,7 +628,10 @@ function streamSealCut(text, from) {
 // 流式字符渐显：只给「本次新进入渲染结果」的字符包 span，旧字符保持纯文本。
 // 依赖 st.tailRenderedLen（渲染后的字符数）而不是原文长度——markdown 会吃掉
 // 标记符号，用原文偏移会错位。单次最多动画 600 字符，避免大段 delta 一次性
-// 造几千个 span；动画延迟 30ms/字，超过 20 字后封顶，长段不会「排队到天边」。
+// 造几千个 span。错峰只占 3ms/字、封顶 30ms：整段淡入（30ms + .stream-ch 的
+// var(--dur-fast)，140ms）必须在下一次重画（间隔见 appendStream，180ms）之前
+// 播完——尾块每次重画都是重建 DOM，没播完的 span 会被直接拆掉，看起来就是
+// 一截一截地跳出来。
 function animateStreamChars(root, from) {
   const total = root.textContent.length;
   if (!Number.isFinite(from) || total <= from) return;
@@ -650,7 +662,7 @@ function animateStreamChars(root, from) {
         const span = document.createElement("span");
         span.className = "stream-ch";
         span.textContent = ch;
-        span.style.animationDelay = Math.min(g - startAt, 20) * 30 + "ms";
+        span.style.animationDelay = Math.min(g - startAt, 10) * 3 + "ms";
         frag.appendChild(span);
         wrapped = true;
       } else {
@@ -673,17 +685,16 @@ function renderStreamPart(st, text, sealed, cut) {
   st.tailRenderedLen = rendered;
   return cut;
 }
+// 光标不再单独造一个 <p>▍</p> 挂在末尾（它自己占一整行，定稿移除时气泡还会
+// 突然矮一行）：给正文容器加 streaming 类，由 CSS 在最后一个块级子元素末尾
+// 生成光标（见 app.css 的 .md.streaming 段）。定稿只需摘掉这个类。
 function initStreamBody(md, withCursor) {
   md.innerHTML = "";
   const tail = document.createElement("div");
+  tail.className = "stream-tail";
   md.appendChild(tail);
-  let cursor = null;
-  if (withCursor) {
-    cursor = document.createElement("p");
-    cursor.textContent = "▍";
-    md.appendChild(cursor);
-  }
-  return { tail, cursor, sealed: 0, tailRenderedLen: 0 };
+  if (withCursor) md.classList.add("streaming");
+  return { tail, sealed: 0, tailRenderedLen: 0 };
 }
 
 function appendStream(txt) {
@@ -692,7 +703,10 @@ function appendStream(txt) {
   if (!t.streamingEl) beginAssistant();
   t.streamingText += txt;
   // 节流渲染：delta 频率远高于人眼需要；定稿前缀不再逐 tick 重跑 markdown
-  // （增量方案见上方说明），流结束由 finishAssistant 全量渲染兜底
+  // （增量方案见上方说明），流结束由 finishAssistant 全量渲染兜底。
+  // 间隔取 180ms（≥ 字符淡入 var(--dur-fast) 140ms + 错峰 30ms）：上一批
+  // .stream-ch 一定播完，下一批重画才不会把它们拦腰拆掉。调 --dur-fast 时要
+  // 同步这里（CSS 里这两处是一对，见 app.css 的 .stream-ch 段）
   if (!t._streamRenderTimer) {
     t._streamRenderTimer = setTimeout(() => {
       t._streamRenderTimer = null;
@@ -702,19 +716,24 @@ function appendStream(txt) {
       t._streamBody.sealed = renderStreamPart(
         t._streamBody, text, t._streamBody.sealed, streamSealCut(text, t._streamBody.sealed));
       scrollLog();
-    }, 80);
+    }, 180);
   }
 }
 
-function finishAssistant(rtMeta, seq, sources) {
-  const t = curTab();
+function finishAssistant(rtMeta, seq, sources, tab) {
+  // tab 只在「给非当前标签定稿」时传（如用户停止后按 queue_updated 收尾）；
+  // 其余路径都走 curTab()，与事件路由保持同一个口径
+  const t = tab || curTab();
   if (!t || !t.streamingEl) return;
   finishThinking(t);
   t.thinkEl = null;
   t.thinkText = "";
   if (t._streamRenderTimer) { clearTimeout(t._streamRenderTimer); t._streamRenderTimer = null; }
-  // 定稿按整文精确重画一次（覆盖增量渲染的临时结构，光标元素一并移除）
-  t.streamingEl.firstElementChild.innerHTML = renderMarkdown(t.streamingText);
+  // 定稿按整文精确重画一次（覆盖增量渲染的临时结构）；streaming 类先摘掉，
+  // 光标随类消失——不占行高，气泡高度不会在定稿瞬间矮一行
+  const mdEl = t.streamingEl.firstElementChild;
+  mdEl.classList.remove("streaming");
+  mdEl.innerHTML = renderMarkdown(t.streamingText);
   t._streamBody = null;
   addSourceChips(t.streamingEl, sources);
   if (rtMeta) {
@@ -771,4 +790,29 @@ function finishAssistant(rtMeta, seq, sources) {
   renderMermaidIn(finalEl);
   highlightCodeIn(finalEl);
   decorateFinalMessage(finalEl, t, () => t.lastAssistantText, seq);
+}
+
+// 用户按「停止」的那一轮：实时终态要跟落库终态一致。
+// 取消路径不会再有 assistant_message / turn_finished（引擎在 yield 处被取消），
+// 前端若就这么挂着流式气泡，光标（.md.streaming 的 ▍）会一直闪，看起来还在写；
+// 而引擎在收尾时已把产出的正文连同「…（已停止）」注记并入历史
+// （core/agent.py 的 _persist_partial_stream_text）——刷新后正文就多出这句，
+// 实时与落库对不上。这里按同一口径就地定稿：补注记 + 摘 streaming 类。
+// 调用时机：queue_updated(pending=0)（后端运行态的唯一事实源，取消后必发）。
+function finishStoppedTurn(t) {
+  if (!t) return;
+  t._stopRequested = false;
+  if (!t.streamingEl) return; // 这一轮已正常定稿（或还没产出正文气泡）
+  if (t._streamRenderTimer) { clearTimeout(t._streamRenderTimer); t._streamRenderTimer = null; }
+  // 一个字都还没产出就停了：空气泡没有信息量，直接摘掉（思考行已定格）
+  if (!t.streamingText.trim()) {
+    finishThinking(t);
+    t.streamingEl.remove();
+    t.streamingEl = null;
+    t.streamingText = "";
+    t._streamBody = null;
+    return;
+  }
+  t.streamingText += "\n\n…（已停止）";
+  finishAssistant(undefined, undefined, undefined, t);
 }

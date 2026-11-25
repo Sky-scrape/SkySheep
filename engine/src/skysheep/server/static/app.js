@@ -1506,11 +1506,68 @@ async function newSessionFromHighlight() {
 }
 
 function addNotice(text) {
+  // 设置 / 工厂是整屏视图，对话区（curLog）被隐藏：往里塞等于石沉大海，
+  // 用户关掉设置后才发现「刚才那段导出诊断包什么都没说」。此时改走屏幕浮标
+  if (pageViewOpen()) { showPageNotice(text); return; }
   const d = document.createElement("div");
   d.className = "msg notice" + (text.includes("\n") ? " multiline" : "");
   d.textContent = text;
   curLog().appendChild(d);
   scrollLog();
+}
+
+// 整屏视图里的全局浮标：复用 .agenda-reminder 的纸片样式与 --z-toast 层级，
+// 同一时刻只留一条（新的覆盖旧的并重新计时），点 ✕ 立即收
+let pageToastEl = null;
+let pageToastMsgEl = null;
+let pageToastTimer = null;
+let pageToastCloseTimer = null;
+const PAGE_TOAST_OUT_MS = 180; // 与 --dur-base 同量级：淡出结束再摘节点
+
+function dismissPageNotice() {
+  const box = pageToastEl;
+  if (!box) return;
+  if (pageToastTimer) { clearTimeout(pageToastTimer); pageToastTimer = null; }
+  box.classList.add("out");
+  if (pageToastCloseTimer) clearTimeout(pageToastCloseTimer);
+  pageToastCloseTimer = setTimeout(() => {
+    if (box.parentNode) box.remove();
+    if (pageToastEl === box) { pageToastEl = null; pageToastMsgEl = null; }
+    pageToastCloseTimer = null;
+  }, PAGE_TOAST_OUT_MS);
+}
+
+function showPageNotice(text) {
+  if (!pageToastEl || !document.body.contains(pageToastEl)) {
+    const box = document.createElement("div");
+    box.className = "agenda-reminder notice-toast";
+    box.setAttribute("role", "status");
+    const ico = document.createElement("span");
+    ico.className = "ar-ico";
+    ico.textContent = "ℹ";
+    const body = document.createElement("div");
+    body.className = "ar-body";
+    const msg = document.createElement("span");
+    msg.className = "notice-toast-msg";
+    const close = document.createElement("button");
+    close.className = "ar-close";
+    close.title = "关闭";
+    close.textContent = "✕";
+    close.onclick = dismissPageNotice;
+    body.appendChild(msg);
+    box.append(ico, body, close);
+    document.body.appendChild(box);
+    pageToastEl = box;
+    pageToastMsgEl = msg;
+  }
+  // 上一次淡出还没删掉就被新消息接上：撤掉 out，原地换文案继续用
+  if (pageToastCloseTimer) { clearTimeout(pageToastCloseTimer); pageToastCloseTimer = null; }
+  pageToastEl.classList.remove("out");
+  pageToastMsgEl.textContent = text;
+  // 长文案给足停留时间（最短 2.4 秒，最长 8 秒）——多行报错扫完就没了等于没提示
+  if (pageToastTimer) clearTimeout(pageToastTimer);
+  const ms = Math.min(8000, Math.max(2400, String(text).length * 90));
+  pageToastTimer = setTimeout(dismissPageNotice, ms);
 }
 
 /** 分屏列自己的操作提示：必须写进那一列。
@@ -1728,6 +1785,10 @@ function oneLine(obj) {
 // ---------- 事件处理 ----------
 let running = false; // 活动标签运行态镜像（顶栏按钮用；真值在 activeTab.running）
 let permRequest = null;
+// 权限条 `.open` 展开/收起的动画时长（--dur-base 180ms 同量级）：
+// 展示后补一次贴底、收起后落 hidden 都按它等一拍
+const PERM_ANIM_MS = 180;
+let permHideTimer = null;
 let usageIn = 0, usageOut = 0;
 
 function renderUsage() {
@@ -2046,6 +2107,15 @@ function wireProjectTasksPanel() {
   }
 }
 
+// 停止键复位（可用态 + 文案）：运行中每次 queue_updated 都会过一遍——
+// 点下时写的「正在停止…」据此回到可再点的「停止」，不会卡在载入态
+function resetStopButton() {
+  const btn = document.getElementById("btn-stop");
+  if (!btn) return;
+  btn.disabled = false;
+  btn.textContent = "⏹ 停止";
+}
+
 function setRunning(on, tab) {
   const t = tab || activeTab;
   if (t) t.running = on;
@@ -2056,13 +2126,24 @@ function setRunning(on, tab) {
   sendBtn.disabled = false;
   // 文案写进 .send-txt（挤压档按钮翻成纯图标，svg 常驻不能被 textContent 清掉）；
   // 图标态下「发送/排队」的区别靠 title 悬停说明
-  (sendBtn.querySelector(".send-txt") || sendBtn).textContent = on ? "排队" : "发送";
-  sendBtn.title = on ? "运行中：点击排队追加一条消息（Enter）" : "发送（Enter）";
+  // 交互设置成「引导」时，运行中这一下是把话补进当前轮，不是排队等下一轮：
+  // 按钮必须说「引导」，与真发生的事一致
+  const steering = on && interactionMode === "steer";
+  (sendBtn.querySelector(".send-txt") || sendBtn).textContent =
+    on ? (steering ? "引导" : "排队") : "发送";
+  sendBtn.title = steering
+    ? "运行中：点击把这条补进当前这一轮（Enter）"
+    : (on ? "运行中：点击排队追加一条消息（Enter）" : "发送（Enter）");
   document.getElementById("btn-stop").hidden = !on;
+  if (on) resetStopButton();
   renderTabs();
-  // 宠物：开始干活换蹦跶动画；一轮跑完撒个花
+  // 宠物：开始干活换蹦跶动画；一轮跑完撒个花。
+  // 用户点了停止的这一轮不算「跑完」——取消路径的 queue_updated 也会把
+  // running 置 false，照常撒花等于对着半截回答道喜（_stopRequested 由
+  // 停止键/Esc 置上，queue_updated 里定稿时清掉）
+  const stopped = !on && !!t && !!t._stopRequested;
   petRefresh();
-  if (petPrevRunning && !on) petCelebrate();
+  if (petPrevRunning && !on && !stopped) petCelebrate();
   petPrevRunning = on;
 }
 
@@ -2551,11 +2632,21 @@ function handleEvent(kind, data) {
       // 每轮结束都会推；pending>0 = 还有排队轮（含刚接棒的）在跑，保持运行态
       setRunning((data.pending || 0) > 0, routeTab);
       if (!(data.pending > 0)) {
+        // 被「停止」的那一轮在这里收尾：取消路径没有 turn_finished /
+        // assistant_message，流式气泡得按落库口径就地定稿（见 finishStoppedTurn），
+        // 否则光标一直闪、正文还缺「…（已停止）」。循环扫是因为停止可能落在
+        // 后台标签（Esc 停分屏列 / 切换前点的停止），routeTab 未必是它。
+        let stoppedNow = false;
+        for (const tab of [...chatTabs, ...splitPanes]) {
+          if (tab._stopRequested) { stoppedNow = true; finishStoppedTurn(tab); }
+        }
         finishEta(routeTab); // 预估条定格（错误/中断路径没有 turn_finished，这里兜底）
         const doneTab = routeTab;
         // `|| ""` 兜底：伪 tab（分屏列）理论上都有初值，这里再防一手
-        // undefined——trim 抛错会中断这次事件的后续处理
-        if (doneTab && (doneTab.lastAssistantText || "").trim()) {
+        // undefined——trim 抛错会中断这次事件的后续处理。
+        // 人停的那一轮不发「任务完成」：定稿时已经把半截正文写进 lastAssistantText，
+        // 照旧通知等于把「停了一半」报成完成（宠物那边同理，见 setRunning）
+        if (!stoppedNow && doneTab && (doneTab.lastAssistantText || "").trim()) {
           maybeNotify("任务完成", "本轮任务已结束，回来看看结果", "done",
             { sid: doneTab.sid });
         }
@@ -2595,6 +2686,8 @@ function handleEvent(kind, data) {
     }
     case AP_EVENTS.TURN_FINISHED: {
       finishAssistant();
+      // 正常收尾 = 这一轮不是被停的：撤掉停止标记，免得下一轮结束时误判
+      if (routeTab) routeTab._stopRequested = false;
       // 用引擎实测耗时定格芯片：前端本地计时从收到预估事件算起，与引擎的
       // 墙钟起点差一个网络往返，两个数字对不上（刷新后又变成引擎值）。
       finishEta(routeTab, data.duration_ms);
@@ -2779,7 +2872,25 @@ function showPermission(data) {
       ruleEl.hidden = true;
     }
   }
-  document.getElementById("permission-bar").hidden = false;
+  // 卡片出现会让对话区变矮：先记「此刻是否贴底」，贴底才在显示后重新拽到最新；
+  // 上翻回看的阅读位置不动（小羊/阅读位置不再瞬移）
+  const logEl = typeof curLogEl === "function" ? curLogEl() : null;
+  const atBottom = !!logEl && typeof logNearBottom === "function" && logNearBottom(logEl);
+  const bar = document.getElementById("permission-bar");
+  if (permHideTimer) { clearTimeout(permHideTimer); permHideTimer = null; }
+  resetPermActions(); // 上一张卡可能停在「已提交…」：新卡从三个可用键开始
+  // 展开走 .open 类（高度与淡入由 app.css 的 #permission-bar 规则负责）；
+  // hidden 只作兜底，样式未跟上时行为与旧版一致（即时显隐），不会留一条空黄条。
+  // 先摘 hidden 并强制一次布局，让「收起态」先落定，再加 .open 才有过渡可跑
+  // （display:none → block 与类切换在同一帧里的话，浏览器不会补间）
+  bar.hidden = false;
+  void bar.offsetHeight;
+  bar.classList.add("open");
+  if (atBottom) {
+    scrollLog();
+    // 展开动画期间对话区还在变矮：画完再贴一次底，否则停在差一截的位置
+    setTimeout(scrollLog, PERM_ANIM_MS);
+  }
   petRefresh();
   if (Math.random() < 0.6) petSay(petPick(PET_LINES.perm));
 }
@@ -2789,14 +2900,36 @@ function hidePermission() {
   pendingPermModLines.clear(); // 确认卡收起：上一张卡的 Mod 片段不留到下一张
   const modNoteEl = document.getElementById("perm-mod-note");
   if (modNoteEl) { modNoteEl.hidden = true; modNoteEl.innerHTML = ""; }
-  document.getElementById("permission-bar").hidden = true;
+  const bar = document.getElementById("permission-bar");
+  bar.classList.remove("open");
+  // 收起动画走完再落 hidden；中途又来了新卡（.open 回来了）就不摘
+  if (permHideTimer) clearTimeout(permHideTimer);
+  permHideTimer = setTimeout(() => {
+    permHideTimer = null;
+    if (!bar.classList.contains("open")) bar.hidden = true;
+  }, PERM_ANIM_MS);
   petRefresh();
 }
 
+// 决策键的原始文案存在 dataset 上：点过写「已提交…」，提交失败/下一张卡复原
+function resetPermActions() {
+  document.querySelectorAll("#permission-bar [data-decision]").forEach((b) => {
+    b.disabled = false;
+    if (b.dataset.label) b.textContent = b.dataset.label;
+  });
+}
+
 document.querySelectorAll("#permission-bar [data-decision]").forEach((btn) => {
+  btn.dataset.label = btn.textContent;
   btn.onclick = () => {
-    if (!permRequest) return;
+    if (!permRequest || btn.disabled) return;
     const rid = permRequest;
+    // 点下立刻禁用三键、被点那颗写「已提交…」：决策已发出，再点一次没有意义，
+    // 也不能让用户以为没点上而换一种决策再点（第二个决策会覆盖第一个）
+    document.querySelectorAll("#permission-bar [data-decision]").forEach((b) => {
+      b.disabled = true;
+    });
+    btn.textContent = "已提交…";
     request("permission.respond", { request_id: rid, decision: btn.dataset.decision })
       .then((res) => {
         if (res && res.delivered === false) {
@@ -2814,7 +2947,12 @@ document.querySelectorAll("#permission-bar [data-decision]").forEach((btn) => {
           addNotice("该权限请求已失效：对应的轮次已停止，无需再确认。");
         }
       })
-      .catch(() => {});
+      .catch((e) => {
+        // 发不出去（连接断了等）：把键恢复成可再点，别让用户对着死按钮等一个
+        // 永远不会到的 permission_resolved
+        resetPermActions();
+        addNotice("提交确认失败：" + e.message);
+      });
   };
 });
 
@@ -3015,16 +3153,24 @@ function showModal(title, contentEl, onOk, okLabel = "确定") {
   const okBtn = document.getElementById("modal-ok");
   okBtn.textContent = okLabel;
   okBtn.disabled = false;
+  // 破坏性确认（删除 / 清空 / 移除 / 撤销）：确定键转危险色，默认焦点给「取消」，
+  // 误按回车不会直接删。非破坏性弹窗维持蓝色主按钮（btn-primary 保留，btn-danger 只改颜色）
+  const destructive = /删除|清空|移除|撤销/.test(String(okLabel));
+  okBtn.classList.toggle("btn-danger", destructive);
   document.getElementById("modal").classList.remove("hidden");
   // 正文区是独立滚动层：遮罩隐藏时赋 scrollTop 不生效（无布局），
   // 必须在显示之后归零，否则上一个弹层滚到一半关掉、新弹层会接着往下的位置
   content.scrollTop = 0;
   // 焦点闭环入口：等一拍再接管——不少调用方打开后会自行聚焦输入框，
-  // 焦点仍留在弹层外（纯确认框）时才聚焦「取消」，不与调用方抢
+  // 焦点仍留在弹层外时才落位：长表单（新建定时任务等）先给第一个输入控件，
+  // 打开就能打字；纯确认框给「取消」；破坏性确认一律给「取消」
   setTimeout(() => {
-    if (modalOpen() && !modalFocusables().includes(document.activeElement)) {
-      document.getElementById("modal-cancel").focus();
-    }
+    if (!modalOpen() || modalFocusables().includes(document.activeElement)) return;
+    const cancelBtn = document.getElementById("modal-cancel");
+    const field = destructive ? null
+      : content.querySelector("input:not([type=hidden]), textarea, select");
+    const target = (field && !field.disabled && field.offsetParent !== null) ? field : cancelBtn;
+    try { target.focus(); } catch (e) {}
   }, 0);
   okBtn.onclick = async () => {
     err.hidden = true;
@@ -3052,6 +3198,22 @@ function hideModal() {
 }
 
 document.getElementById("modal-cancel").onclick = hideModal;
+// 弹层内回车 = 提交（长表单打开就能回车保存）。例外：textarea 里回车是换行；
+// 焦点在按钮/链接上时回车走它们自己的语义（默认焦点在「取消」时，回车不能变成删除）；
+// 输入法组字中的回车只归输入法。只绑这一次，不随每次打开弹层重复挂
+document.getElementById("modal").addEventListener("keydown", (e) => {
+  if (e.key !== "Enter") return;
+  if (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.isComposing || e.keyCode === 229 || e.which === 229) return;
+  if (!modalOpen()) return;
+  const tgt = e.target;
+  if (tgt && (tgt.tagName === "TEXTAREA" || tgt.isContentEditable)) return;
+  if (tgt && (tgt.tagName === "BUTTON" || tgt.tagName === "A")) return;
+  const okBtn = document.getElementById("modal-ok");
+  if (!okBtn || okBtn.disabled) return;
+  e.preventDefault();
+  okBtn.click();
+});
 // Esc = 点「取消」：走 cancel 按钮的当前语义，
 // 不做隐藏弹层之外的事；菜单/查找条有自己的 Esc 分支，互不影响。
 // Tab 在弹层内循环：焦点不会漏到被遮罩的背景内容上
@@ -6469,6 +6631,13 @@ function renderImageTray(pane) {
   paint();
 }
 
+// 系统「减少动态效果」下的滚动行为：CSS 的 scroll-behavior 管不到
+// scrollIntoView({behavior:"smooth"}) 与 scrollTo，JS 主动发起的滚动要自己让路。
+// 返回 "auto" 时调用方仍会滚到目标位置，只是不带动画。
+function smoothBehavior() {
+  return matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
+}
+
 function clearPendingImages(pane) {
   if (pane) pane.images = [];
   else pendingImages = [];
@@ -7245,9 +7414,42 @@ function addPlanActions(plan, tab) {
   appendToTurnLog(bar, tab);
 }
 
+// 停止键从顶栏搬到输入栏的发送键旁（运行中要找的那颗键离手太远）：
+// 节点不重建、事件仍按原 id 走，只是换个宿主——index.html 不动，初始化时搬一次
+(function relocateStopButton() {
+  const stopBtn = document.getElementById("btn-stop");
+  const sendBtn = document.getElementById("btn-send");
+  if (!stopBtn || !sendBtn || !sendBtn.parentElement) return;
+  sendBtn.parentElement.insertBefore(stopBtn, sendBtn);
+})();
+
 document.getElementById("btn-send").onclick = send;
-document.getElementById("btn-stop").onclick = () =>
-  request("stop", activeTab && activeTab.sid ? { session_id: activeTab.sid } : {});
+// 停止：点下立刻禁用并写「正在停止…」防连点（第二个 stop 对同一轮是空动作）；
+// 复原交给 queue_updated → setRunning（后端运行态的唯一事实源）。
+// cancelled === false = 这一轮已经结束了：当场说明，别让人对着键反复点也点不着
+document.getElementById("btn-stop").onclick = async () => {
+  const btn = document.getElementById("btn-stop");
+  if (btn.disabled) return;
+  const sid = activeTab && activeTab.sid ? { session_id: activeTab.sid } : {};
+  btn.disabled = true;
+  btn.textContent = "正在停止…";
+  // 标记「这一轮是人停的」：queue_updated 收尾时据此补「…（已停止）」并
+  // 不让宠物撒花（见 finishStoppedTurn / setRunning）
+  if (activeTab) activeTab._stopRequested = true;
+  try {
+    const res = await request("stop", sid);
+    if (res && res.cancelled === false) {
+      // 这一轮在停止生效前已经自己跑完了：撤掉标记，别把完成轮标成停止
+      if (activeTab) activeTab._stopRequested = false;
+      resetStopButton();
+      addNotice("这一轮已经结束");
+    }
+  } catch (e) {
+    if (activeTab) activeTab._stopRequested = false;
+    resetStopButton();
+    addNotice("停止失败：" + e.message);
+  }
+};
 
 // ---------- 输入浮层：/ 命令 与 @ 文件提及（对标 Claude Code / Codex 输入体验） ----------
 const inputEl = document.getElementById("input");
@@ -7921,6 +8123,9 @@ window.addEventListener("keydown", (e) => {
     // Esc 的优先级：弹窗 → 工厂（先收抽屉）→ 设置 → 停止运行。
     // 弹窗自己的 document 监听会处理取消；这里只负责视图层。
     if (e.key === "Escape") {
+      // 输入法候选窗开着时的 Esc 只归输入法（关候选），不到这里停轮：
+      // 与下方回车的 isComposing 判定同口径，keyCode/which 229 兜住旧 WebView 只报 229 的情况
+      if (e.isComposing || e.keyCode === 229 || e.which === 229) return;
       if (modalOpen()) return;
       if (factoryOpen) {
         e.preventDefault();
@@ -7943,7 +8148,13 @@ window.addEventListener("keydown", (e) => {
       const target = pane || activeTab;
       if (target && target.running) {
         e.preventDefault();
-        if (target.sid) request("stop", { session_id: target.sid }).catch(() => {});
+        if (target.sid) {
+          // 与停止键同口径：这一轮是人停的，收尾时补「…（已停止）」且不撒花
+          target._stopRequested = true;
+          request("stop", { session_id: target.sid }).catch(() => {
+            target._stopRequested = false;
+          });
+        }
       }
     }
     return;
@@ -8132,7 +8343,7 @@ function paintFindHit() {
   if (!findHits.length) { count.textContent = "0/0" + note; return; }
   count.textContent = `${findIdx + 1}/${findHits.length}` + note;
   const cur = findHits[findIdx];
-  cur.scrollIntoView({ block: "center", behavior: "smooth" });
+  cur.scrollIntoView({ block: "center", behavior: smoothBehavior() });
 }
 
 function stepFind(delta) {
@@ -8551,6 +8762,60 @@ function openRelayWorkbench() {
 document.getElementById("relay-open-workbench").onclick = openRelayWorkbench;
 
 // 设置子项目：点击导航切换独立页面
+// 设置子页切换：旧页先淡出、退场结束再淡入新页（一帧硬换会让整块正文闪一下）。
+// 退场时长与 app.css 的 .settings-page 过渡同档（--dur-fast 140ms）；
+// 搜索命中跳页要在新页露出来之后再滚卡片，所以那边等 SETTINGS_PAGE_FADE_MS + 40。
+const SETTINGS_PAGE_LEAVE_MS = 140;
+let settingsPageCur = null;       // 用户此刻看到的子页（唯一可见的那张）
+let settingsPageLeaveTimer = 0;   // 退场计时器（连点导航时作废）
+let settingsPageLeaving = null;   // 正在退场的那张
+
+function swapSettingsPage(next) {
+  if (!next) return;
+  const pages = [...document.querySelectorAll(".settings-page")];
+  // 已经是这张（重复调用 / 二次渲染）：只剩「别的都藏起来」，不重播任何动画
+  const already = !next.classList.contains("hidden");
+  const prev = !already && settingsPageCur && settingsPageCur !== next
+    ? settingsPageCur : null;
+  settingsPageCur = next;
+  if (settingsPageLeaveTimer) { clearTimeout(settingsPageLeaveTimer); settingsPageLeaveTimer = 0; }
+  // 上一次还在退场中的那张（用户连点导航）：直接收掉，别和新页叠着
+  if (settingsPageLeaving && settingsPageLeaving !== prev) {
+    settingsPageLeaving.classList.remove("leaving");
+    settingsPageLeaving.classList.add("hidden");
+  }
+  settingsPageLeaving = null;
+  pages.forEach((pg) => {
+    if (pg === prev || pg === next) return;
+    pg.classList.remove("leaving");
+    pg.classList.add("hidden");
+  });
+  const reveal = (animate) => {
+    next.classList.remove("hidden");
+    if (!animate) return;
+    // 先落到 opacity:0 再摘类，同一帧里也要有一段可补间的区间
+    next.classList.add("entering");
+    void next.offsetWidth;
+    next.classList.remove("entering");
+  };
+  if (!prev) { reveal(!already); return; }
+  // 减弱动效：直接换（app.css 的总闸也会把过渡压到 1ms，别让 JS 白等 140ms）
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    prev.classList.add("hidden");
+    reveal(true);
+    return;
+  }
+  prev.classList.add("leaving");
+  settingsPageLeaving = prev;
+  settingsPageLeaveTimer = setTimeout(() => {
+    settingsPageLeaveTimer = 0;
+    settingsPageLeaving = null;
+    prev.classList.remove("leaving");
+    prev.classList.add("hidden");
+    reveal(true);
+  }, SETTINGS_PAGE_LEAVE_MS);
+}
+
 function showSettingsPage(target) {
   // 主题 / 代码外观是「界面与通知」的二级页：侧栏仍高亮该入口，
   // 避免看起来像掉出了设置
@@ -8558,9 +8823,7 @@ function showSettingsPage(target) {
   document.querySelectorAll("#settings-nav li").forEach((x) =>
     x.classList.toggle("active", x.dataset.target === navTarget)
   );
-  document.querySelectorAll(".settings-page").forEach((pg) =>
-    pg.classList.toggle("hidden", pg.id !== "settings-page-" + target)
-  );
+  swapSettingsPage(document.getElementById("settings-page-" + target));
   // 二级页从页首开始看；否则会继承上一页滚到一半的位置
   if (target === "theme" || target === "code") {
     const body = document.querySelector(".settings-body");
@@ -8602,6 +8865,20 @@ document.querySelectorAll("#settings-nav li[data-target]").forEach((li) => {
     document.body.classList.remove("sidebar-open"); // 手机：切换子页前先收回侧栏抽屉
     showSettingsPage(li.dataset.target);
   };
+  // 键盘可达：li 不是按钮，Tab 默认走不进来。补 tabIndex/role 并让 Enter/空格触发
+  // 行 onclick；焦点环复用 app.css 的 `.list li:focus-visible`（#settings-nav 本身就是
+  // .list）。不指望 app-sidebar.js 的 wireRowKeyboard——那是后加载文件的内部函数，
+  // 依赖它的加载顺序不值得
+  li.tabIndex = 0;
+  li.setAttribute("role", "button");
+  li.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    if (e.target !== li) return;
+    // 输入法组字中的空格/回车不算触发（切页会把没上屏的候选丢掉）
+    if (e.isComposing || e.keyCode === 229 || e.which === 229) return;
+    e.preventDefault(); // 空格防页面滚动，回车防触发外层默认行为
+    li.click();
+  });
 });
 
 // ---------- 设置内搜索：按卡片标题与正文过滤，点结果跳到对应页并高亮那张卡 ----------
@@ -8695,14 +8972,16 @@ function runSettingsSearch(qs) {
         if (it.card.closest("#skill-manage-view")) openSkillManage();
         else resetSkillView();
       }
-      // 目标卡滚进可视区并闪烁提示（等页面切换渲染完再滚）
+      // 目标卡滚进可视区并闪烁提示（等页面切换渲染完再滚）：切页现在是
+      // 「旧页淡出 140ms → 新页淡入」，太早滚会落在一张还 hidden 的页上
+      // （display:none 没有布局，scrollIntoView 是空操作）
       setTimeout(() => {
-        it.card.scrollIntoView({ block: "center", behavior: "smooth" });
+        it.card.scrollIntoView({ block: "center", behavior: smoothBehavior() });
         it.card.classList.remove("ssr-flash");
         void it.card.offsetWidth; // 强制回流以重启动画
         it.card.classList.add("ssr-flash");
         setTimeout(() => it.card.classList.remove("ssr-flash"), 1600);
-      }, 60);
+      }, SETTINGS_PAGE_LEAVE_MS + 40);
     };
     settingsSearchResults.appendChild(b);
   });
@@ -9447,7 +9726,7 @@ async function openAutomationFor(projectId, taskId) {
       if (tries++ < 8) setTimeout(focusRow, 250);
       return;
     }
-    li.scrollIntoView({ block: "center", behavior: "smooth" });
+    li.scrollIntoView({ block: "center", behavior: smoothBehavior() });
     li.classList.add("cron-focus");
     setTimeout(() => li.classList.remove("cron-focus"), 2600);
   };
@@ -12295,8 +12574,11 @@ function setupResizer(el, key, compute, afterApply, opts) {
     start = { x: e.clientX, y: e.clientY, base: origin.value, pointerId: e.pointerId };
     try { el.setPointerCapture(e.pointerId); } catch (_) {}
     el.classList.add("active");
-    document.body.classList.add("resizing",
-      (key === "sidebar_w" || key === "split_w") ? "resizing-x" : "resizing-y");
+    // 轴按 key 的命名取（*_w 拖的是宽度 = 竖分隔线 = resizing-x；*_h 拖高度）：
+    // 手抄键名清单漏过 right_w，于是右面板拖动时被打成 resizing-y，
+    // 而关过渡的规则写的是 `body.resizing-x #right-panel`——面板带着 200ms
+    // width 过渡追指针（实测最多落后 108px）。派生比手抄不容易再漏。
+    document.body.classList.add("resizing", key.endsWith("_w") ? "resizing-x" : "resizing-y");
     if (o.onStart) o.onStart();
   });
   el.addEventListener("pointermove", (e) => {
@@ -12634,9 +12916,44 @@ function resolvedThemeId() {
   return themeMql.matches ? themeAutoDark : themeAutoLight;
 }
 
+// 主题切换的过渡窗口（见 app.css「主题切换：整页一起换色」）：
+// 窗口时长 = --dur-base 200ms，多留 40ms 收尾；两个数要一起改。
+const THEME_SWAP_MS = 240;
+let themeSwapTimer = 0;
+
+/** 切主题前铺一层「旧底」快照：地面是渐变，background-image 不可插值，没有这一层
+    的话即使卡面/文字都在过渡，最大的一块底仍是一帧硬跳。
+    快照从 <html> 取——地面挂在根元素上（画成 canvas 背景），body 是透明的一层；
+    .theme-ground-fade 用 z-index:-1 站在 canvas 之上、所有内容之下。 */
+function beginThemeSwap() {
+  const cs = getComputedStyle(document.documentElement);
+  const ov = document.createElement("div");
+  ov.className = "theme-ground-fade";
+  // 逐条照抄长属性（background 简写在多图时会序列化成空串，靠不住）；
+  // background-attachment 必须同款 fixed，否则网点纹理的位置对不上
+  for (const k of ["backgroundImage", "backgroundColor", "backgroundSize",
+    "backgroundPosition", "backgroundRepeat", "backgroundAttachment"]) {
+    ov.style[k] = cs[k];
+  }
+  document.body.appendChild(ov);
+  setTimeout(() => ov.remove(), THEME_SWAP_MS);
+  // 过渡窗口：只在这一小段时间里给全站开颜色过渡，平时不给所有元素挂 transition
+  document.documentElement.classList.add("theme-swap");
+  clearTimeout(themeSwapTimer);
+  themeSwapTimer = setTimeout(() => {
+    themeSwapTimer = 0;
+    document.documentElement.classList.remove("theme-swap");
+  }, THEME_SWAP_MS);
+}
+
 function applyThemeMode(mode, save = true) {
   themePref = normalizeThemePref(mode);
   const id = resolvedThemeId();
+  // 真的换了主题才铺过渡：同一主题重复点（或 auto 重算回同一套）不该闪一下。
+  // save=false 的调用都是系统/启动侧的自动落点（boot 恢复偏好、跟随系统深浅、
+  // 定时窗口切换），不播过渡——首帧从默认主题落到用户主题时播会先闪一下旧底。
+  const changed = document.documentElement.getAttribute("data-theme") !== id;
+  if (changed && save) beginThemeSwap();
   document.documentElement.setAttribute("data-theme", id);
   // 首帧脚本（index.html）靠 data-theme-mode 判断 auto 该跟系统深还是浅，跟着同步
   document.documentElement.setAttribute("data-theme-mode", themePref);
@@ -15277,7 +15594,7 @@ function paletteBaseItems() {
         else openSettings(it.pageId);
         // 等页面切换渲染完再滚（同设置内搜索的时序）
         setTimeout(() => {
-          it.card.scrollIntoView({ block: "center", behavior: "smooth" });
+          it.card.scrollIntoView({ block: "center", behavior: smoothBehavior() });
           it.card.classList.remove("ssr-flash");
           void it.card.offsetWidth; // 强制回流以重启动画
           it.card.classList.add("ssr-flash");

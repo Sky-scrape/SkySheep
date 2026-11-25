@@ -14,6 +14,8 @@ const AG_WNAMES = ["周日", "周一", "周二", "周三", "周四", "周五", "
 let agView = "week";         // week | month | list
 let agAnchor = new Date();   // 当前查看的日期（取其所在周/月）
 let agCache = [];            // schedule.list（含已完成）的缓存
+let agWeekScroll = 0;        // 周视图上次的滚动位置（重建后写回，不跳回 00:00）
+let agWeekKey = "";          // 上次画的是哪一周（首开/换周才滚到「现在」那一行）
 
 function agPad(n) { return pad2(n); }
 // 毫秒时间戳的 "HH:MM"（agHm 收的是秒，周视图内部一律用毫秒）
@@ -80,7 +82,12 @@ function renderWeekGrid() {
   for (let h = 0; h < 24; h++) hours += `<div class="ag-hour">${agPad(h)}:00</div>`;
 
   const weekStart = mon.getTime(), weekEnd = weekStart + 7 * 86400000;
-  let evts = "";
+  // 重建前先记下滚动位置：拖块 / 新建 / 勾完成后都要重画网格，不能跳回 00:00
+  const prevScroll = week.querySelector(".ag-scroll");
+  if (prevScroll) agWeekScroll = prevScroll.scrollTop;
+  // 先按天收拢，再按重叠分簇排成并排的列：09:00 有两个日程、或 10:00 的短日程
+  // 落在 09:00–18:00 时段里时，两条都看得见、都点得到（以前后画的盖住先画的）
+  const perDay = days.map(() => []);
   agCache.forEach((it) => {
     const t = it.start_at * 1000;
     // 时间段可能跨天：起点或终点任一天在本周就画出来（按起点列定位）
@@ -97,18 +104,55 @@ function renderWeekGrid() {
     const rawMin = endMs ? Math.round((endMs - t) / 60000) : 0;
     const spanMin = rawMin ? Math.max(20, Math.min(rawMin, 1440 - mins)) : 0;
     const top = Math.round(mins / 60 * AG_HOUR_H) + 1;
-    const h = spanMin ? `height:${Math.max(18, Math.round(spanMin / 60 * AG_HOUR_H) - 2)}px;` : "";
+    const rawH = spanMin ? Math.max(18, Math.round(spanMin / 60 * AG_HOUR_H) - 2) : 0;
     const timeTxt = it.end_at
       ? `${agPad(d.getHours())}:${agPad(d.getMinutes())}–${agHm(it.end_at)}`
       : `${agPad(d.getHours())}:${agPad(d.getMinutes())}`;
-    const evtTitle = `${timeTxt} ${it.title}${it.notes ? "  " + it.notes : ""}`;
     // 时间段块带上下两条拖拽手柄（拉边缘改起止）：按点事件没有时长可拉，不给手柄
     const grips = spanMin
       ? '<i class="ag-grip up" title="拖动改开始时间"></i><i class="ag-grip down" title="拖动改结束时间"></i>'
       : "";
-    evts += `<div class="ag-evt${it.done ? " done" : ""}${spanMin ? " span" : ""}" data-id="${it.id}" data-col="${dayIdx}"
-      style="top:${top}px;${h}left:calc(${dayIdx} * 100% / 7 + 2px);width:calc(100% / 7 - 4px)"
-      title="${escapeHtml(evtTitle)}">${grips}<span class="ag-evt-txt">${it.done ? "✓ " : ""}${escapeHtml(it.title)}</span></div>`;
+    perDay[dayIdx].push({
+      it, top, grips, span: !!spanMin,
+      // 占位高度：按点事件 CSS 里是 20px 的单行块，判重叠时同样算 20px
+      hPx: rawH || 20,
+      hStyle: rawH ? `height:${rawH}px;` : "",
+      evtTitle: `${timeTxt} ${it.title}${it.notes ? "  " + it.notes : ""}`,
+    });
+  });
+  let evts = "";
+  perDay.forEach((list, dayIdx) => {
+    // 按位置升序；同起点的长块排左（占满一列，短块靠右不会被挤没）
+    list.sort((a, b) => (a.top - b.top) || (b.hPx - a.hPx));
+    // 重叠分簇：簇的底边随成员延长，下一个块的起点越过它才算新的一簇
+    const clusters = [];
+    let curCluster = null;
+    list.forEach((e) => {
+      if (curCluster && e.top < curCluster.bottom) {
+        curCluster.list.push(e);
+        curCluster.bottom = Math.max(curCluster.bottom, e.top + e.hPx);
+      } else {
+        curCluster = { list: [e], bottom: e.top + e.hPx };
+        clusters.push(curCluster);
+      }
+    });
+    clusters.forEach((c) => {
+      // 簇内贪心分列：放进第一条已经空出来的列；n 列各占当天 1/n 宽
+      const colEnd = [];
+      c.list.forEach((e) => {
+        let ci = 0;
+        while (ci < colEnd.length && colEnd[ci] > e.top) ci++;
+        colEnd[ci] = e.top + e.hPx;
+        e.col = ci;
+      });
+      const n = colEnd.length;
+      const cell = 7 * n; // 整行按「7 天 × n 列」切成等宽格
+      c.list.forEach((e) => {
+        evts += `<div class="ag-evt${e.it.done ? " done" : ""}${e.span ? " span" : ""}" data-id="${e.it.id}" data-col="${dayIdx}"
+      style="top:${e.top}px;${e.hStyle}left:calc(${dayIdx * n + e.col} * 100% / ${cell} + 2px);width:calc(100% / ${cell} - 4px)"
+      title="${escapeHtml(e.evtTitle)}">${e.grips}<span class="ag-evt-txt">${e.it.done ? "✓ " : ""}${escapeHtml(e.it.title)}</span></div>`;
+      });
+    });
   });
   let now = "";
   if (todayIdx >= 0) {
@@ -135,8 +179,19 @@ function renderWeekGrid() {
   canvas.tabIndex = 0; // 气泡 Esc 关闭后把焦点还给网格，键盘用户不会断在空气里
   bindAgendaCanvas(canvas, days);
   const scroller = week.querySelector(".ag-scroll");
-  // 滚网格就把气泡收起来：它锚在视口坐标上，内容一滚就与格子对不上了
-  if (scroller) scroller.addEventListener("scroll", () => closeAgendaPop());
+  if (scroller) {
+    // 同一周内重建（拖拽 / 新建 / 勾完成）滚回原处；首次打开或换周落到「现在」那一行
+    if (agWeekKey === String(weekStart)) {
+      scroller.scrollTop = agWeekScroll;
+    } else {
+      const nowEl = week.querySelector(".ag-now");
+      // 现在这条线压在上方一点（不贴顶边），前后的时段都看得见
+      if (nowEl) scroller.scrollTop = Math.max(0, nowEl.offsetTop - 80);
+    }
+    agWeekKey = String(weekStart);
+    // 滚网格就把气泡收起来：它锚在视口坐标上，内容一滚就与格子对不上了
+    scroller.addEventListener("scroll", () => closeAgendaPop());
+  }
 }
 
 // —— 周视图拖动：空白处拖 = 圈时段、单击 = 选时点；已有块拖边缘/块身 = 改时间 ——
@@ -957,6 +1012,139 @@ function fmtNextRun(ts) {
   return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+// 在跑任务的已跑时长（秒 → mm:ss；超过一小时的分钟数继续累加，如 75:20）
+function cronRunClock(sec) {
+  const s = Math.max(0, Math.floor(Number(sec) || 0));
+  return `${pad2(Math.floor(s / 60))}:${pad2(s % 60)}`;
+}
+
+// 已跑时长每秒跳一次：只改这段文本，不重画列表（面板没开就不跳）
+let cronClockTimer = 0;
+function syncCronClock() {
+  const els = rightViewVisible("cron") ? document.querySelectorAll("#cron-list [data-run-since]") : [];
+  els.forEach((el) => {
+    el.textContent = "运行中 · 已跑 " + cronRunClock(Date.now() / 1000 - Number(el.dataset.runSince));
+  });
+  if (els.length && !cronClockTimer) {
+    cronClockTimer = setInterval(syncCronClock, 1000);
+  } else if (!els.length && cronClockTimer) {
+    clearInterval(cronClockTimer);
+    cronClockTimer = 0;
+  }
+}
+
+/** 画一行定时任务。li 由调用方给：列表刷新时沿用同一个节点就地重写，
+    正在看的那一行不会被整表重画带回顶部。 */
+function fillCronRow(li, t) {
+  li.className = "cron-item" + (t.enabled ? "" : " off");
+  li.dataset.cronId = t.id; // 工厂「去编辑」按这个定位到具体任务行
+  // ⏹ = 上一轮被用户叫停（不是失败，也不算完成）
+  const status = t.last_status === "ok" ? "✓" : t.last_status === "error" ? "✗"
+    : t.last_status === "cancelled" ? "⏹" : "";
+  // 正在跑的这一轮直接写在行上：不切到工厂看板也看得出在跑、能就地叫停
+  const running = !!t.running_run_id;
+  li.innerHTML =
+    `<div class="cron-main">
+       <span class="cron-title">${t.enabled ? "" : "⏸ "}${escapeHtml(t.name)}</span>
+       ${t.mode === "team" ? `<span class="chip safe-mark" title="定时团队：按模板「${escapeHtml(t.team_template || "")}」建队，AI 总管带队员协作">团队</span>` : ""}
+       <span class="cron-sched">${escapeHtml(fmtCronSchedule(t))}  下次 ${fmtNextRun(t.next_run_at)}</span>
+       ${running
+         ? `<span class="cron-last cron-running" data-run-since="${t.running_since || 0}">运行中 · 已跑 ${cronRunClock(Date.now() / 1000 - (t.running_since || 0))}</span>`
+         : ""}
+       ${t.last_result ? `<span class="cron-last">${status} ${escapeHtml(t.last_result)}</span>` : ""}
+     </div>`;
+  const ops = document.createElement("span");
+  ops.className = "cron-ops";
+  // 在跑时「立即运行」换成 ⏹ 叫停：一个任务同一时刻只有一轮，跑着的再点也是拒
+  ops.innerHTML =
+    (running
+      ? `<button class="cron-op" data-op="stop" title="叫停这一轮（只停本轮，排期不变）">⏹</button>`
+      : `<button class="cron-op" data-op="run" title="立即运行一次">运行</button>`) +
+    `<button class="cron-op" data-op="pipeline" title="纳入编排（复制成流水线节点）">⛓</button>` +
+    `<button class="cron-op" data-op="schtask" title="系统计划任务：状态查询中…">…</button>` +
+    `<button class="cron-op" data-op="toggle" title="${t.enabled ? "暂停" : "启用"}"><i class="${t.enabled ? "ic-pause" : "ic-play"}"></i></button>` +
+    `<button class="cron-op danger" data-op="del" title="删除">✕</button>`;
+  const runBtn = ops.querySelector('[data-op="run"]');
+  if (runBtn) runBtn.onclick = async (e) => {
+    e.stopPropagation();
+    try {
+      const r = await request("cron.run_now", { id: t.id });
+      addNotice(r && r.started === false
+        ? (r.notice || `「${t.name}」正在运行中，本次未重复触发`)
+        : `已开始运行「${t.name}」，结果会写回列表`);
+    } catch (err) { addNotice("运行失败: " + err.message); }
+  };
+  const stopBtn = ops.querySelector('[data-op="stop"]');
+  if (stopBtn) stopBtn.onclick = async (e) => {
+    e.stopPropagation();
+    try {
+      // 叫停按任务派工（factory.cancel 收 task_id，只取消本轮、不动排期）
+      const r = await request("factory.cancel", { task_id: t.id });
+      addNotice(r.cancelled
+        ? `已叫停「${t.name}」本轮运行，排期不变`
+        : (r.notice || "这一轮已经结束了"));
+      // 取消在下一轮 await 才生效：等一拍再刷新，别立刻把行又画成「在跑」
+      if (r.cancelled) setTimeout(() => { if (rightViewVisible("cron")) loadCron(); }, 800);
+    } catch (err) { addNotice("叫停失败: " + err.message); }
+  };
+  ops.querySelector('[data-op="pipeline"]').onclick = async (e) => {
+    e.stopPropagation();
+    await pipelineImportModal({ source: "cron", cron_id: t.id });
+  };
+  ops.querySelector('[data-op="toggle"]').onclick = async (e) => {
+    e.stopPropagation();
+    // 启停只改排期（enabled），不碰正在跑的那一轮
+    try { await request("cron.update", { id: t.id, enabled: !t.enabled }); }
+    catch (err) { addNotice("操作失败: " + err.message); }
+    await loadCron();
+  };
+  ops.querySelector('[data-op="del"]').onclick = async (e) => {
+    e.stopPropagation();
+    if (!(await confirmModal("删除定时任务",
+      `<p>确定删除定时任务 <b>${escapeHtml(t.name)}</b> 吗？</p>` +
+      `<p class="dim small">到点不再运行；历史配置不可恢复。</p>`, "删除"))) return;
+    try { await request("cron.delete", { id: t.id }); }
+    catch (err) { addNotice("删除失败: " + err.message); }
+    await loadCron();
+  };
+  // 系统计划任务（Windows 任务计划程序集成）：导出 / 移除 / 已导出状态
+  const schBtn = ops.querySelector('[data-op="schtask"]');
+  schBtn.onclick = async (e) => {
+    e.stopPropagation();
+    if (schBtn.dataset.exported === "1") {
+      if (!(await confirmModal("移除系统计划任务",
+        `<p>确定移除系统计划任务 <b>SkySheep-${t.id}</b> 吗？</p>` +
+        `<p class="dim small">移除后到点不再独立执行；SkySheep 运行期间的调度不受影响。</p>`,
+        "移除"))) return;
+      try {
+        const r = await request("cron.schtask_remove", { id: t.id });
+        addNotice(r.removed ? `已移除系统计划任务 ${r.task_name}` : (r.notice || "移除失败"));
+      } catch (err) { addNotice("移除失败: " + err.message); }
+    } else {
+      if (!(await confirmModal("导出为系统计划任务",
+        `<p>将在 Windows 任务计划程序创建 <b>SkySheep-${t.id}</b>，按「${escapeHtml(fmtCronSchedule(t))}」到点用命令行独立执行，<b>SkySheep 应用不需要打开</b>。</p>` +
+        `<p class="dim small">结果照常写回这个列表；开了「完成后推送到聊天渠道」的照样推送。应用内停用任务后，系统计划任务到点也会跳过执行。</p>`,
+        "导出"))) return;
+      try {
+        const r = await request("cron.schtask_export", { id: t.id });
+        addNotice(r.exported ? `已导出为系统计划任务 ${r.task_name}，到点独立执行` : (r.notice || "导出失败"));
+      } catch (err) { addNotice("导出失败: " + err.message); }
+    }
+    await loadCron();
+  };
+  // 已导出状态现查现显（schtasks /Query 只读）；非 Windows / 查询不可用时藏掉按钮
+  request("cron.schtask_status", { id: t.id }).then((r) => {
+    if (!r.supported) { schBtn.style.display = "none"; return; }
+    schBtn.dataset.exported = r.exported ? "1" : "0";
+    schBtn.textContent = r.exported ? "⊟" : "⊞";
+    schBtn.title = r.exported
+      ? "已导出为系统计划任务（点击移除）"
+      : "导出为系统计划任务（应用关闭时也能到点运行）";
+  }).catch(() => { schBtn.style.display = "none"; });
+  li.appendChild(ops);
+  li.onclick = () => cronModal(t);
+}
+
 async function loadCron() {
   loadDailyReportRow(); // 日报开关行与定时任务同源（automation 家族），顺手刷新
   loadRunCenter();      // 今日运行总览：定时任务跑完写回任务行，卡片跟着刷新
@@ -973,99 +1161,27 @@ async function loadCron() {
     return;
   }
   const ul = document.getElementById("cron-list");
-  ul.innerHTML = "";
+  // 重建前记下滚动位置，画完写回：后台跑完刷新时正在看的那一行不跳回顶部
+  const keepTop = ul.scrollTop;
   if (!tasks.length) {
     ul.innerHTML = '<li class="dim small" style="padding:6px 10px">还没有定时任务 —— 点右上角 ＋ 新建，让 Agent 到点自己干活</li>';
     return;
   }
-  tasks.forEach((t) => {
-    const li = document.createElement("li");
-    li.className = "cron-item" + (t.enabled ? "" : " off");
-    li.dataset.cronId = t.id; // 工厂「去编辑」按这个定位到具体任务行
-    // ⏹ = 上一轮被用户叫停（不是失败，也不算完成）
-    const status = t.last_status === "ok" ? "✓" : t.last_status === "error" ? "✗"
-      : t.last_status === "cancelled" ? "⏹" : "";
-    li.innerHTML =
-      `<div class="cron-main">
-         <span class="cron-title">${t.enabled ? "" : "⏸ "}${escapeHtml(t.name)}</span>
-         ${t.mode === "team" ? `<span class="chip safe-mark" title="定时团队：按模板「${escapeHtml(t.team_template || "")}」建队，AI 总管带队员协作">团队</span>` : ""}
-         <span class="cron-sched">${escapeHtml(fmtCronSchedule(t))}  下次 ${fmtNextRun(t.next_run_at)}</span>
-         ${t.last_result ? `<span class="cron-last">${status} ${escapeHtml(t.last_result)}</span>` : ""}
-       </div>`;
-    const ops = document.createElement("span");
-    ops.className = "cron-ops";
-    ops.innerHTML =
-      `<button class="cron-op" data-op="run" title="立即运行一次">▶</button>` +
-      `<button class="cron-op" data-op="pipeline" title="纳入编排（复制成流水线节点）">⛓</button>` +
-      `<button class="cron-op" data-op="schtask" title="系统计划任务：状态查询中…">…</button>` +
-      `<button class="cron-op" data-op="toggle" title="${t.enabled ? "暂停" : "启用"}">${t.enabled ? "⏸" : "▶"}</button>` +
-      `<button class="cron-op danger" data-op="del" title="删除">✕</button>`;
-    ops.querySelector('[data-op="run"]').onclick = async (e) => {
-      e.stopPropagation();
-      try {
-        const r = await request("cron.run_now", { id: t.id });
-        addNotice(r && r.started === false
-          ? (r.notice || `「${t.name}」正在运行中，本次未重复触发`)
-          : `已开始运行「${t.name}」，结果会写回列表`);
-      } catch (err) { addNotice("运行失败: " + err.message); }
-    };
-    ops.querySelector('[data-op="pipeline"]').onclick = async (e) => {
-      e.stopPropagation();
-      await pipelineImportModal({ source: "cron", cron_id: t.id });
-    };
-    ops.querySelector('[data-op="toggle"]').onclick = async (e) => {
-      e.stopPropagation();
-      try { await request("cron.update", { id: t.id, enabled: !t.enabled }); }
-      catch (err) { addNotice("操作失败: " + err.message); }
-      await loadCron();
-    };
-    ops.querySelector('[data-op="del"]').onclick = async (e) => {
-      e.stopPropagation();
-      if (!(await confirmModal("删除定时任务",
-        `<p>确定删除定时任务 <b>${escapeHtml(t.name)}</b> 吗？</p>` +
-        `<p class="dim small">到点不再运行；历史配置不可恢复。</p>`, "删除"))) return;
-      try { await request("cron.delete", { id: t.id }); }
-      catch (err) { addNotice("删除失败: " + err.message); }
-      await loadCron();
-    };
-    // 系统计划任务（Windows 任务计划程序集成）：导出 / 移除 / 已导出状态
-    const schBtn = ops.querySelector('[data-op="schtask"]');
-    schBtn.onclick = async (e) => {
-      e.stopPropagation();
-      if (schBtn.dataset.exported === "1") {
-        if (!(await confirmModal("移除系统计划任务",
-          `<p>确定移除系统计划任务 <b>SkySheep-${t.id}</b> 吗？</p>` +
-          `<p class="dim small">移除后到点不再独立执行；SkySheep 运行期间的调度不受影响。</p>`,
-          "移除"))) return;
-        try {
-          const r = await request("cron.schtask_remove", { id: t.id });
-          addNotice(r.removed ? `已移除系统计划任务 ${r.task_name}` : (r.notice || "移除失败"));
-        } catch (err) { addNotice("移除失败: " + err.message); }
-      } else {
-        if (!(await confirmModal("导出为系统计划任务",
-          `<p>将在 Windows 任务计划程序创建 <b>SkySheep-${t.id}</b>，按「${escapeHtml(fmtCronSchedule(t))}」到点用命令行独立执行，<b>SkySheep 应用不需要打开</b>。</p>` +
-          `<p class="dim small">结果照常写回这个列表；开了「完成后推送到聊天渠道」的照样推送。应用内停用任务后，系统计划任务到点也会跳过执行。</p>`,
-          "导出"))) return;
-        try {
-          const r = await request("cron.schtask_export", { id: t.id });
-          addNotice(r.exported ? `已导出为系统计划任务 ${r.task_name}，到点独立执行` : (r.notice || "导出失败"));
-        } catch (err) { addNotice("导出失败: " + err.message); }
-      }
-      await loadCron();
-    };
-    // 已导出状态现查现显（schtasks /Query 只读）；非 Windows / 查询不可用时藏掉按钮
-    request("cron.schtask_status", { id: t.id }).then((r) => {
-      if (!r.supported) { schBtn.style.display = "none"; return; }
-      schBtn.dataset.exported = r.exported ? "1" : "0";
-      schBtn.textContent = r.exported ? "⊟" : "⊞";
-      schBtn.title = r.exported
-        ? "已导出为系统计划任务（点击移除）"
-        : "导出为系统计划任务（应用关闭时也能到点运行）";
-    }).catch(() => { schBtn.style.display = "none"; });
-    li.appendChild(ops);
-    li.onclick = () => cronModal(t);
-    ul.appendChild(li);
+  // 同一批任务（id 与顺序都没变）就沿用原来的行逐行重写：容器不清空，
+  // 滚动位置天然不动；只有增删任务时才整表重建
+  const inPlace = ul.children.length === tasks.length
+    && tasks.every((t, i) => ul.children[i].dataset.cronId === String(t.id));
+  if (!inPlace) ul.innerHTML = "";
+  tasks.forEach((t, i) => {
+    const li = inPlace ? ul.children[i] : ul.appendChild(document.createElement("li"));
+    // 数据没变的行整行跳过：只有真正变了的行才重写，连闪都不闪一下
+    const sig = JSON.stringify(t);
+    if (li._cronSig === sig) return;
+    li._cronSig = sig;
+    fillCronRow(li, t);
   });
+  ul.scrollTop = keepTop;
+  syncCronClock(); // 有在跑的才起秒表，没有就收掉
 }
 
 async function cronModal(existing) {
@@ -1499,6 +1615,69 @@ function mountPipelineGraph(el, nodes, opts = {}) {
   ro.observe(el);
 }
 
+/** 画一行流水线。li 由调用方给：列表刷新时沿用同一个节点就地重写，
+    正在看的那一行不会被整表重画带回顶部。 */
+function fillPipelineRow(li, p) {
+  const done = (p.nodes || []).filter((n) => n.status === "done").length;
+  li.className = "cron-item pipeline-item pl-pipe-" + p.status;
+  li.dataset.pipelineId = p.id;
+  li.innerHTML =
+    `<div class="cron-main">
+       <span class="cron-title">${escapeHtml(p.name)}</span>
+       <span class="cron-sched">${PL_PIPE_STATUS[p.status] || p.status}  节点 ${done}/${(p.nodes || []).length}  同时跑 ${p.concurrency} 个</span>
+       <div class="pl-graph-mount"></div>
+     </div>`;
+  const ops = document.createElement("span");
+  ops.className = "cron-ops";
+  if (p.status === "running") {
+    ops.innerHTML = `<button class="cron-op" data-op="stop" title="停止流水线">⏹</button>` +
+      `<button class="cron-op" data-op="dup" title="复制为草稿">⧉</button>` +
+      `<button class="cron-op danger" data-op="del" title="删除">✕</button>`;
+  } else {
+    // 草稿/已停止/已完成/有失败都可启动：延展了新节点或重跑失败节点后要能再跑
+    //（没有可运行节点时后端会拒绝并提示，不会空转）
+    ops.innerHTML = `<button class="cron-op" data-op="start" title="启动">▶</button>` +
+      `<button class="cron-op" data-op="dup" title="复制为草稿">⧉</button>` +
+      `<button class="cron-op danger" data-op="del" title="删除">✕</button>`;
+  }
+  ops.querySelector("[data-op='dup']").onclick = async (e) => {
+    e.stopPropagation();
+    try {
+      const r = await request("pipeline.duplicate", { id: p.id });
+      addNotice(`已复制为草稿「${r.pipeline.name}」，结构与预授权保持一致`);
+    } catch (err) { addNotice("复制失败: " + err.message); }
+    await loadPipelines();
+  };
+  const start = ops.querySelector('[data-op="start"]');
+  if (start) start.onclick = async (e) => {
+    e.stopPropagation();
+    try {
+      await request("pipeline.start", { id: p.id });
+      addNotice(`流水线「${p.name}」已启动，依赖满足的节点会自动运行`);
+    } catch (err) { addNotice("启动失败: " + err.message); }
+    await loadPipelines();
+  };
+  const stop = ops.querySelector('[data-op="stop"]');
+  if (stop) stop.onclick = async (e) => {
+    e.stopPropagation();
+    try { await request("pipeline.cancel", { id: p.id }); }
+    catch (err) { addNotice("停止失败: " + err.message); }
+    await loadPipelines();
+  };
+  ops.querySelector('[data-op="del"]').onclick = async (e) => {
+    e.stopPropagation();
+    if (!(await confirmModal(`删除流水线「${p.name}」？运行中的节点也会停止，记录不可恢复。`,
+      { title: "删除流水线", okLabel: "删除", danger: true }))) return;
+    try { await request("pipeline.delete", { id: p.id }); }
+    catch (err) { addNotice("删除失败: " + err.message); }
+    await loadPipelines();
+  };
+  li.appendChild(ops);
+  li.onclick = () => pipelineModal(p);
+  const gbox = li.querySelector(".pl-graph-mount");
+  if (gbox && (p.nodes || []).length) mountPipelineGraph(gbox, p.nodes);
+}
+
 async function loadPipelines() {
   loadDailyReportRow(); // 日报汇总口径含流水线终态：任务编排分段打开时同样刷新
   loadRunCenter();      // 今日运行总览：流水线节点到终态写回节点行，卡片跟着刷新
@@ -1517,71 +1696,26 @@ async function loadPipelines() {
   }
   pipes.forEach((p) => { pipelineSeenStatus[p.id] = p.status; });
   const ul = document.getElementById("pipeline-list");
-  ul.innerHTML = "";
+  // 重建前记下滚动位置，画完写回：编排节点变化刷新时正在看的那一行不跳回顶部
+  const keepTop = ul.scrollTop;
   if (!pipes.length) {
     ul.innerHTML = '<li class="dim small" style="padding:6px 10px">还没有流水线 —— 点右上角 ＋ 新建，把几个任务排成「并行开发 → 汇总审查」</li>';
     return;
   }
-  pipes.forEach((p) => {
-    const done = (p.nodes || []).filter((n) => n.status === "done").length;
-    const li = document.createElement("li");
-    li.className = "cron-item pipeline-item pl-pipe-" + p.status;
-    li.innerHTML =
-      `<div class="cron-main">
-         <span class="cron-title">${escapeHtml(p.name)}</span>
-         <span class="cron-sched">${PL_PIPE_STATUS[p.status] || p.status}  节点 ${done}/${(p.nodes || []).length}  同时跑 ${p.concurrency} 个</span>
-         <div class="pl-graph-mount"></div>
-       </div>`;
-    const ops = document.createElement("span");
-    ops.className = "cron-ops";
-    if (p.status === "running") {
-      ops.innerHTML = `<button class="cron-op" data-op="stop" title="停止流水线">⏹</button>` +
-        `<button class="cron-op" data-op="dup" title="复制为草稿">⧉</button>` +
-        `<button class="cron-op danger" data-op="del" title="删除">✕</button>`;
-    } else {
-      // 草稿/已停止/已完成/有失败都可启动：延展了新节点或重跑失败节点后要能再跑
-      //（没有可运行节点时后端会拒绝并提示，不会空转）
-      ops.innerHTML = `<button class="cron-op" data-op="start" title="启动">▶</button>` +
-        `<button class="cron-op" data-op="dup" title="复制为草稿">⧉</button>` +
-        `<button class="cron-op danger" data-op="del" title="删除">✕</button>`;
-    }
-    ops.querySelector("[data-op='dup']").onclick = async (e) => {
-      e.stopPropagation();
-      try {
-        const r = await request("pipeline.duplicate", { id: p.id });
-        addNotice(`已复制为草稿「${r.pipeline.name}」，结构与预授权保持一致`);
-      } catch (err) { addNotice("复制失败: " + err.message); }
-      await loadPipelines();
-    };
-    const start = ops.querySelector('[data-op="start"]');
-    if (start) start.onclick = async (e) => {
-      e.stopPropagation();
-      try {
-        await request("pipeline.start", { id: p.id });
-        addNotice(`流水线「${p.name}」已启动，依赖满足的节点会自动运行`);
-      } catch (err) { addNotice("启动失败: " + err.message); }
-      await loadPipelines();
-    };
-    const stop = ops.querySelector('[data-op="stop"]');
-    if (stop) stop.onclick = async (e) => {
-      e.stopPropagation();
-      try { await request("pipeline.cancel", { id: p.id }); }
-      catch (err) { addNotice("停止失败: " + err.message); }
-      await loadPipelines();
-    };
-    ops.querySelector('[data-op="del"]').onclick = async (e) => {
-      e.stopPropagation();
-      if (!(await confirmModal(`删除流水线「${p.name}」？运行中的节点也会停止，记录不可恢复。`,
-        { title: "删除流水线", okLabel: "删除", danger: true }))) return;
-      try { await request("pipeline.delete", { id: p.id }); }
-      catch (err) { addNotice("删除失败: " + err.message); }
-      await loadPipelines();
-    };
-    li.onclick = () => pipelineModal(p);
-    ul.appendChild(li);
-    const gbox = li.querySelector(".pl-graph-mount");
-    if (gbox && (p.nodes || []).length) mountPipelineGraph(gbox, p.nodes);
+  // 同一批流水线（id 与顺序都没变）沿用原来的行逐行重写，容器不清空；
+  // 只有增删流水线时才整表重建
+  const inPlace = ul.children.length === pipes.length
+    && pipes.every((p, i) => ul.children[i].dataset.pipelineId === String(p.id));
+  if (!inPlace) ul.innerHTML = "";
+  pipes.forEach((p, i) => {
+    const li = inPlace ? ul.children[i] : ul.appendChild(document.createElement("li"));
+    // 数据没变的流水线整行跳过（含依赖图重排）：只有节点状态真变了的才重写
+    const sig = JSON.stringify(p);
+    if (li._pipeSig === sig) return;
+    li._pipeSig = sig;
+    fillPipelineRow(li, p);
   });
+  ul.scrollTop = keepTop;
 }
 
 function pipelineModal(p, focusNodeId) {
@@ -1674,7 +1808,7 @@ function pipelineModal(p, focusNodeId) {
     onPick: (id) => {
       const card = box.querySelector(`.pl-node-view[data-nid="${id}"]`);
       if (!card) return;
-      card.scrollIntoView({ block: "center", behavior: "smooth" });
+      card.scrollIntoView({ block: "center", behavior: smoothBehavior() });
       card.classList.add("flash");
       setTimeout(() => card.classList.remove("flash"), 1200);
     },
@@ -1720,7 +1854,7 @@ function pipelineModal(p, focusNodeId) {
   if (focusNodeId) requestAnimationFrame(() => {
     const card = box.querySelector(`.pl-node-view[data-nid="${Number(focusNodeId)}"]`);
     if (!card) return;
-    card.scrollIntoView({ block: "center", behavior: "smooth" });
+    card.scrollIntoView({ block: "center", behavior: smoothBehavior() });
     card.classList.add("flash");
     setTimeout(() => card.classList.remove("flash"), 1200);
   });
@@ -1737,8 +1871,8 @@ function pipelineCreateModal() {
       <label class="cron-notify"><input id="pl-notify-create" type="checkbox"> 节点完成后推送到聊天渠道</label>
       <div id="pl-nodes"></div>
       <button id="pl-add-node" class="rp-mini" type="button">＋ 添加节点</button>
-      <p class="dim small">节点按依赖自动排序：勾选「依赖前面的节点」，被依赖的全部完成后才会开始。
-        最后一个节点勾选依赖它前面的全部节点，就是汇总审查。</p>
+      <p class="dim small">节点默认并行：要串行才在节点上勾选「依赖前面的节点」，
+        被勾选的全部完成后它才开始。最后一个节点勾选前面的全部节点，就是汇总审查。</p>
       <p class="dim small">安全说明：每个节点无人值守运行，<b>只读工具本来就放行</b>；
         写入/执行类必须在该节点勾选，否则运行时自动拒绝。启动前请再检查一遍各节点的预授权。
         <b>勾选 run_command 等于允许无人值守执行任意命令</b>，只在节点指令完全可信时勾选。</p>
@@ -1770,8 +1904,8 @@ function pipelineCreateModal() {
       <label class="pl-retry-row dim small">失败自动重试 <input type="number" class="pl-node-retries" min="0" max="3" value="0"> 次</label>
       <label class="pl-loop-row dim small" hidden>最多迭代 <input type="number" class="pl-node-loopmax" min="2" max="10" value="3"> 轮（完成时把回复第一行写成 DONE）</label>
       <label class="pl-timeout-row dim small">超时 <input type="number" class="pl-node-timeout" min="0" max="1440" value="60"> 分钟（0 = 不限时；超时按失败重试处理，防卡死）</label>
-      ${idx > 0 ? `<div class="pl-deps">依赖（完成后才运行本节点）：
-        ${priorDeps.map((t, i) => `<label class="pl-dep"><input type="checkbox" value="${i}" checked>${escapeHtml(t)}</label>`).join("")}
+      ${idx > 0 ? `<div class="pl-deps">依赖（勾选后才等它完成；不勾 = 与前面并行）：
+        ${priorDeps.map((t, i) => `<label class="pl-dep"><input type="checkbox" value="${i}">${escapeHtml(t)}</label>`).join("")}
         <label class="pl-dep pl-dep-mode">满足方式
           <select class="pl-node-depmode">
             <option value="all">全部完成</option>
@@ -2069,6 +2203,8 @@ async function pipelineImportModal(preset) {
 }
 
 // 到点提醒横幅（后台循环推送 schedule_reminder 事件）
+const AG_SNOOZE_S = 600; // 「推迟 10 分钟」的位移（秒）
+
 function showAgendaReminder(item) {
   const bar = document.createElement("div");
   bar.className = "agenda-reminder";
@@ -2081,18 +2217,50 @@ function showAgendaReminder(item) {
        <span class="small dim">${fmtAgendaSpan(item)}${remainTxt}${item.notes ? "  " + escapeHtml(item.notes) : ""}</span>
      </div>
      <button class="btn-ghost" data-a="done">完成</button>
-     <button class="btn-ghost" data-a="snooze">稍后提醒</button>
+     <button class="btn-ghost" data-a="snooze">推迟 10 分钟</button>
      <button class="ar-close" title="关闭">✕</button>`;
-  const close = () => bar.remove();
+  let undoTimer = 0;
+  const close = () => {
+    if (undoTimer) clearTimeout(undoTimer);
+    bar.remove();
+  };
   bar.querySelector('[data-a="done"]').onclick = async () => {
     await request("schedule.update", { id: item.id, done: true });
     if (rightViewVisible("agenda")) await loadAgenda();
     close();
   };
+  // 「推迟」是整条日程往后挪 10 分钟：起点与终点一起移，时长不变
+  //（只挪 start_at 会把时段压短，18:00–19:00 休息一下就成 18:10–19:00）
   bar.querySelector('[data-a="snooze"]').onclick = async () => {
-    await request("schedule.update", { id: item.id, start_at: Date.now() / 1000 + 600 });
+    const params = { id: item.id, start_at: item.start_at + AG_SNOOZE_S };
+    if (item.end_at) params.end_at = item.end_at + AG_SNOOZE_S;
+    try { await request("schedule.update", params); }
+    catch (err) { addNotice("推迟失败：" + err.message); return; }
     if (rightViewVisible("agenda")) await loadAgenda();
-    close();
+    // 横幅原地换成回执 + 撤销：挪错了不必再打开日程手改时间
+    const moved = Object.assign({}, item, {
+      start_at: item.start_at + AG_SNOOZE_S,
+      end_at: item.end_at ? item.end_at + AG_SNOOZE_S : 0,
+    });
+    bar.innerHTML =
+      `<span class="ar-ico">⏰</span>
+       <div class="ar-body">
+         <b>${escapeHtml(item.title)}</b>
+         <span class="small dim">已推迟 10 分钟 · ${fmtAgendaSpan(moved)}</span>
+       </div>
+       <button class="btn-ghost" data-a="undo">撤销</button>
+       <button class="ar-close" title="关闭">✕</button>`;
+    bar.querySelector('[data-a="undo"]').onclick = async () => {
+      const back = { id: item.id, start_at: item.start_at };
+      if (item.end_at) back.end_at = item.end_at;
+      try { await request("schedule.update", back); }
+      catch (err) { addNotice("撤销失败：" + err.message); return; }
+      if (rightViewVisible("agenda")) await loadAgenda();
+      close();
+    };
+    bar.querySelector(".ar-close").onclick = close;
+    // 回执留 10 秒给撤销，之后自己收走（提醒条不是常驻挂件）
+    undoTimer = setTimeout(close, 10000);
   };
   bar.querySelector(".ar-close").onclick = close;
   document.body.appendChild(bar);

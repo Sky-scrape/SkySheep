@@ -285,6 +285,43 @@ def test_run_center_crash_recovery_marks_interrupted(tmp_path):
     assert run in rc.interrupted_runs()
 
 
+def test_run_center_terminal_drops_stale_detail(tmp_path):
+    """终态不该留着「正在执行 X」的过程文案。
+
+    新轮在 update()/cancel() 收口时清；旧快照（清洗前落盘的）在装载时清——
+    否则运行中心会出现「已完成 · 正在执行 read_file」这种自相矛盾的行。
+    interrupted 的说明文案是有意义的，保留。
+    """
+    p = tmp_path / "runs.json"
+    p.write_text(json.dumps({"version": 1, "runs": [
+        {"id": "old-done", "kind": "turn", "session_id": "s1",
+         "state": "completed", "detail": "正在执行 read_file"},
+        {"id": "old-dead", "kind": "turn", "session_id": "s1",
+         "state": "cancelled", "detail": "正在执行 grep"},
+        {"id": "old-broken", "kind": "turn", "session_id": "s1",
+         "state": INTERRUPTED, "detail": "应用退出时该任务仍在运行"},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    rc = RunCenter(p)
+    assert rc.get("old-done").detail == ""
+    assert rc.get("old-dead").detail == ""
+    assert rc.get("old-broken").detail == "应用退出时该任务仍在运行"
+
+    # 新轮：运行态 → 终态，没传新 detail 就清掉过程文案
+    rc.register("run-2", "turn", "s2")
+    rc.update("run-2", state="tool_running", detail="正在执行 read_file")
+    rc.update("run-2", state="completed")
+    assert rc.get("run-2").detail == ""
+    # cancel() 同一口径
+    rc.register("run-3", "turn", "s3")
+    rc.update("run-3", state="tool_running", detail="正在执行 grep")
+    rc.cancel("run-3")
+    assert rc.get("run-3").detail == ""
+    # 显式给的新文案（终态也说得通的）不被抹掉
+    rc.register("run-4", "turn", "s4")
+    rc.update("run-4", state="failed", detail="可达性检查未通过")
+    assert rc.get("run-4").detail == "可达性检查未通过"
+
+
 def test_run_center_cancel_and_list(tmp_path):
     rc = RunCenter(tmp_path / "runs.json")
     rc.register("run-1", "turn", "s1")

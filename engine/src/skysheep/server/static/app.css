@@ -51,10 +51,42 @@
   --shadow-sm: 2px 2px 0 rgba(29, 26, 22, .13);
   --shadow-md: 3px 3px 0 rgba(29, 26, 22, .17);
   --shadow-lg: 5px 5px 0 rgba(29, 26, 22, .22), 0 12px 32px rgba(29, 26, 22, .16);
-  /* —— 动效 —— */
-  --dur-fast: 120ms; --dur-base: 180ms; --dur-slow: 320ms;
-  --ease-out: cubic-bezier(.2, .9, .3, 1);
-  --ease-pop: cubic-bezier(.34, 1.56, .64, 1);
+  /* —— 动效 ——
+     一套语言：每个状态变化都要交代「从哪来、到哪去」。快、轻、可打断，
+     用户反复做的操作更快；能用 transition + 类切换的不用 @keyframes。
+
+     曲线只有四条，按语义选，不按数值选：
+       --ease-out   进场 / 落位：快起慢停（decelerate）。元素从不可见处进入、
+                    从别处移动到新位置——先快后缓，收尾不拖泥带水。
+       --ease-in    退场 / 撤走：慢起快走（accelerate）。元素离开、收起、
+                    让出空间——先缓后急，走干净。
+       --ease-std   通用 / 对称：颜色、透明度、边框、数值这类「两边都看得见」
+                    的平缓变化，以及尺寸/折叠的中间过程。
+       --ease-pop   弹性落位：只给「放下去」用（开关、宠物落地）。过冲只有
+                    几个百分点，落位几乎看不出余韵——不要用它做位移或跨屏动画。
+     时长四档，值就是档位（组件只引用 token，不写裸 ms）：
+       --dur-press   90ms 按下 / 指针即时反馈；用户反复做，必须最快
+       --dur-fast   140ms 悬停、开关、箭头、复制结果等小状态
+       --dur-base   200ms 浮层、折叠面板、侧栏/右面板、弹层进出
+       --dur-slow   280ms 跨页、消息入场、大块内容位移；一屏同时最多一处
+     循环/提示动画不是交互档位，单独两个周期：
+       --dur-loop  1200ms 呼吸 / 脉冲（同一节奏，任何提示都别各跑各的）
+       --dur-slow-loop 2000ms 骨架屏扫光
+       --dur-attn   800ms 注意力闪烁的一次明暗（定位跳转、搜索命中）
+     角色动画（云朵小羊）单独一组：它是「性格」，不跟交互节奏走，
+     但同样集中定义，组件里不写裸值。
+     「减少动态效果」由文件后部唯一总闸统一降级（含位移/缩放归零），
+     组件里不要再写局部 @media (prefers-reduced-motion) 块。 */
+  --dur-press: 90ms; --dur-fast: 140ms; --dur-base: 200ms; --dur-slow: 280ms;
+  --dur-loop: 1200ms; --dur-slow-loop: 2s; --dur-attn: 800ms;
+  --pet-float: 3.2s; --pet-work: 1.8s; --pet-shake: 420ms; --pet-fall: 1.9s;
+  --pet-done: 800ms; --pet-poke: 340ms; --pet-land: 500ms;
+  --ease-out: cubic-bezier(.16, 1, .3, 1);
+  --ease-in: cubic-bezier(.4, 0, 1, 1);
+  --ease-std: cubic-bezier(.4, 0, .2, 1);
+  --ease-pop: cubic-bezier(.34, 1.12, .64, 1);
+  /* 折叠类高度动画（弹层/详情）需要 height:auto 可插值；不支持的旧内核自动退回瞬变 */
+  interpolate-size: allow-keywords;
   --num: tabular-nums;
   --font-mono: ui-monospace, "SF Mono", Consolas, "Courier New", monospace;
   /* 字重阶梯：深色主题整体下移 40（暗底亮字会视觉增粗，降档才和浅色同一分量）。
@@ -130,13 +162,17 @@ html, body {
    提示、再真的执行一次历史导航。所以逐元素关掉横向那一轴（纵向不动：内层列表滚到
    底接着滚外层面板是正常体验）。引擎侧另有更硬的一层，见 skysheep/webviewargs.py */
 * { overscroll-behavior-x: none; }
-/* 极早期兜底（body 还没画出来、app.css 还没到时）：露出的也是纸色而不是 WebView 白底 */
-html { background: var(--bg); }
+/* 极早期兜底（body 还没画出来、app.css 还没到时）：露出的也是纸色而不是 WebView 白底。
+   地面整体挂在 <html> 上而不是 <body>：根元素的背景会被画成 canvas 背景（最底层），
+   body 才是透明的一层——这样「切主题时淡出的旧底」这个 z-index:-1 的定位层
+   （.theme-ground-fade）才有地方可站：画在 canvas 之上、所有内容之下。
+   挂在 body 上时 body 自己的背景会盖住它，验证时整页看不到任何淡出效果。 */
+html { background: var(--body-bg); background-attachment: fixed; }
 body {
   font-family: "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", "Segoe UI", sans-serif;
-  /* 桌面 = 深纸 + 半调网点；其余主题见文件尾部的 [data-theme=…] 段 */
-  background: var(--body-bg);
-  background-attachment: fixed;
+  /* 地面（桌面深纸 + 半调网点；其余主题见文件尾部的 [data-theme=…] 段）在 html 上，
+     body 保持透明，好让主题切换的旧底淡出层垫在内容下面 */
+  background: transparent;
   color: var(--text); font-size: var(--fs-base);
   font-weight: var(--fw-normal);
   /* 数字全部锁等宽，时间/token/计数滚动时不抖；正文走 pretty 减少孤字与短尾行 */
@@ -145,6 +181,44 @@ body {
   text-wrap: pretty;
   -webkit-font-smoothing: antialiased;
 }
+/* ---------- 主题切换：整页一起换色 ----------
+   主题变量是「瞬时替换」：只有本来就写了 transition 的小控件（按钮/导航/边框）
+   会花 140ms 补间，而大面积——根元素上的渐变底（background-image 不可插值）、
+   卡片底、正文色——一帧就到终值。观感是「底子先硬跳，零碎细节慢慢跟」。
+   切主题时由 app.js 的 beginThemeSwap 打开一个有固定时长的过渡窗口：
+   · <html> 挂 .theme-swap，窗口内「承载大面积的这几层」只过渡颜色类属性
+     （一次同拍的变化，窗口一过就摘掉，平时不给全站挂 transition）；
+   · body 末尾临时插一层 .theme-ground-fade，填上切换前的地面（渐变快照，
+     渐变没法插值，就用旧底淡出补成过渡）。它靠 z-index:-1 站在 canvas
+     （根元素的背景）之上、内容之下——地面挂在 <html> 上就是为了给它腾出这一层。
+   窗口时长与 --dur-base 一致（JS 里的 THEME_SWAP_MS 是同一个数）。
+   选择面刻意只到大面积容器这一层：给 `body *` 挂过渡会让整页每个元素都新建
+   一条过渡（设置页实测 288 条），首帧要等 0.6s 才画出来——过渡还没播就先卡住，
+   等于没做。正文字色走 body 的继承（父级的过渡值逐帧传给子级），不必逐元素挂。 */
+html.theme-swap,
+html.theme-swap body,
+html.theme-swap #sidebar,
+html.theme-swap #topbar,
+html.theme-swap #chat-main,
+html.theme-swap #chat,
+html.theme-swap #composer,
+html.theme-swap #right-panel,
+html.theme-swap .settings-body,
+html.theme-swap .settings-page,
+html.theme-swap .settings-card,
+html.theme-swap .rp-page,
+html.theme-swap .msg .md,
+html.theme-swap .chat-tab {
+  transition-property: color, background-color, border-color, outline-color !important;
+  transition-duration: var(--dur-base) !important;
+  transition-timing-function: var(--ease-std) !important;
+  transition-delay: 0s !important;
+}
+.theme-ground-fade {
+  position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  animation: theme-ground-out var(--dur-base) var(--ease-std) forwards;
+}
+@keyframes theme-ground-out { from { opacity: 1; } to { opacity: 0; } }
 /* 图标与中文基线差半像素：统一下移 0.125em；flex 容器里的图标不受影响 */
 svg { vertical-align: -0.125em; }
 input, textarea, select, button { font-variant-numeric: inherit; font-feature-settings: inherit; }
@@ -204,7 +278,7 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
   border: 2px solid var(--ink-line); border-radius: var(--r-sm);
   padding: 9px 18px; font-size: var(--fs-base); font-weight: var(--fw-bold); letter-spacing: 2px;
   box-shadow: var(--shadow-sm);
-  transition: transform var(--dur-fast), box-shadow var(--dur-fast), filter var(--dur-fast);
+  transition: transform var(--dur-press) var(--ease-out), box-shadow var(--dur-press) var(--ease-out), filter var(--dur-fast) var(--ease-std);
 }
 .btn-primary:hover:not(:disabled) { background: var(--blue-deep); transform: translate(-1px, -1px); box-shadow: var(--shadow-md); }
 .btn-primary:active:not(:disabled) { transform: translate(1px, 1px); box-shadow: none; }
@@ -215,11 +289,16 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
   border-color: var(--ink-line) !important;
 }
 .btn-danger:hover:not(:disabled) { filter: brightness(1.08); }
+/* 破坏性确认执行期间按钮 disabled：.btn-danger 的 !important 会压过
+   .btn-primary:disabled，红底会停在「蓄势待按」的样子；用更高特异性收回禁用皮 */
+#modal-ok.btn-danger:disabled {
+  background: var(--paper-inset) !important; color: var(--dim) !important;
+}
 .btn-ghost, .rp-mini {
   background: var(--paper-raised); color: var(--text); border: 1.5px solid var(--ink-line);
   border-radius: var(--r-xs); font-weight: var(--fw-bold);
   box-shadow: var(--shadow-sm);
-  transition: transform var(--dur-fast), box-shadow var(--dur-fast), background var(--dur-fast);
+  transition: transform var(--dur-press) var(--ease-out), box-shadow var(--dur-press) var(--ease-out), background var(--dur-fast) var(--ease-std);
 }
 .btn-ghost { padding: 7px 13px; font-size: var(--fs-md); }
 .rp-mini { padding: 4px 10px; font-size: var(--fs-sm); flex-shrink: 0; }
@@ -228,6 +307,8 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
 .btn-ghost.danger, .rp-mini.danger { color: var(--reg); border-color: var(--reg); }
 .btn-ghost.danger:hover:not(:disabled), .rp-mini.danger:hover:not(:disabled) { background: rgba(143, 29, 29, .08); }
 .btn-ghost.wide { width: 100%; }
+/* 顶栏「停止」：不参与顶栏压缩、不折行——390 窄屏上必须还是一颗完整的按钮 */
+#btn-stop { white-space: nowrap; flex: none; margin-left: 6px; }
 .rp-mini.primary { background: var(--blue); color: var(--on-accent); }
 .rp-mini.primary:hover:not(:disabled) { background: var(--blue-deep); }
 .rp-mini:disabled { background: var(--paper-inset); color: var(--dim); border-color: var(--line2); box-shadow: none; cursor: not-allowed; transform: none; }
@@ -249,11 +330,41 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
   outline: none; border-color: var(--blue); box-shadow: 0 0 0 2px var(--blue-weak);
 }
 
-/* ---------- 浮层统一入场：菜单 / 弹层共用 ui-pop-in（transform+opacity，dur-fast） ----------
-   显隐走 .hidden 的元素每次出现都重放入场；reduced-motion 由全局降级块一并压平 */
+/* ---------- 浮层统一进出：菜单 / 浮条共用一条 transition（transform+opacity，dur-fast） ----------
+   显隐仍由 .hidden 判定；display 参与离散过渡，所以关闭时先淡出再摘除，不再同帧硬切。
+   打开方向由 --pop-origin 决定：默认从左上角长出来，向上翻的菜单（#model-menu 等）
+   在各自规则里声明 bottom left。注意：这里不再用 animation，避免「只进不出」，
+   动画进行中再次点开也能从当前状态自然接上（mo4 可打断）。
+   reduced-motion 由文件后部唯一总闸压平。 */
 .rt-menu, .session-menu, .tabs-menu, .settings-search-results,
 #notif-panel, #sel-quote-btn, .input-menu, .find-bar {
-  animation: ui-pop-in var(--dur-fast) var(--ease-out);
+  --pop-origin: top left;
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  transform-origin: var(--pop-origin);
+  transition: opacity var(--dur-fast) var(--ease-std),
+              transform var(--dur-fast) var(--ease-out),
+              visibility var(--dur-fast);
+  /* 老内核不认 allow-discrete 时保底：上一条仍然生效（只是关闭同帧摘除） */
+  transition: opacity var(--dur-fast) var(--ease-std),
+              transform var(--dur-fast) var(--ease-out),
+              display var(--dur-fast) allow-discrete,
+              visibility var(--dur-fast);
+}
+.rt-menu.hidden, .session-menu.hidden, .tabs-menu.hidden, .settings-search-results.hidden,
+#notif-panel.hidden, #sel-quote-btn.hidden, .input-menu.hidden, .find-bar.hidden {
+  opacity: 0;
+  transform: translateY(4px) scale(.985);
+  pointer-events: none;
+  /* 淡出结束后才摘离 tab 序/读屏树；打开时 visibility 立即变可见（离散插值的特例） */
+  visibility: hidden;
+}
+@starting-style {
+  .rt-menu:not(.hidden), .session-menu:not(.hidden), .tabs-menu:not(.hidden),
+  .settings-search-results:not(.hidden), #notif-panel:not(.hidden),
+  #sel-quote-btn:not(.hidden), .input-menu:not(.hidden), .find-bar:not(.hidden) {
+    opacity: 0; transform: translateY(4px) scale(.985);
+  }
 }
 
 /* ---------- 骨架屏：加载占位统一为闪动条（替换「正在加载…」灰字） ----------
@@ -265,12 +376,12 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
   border-radius: var(--r-xs);
   background: linear-gradient(105deg, var(--paper-sunken) 25%, var(--paper-raised) 50%, var(--paper-sunken) 75%);
   background-size: 220% 220%;
-  animation: sk-breathe 2s ease-in-out infinite;
+  animation: sk-breathe var(--dur-slow-loop) var(--ease-std) infinite;
   color: transparent !important;
   cursor: default; user-select: none;
 }
 .skeleton[data-motion="wave"] {
-  animation: sk-sweep 2s linear infinite;
+  animation: sk-sweep var(--dur-slow-loop) linear infinite;
   animation-delay: calc(var(--cds-skel-i, 0) * 90ms);
 }
 @keyframes sk-sweep { from { background-position: 180% 0; } to { background-position: -20% 0; } }
@@ -324,7 +435,7 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
    （此前「折叠后再也打不开侧栏」就是它造成的）。 */
 #sidebar { transition: margin-left var(--dur-base) var(--ease-out); }
 body.left-collapsed #sidebar { margin-left: calc(-1 * var(--sb-w, 262px)); }
-#sb-resizer { transition: opacity var(--dur-fast) ease; }
+#sb-resizer { transition: opacity var(--dur-fast) var(--ease-std); }
 body.left-collapsed #sb-resizer { opacity: 0; pointer-events: none; }
 #sb-rail {
   width: 0; flex-shrink: 0;
@@ -337,10 +448,11 @@ body.left-collapsed #sb-resizer { opacity: 0; pointer-events: none; }
 #sb-rail::-webkit-scrollbar { width: 0; height: 0; }
 body.left-collapsed #sb-rail { width: 56px; border-right-width: 2px; }
 /* 启动恢复折叠态用（ui-anim-off，见 initUiPrefs）：跳过过渡直接呈现目标状态，
-   不让用户开机看一遍「侧栏滑出」动画 */
+   不让用户开机看一遍「侧栏滑出 / 右面板滑入」动画 */
 body.ui-anim-off #sidebar,
 body.ui-anim-off #sb-resizer,
-body.ui-anim-off #sb-rail { transition: none !important; }
+body.ui-anim-off #sb-rail,
+body.ui-anim-off #right-panel { transition: none !important; }
 .rail-btn {
   width: 40px; height: 40px; flex-shrink: 0; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
@@ -649,7 +761,7 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 /* 列头状态：运行中蓝点（同主标签的 tab-dot 脉冲）、等确认金标锁 */
 .split-run {
   width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
-  background: var(--blue); animation: tab-pulse 1.2s ease-in-out infinite;
+  background: var(--blue); animation: tab-pulse var(--dur-loop) var(--ease-std) infinite;
 }
 .split-perm { font-size: var(--fs-cap); flex-shrink: 0; cursor: pointer; }
 /* 分屏开启时主栏变窄：宠物/回底浮标/minimap 留白同步收敛；顶栏要盖住分屏
@@ -734,7 +846,7 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   border-radius: 5px; background: var(--blue); background-clip: content-box;
   opacity: .3;
   pointer-events: auto; cursor: pointer;
-  transition: width .18s var(--ease-out), opacity .15s ease;
+  transition: width var(--dur-base) var(--ease-std), opacity var(--dur-fast) var(--ease-std);
 }
 .chat-minimap-dot:hover { opacity: .6; }
 .chat-minimap-dot.on { opacity: 1; }
@@ -774,7 +886,7 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 /* 切换项目后的新内容淡入（switchProject 给聊天流/会话列表/项目列表加 .swap-in）：
    提示条这类大块带边框内容从「瞬间弹入」变成平滑过渡，消除弹窗般的突现感 */
 @keyframes swapfade { from { opacity: .25; } to { opacity: 1; } }
-.swap-in { animation: swapfade .18s ease-out; }
+.swap-in { animation: swapfade var(--dur-fast) var(--ease-out); }
 
 /* 会话搜索跳转到命中消息：目标消息闪一下底（与设置搜索的 .ssr-flash 同一手势），
    命中词本身用 <mark class="search-hit-mark"> 黄底标出，数秒后自动清除。 */
@@ -783,10 +895,10 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   25% { box-shadow: 0 0 0 3px var(--blue); }
   70% { box-shadow: 0 0 0 3px transparent; }
 }
-.msg-hit-flash { animation: msgHitFlash 0.9s ease-in-out 2; border-radius: var(--r-md); }
+.msg-hit-flash { animation: msgHitFlash var(--dur-attn) var(--ease-std) 2; border-radius: var(--r-md); }
 mark.search-hit-mark {
   background: var(--mark-bg); color: var(--mark-fg); border-radius: 2px;
-  padding: 0 1px; animation: rise var(--dur-fast) ease-out both;
+  padding: 0 1px; animation: rise var(--dur-fast) var(--ease-out) both;
 }
 
 /* ---------- 会话标签条（顶栏内，浏览器式页签，常驻） ----------
@@ -833,6 +945,15 @@ mark.search-hit-mark {
 }
 /* 标题撑满剩余宽度：关闭 ✕ 固定钉在标签右缘，不随标题长短贴在字后 */
 .chat-tab .tab-title { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 页签序号：只在窄屏显形（见文件尾部 ≤520px 段）。手机上标题截得只剩两三个字，
+   触屏又没有 hover title，同一句话开出来的几个会话标题本来就一样——序号是
+   用户区分「第几张」的唯一线索，桌面端不显示（标题够长，不添噪音） */
+.chat-tab .tab-idx {
+  display: none; flex: 0 0 auto;
+  font-size: var(--fs-cap); color: var(--dim);
+  font-variant-numeric: var(--num);
+}
+.chat-tab.active .tab-idx { color: var(--text2); }
 /* 标签上的行内改名框：与侧栏会话行的 .rename-inline 同一语言，只按标签高度
    （顶栏 30px）收紧内边距与字号；min-width 让空名时也有可点的落点 */
 .chat-tab .rename-inline {
@@ -845,7 +966,7 @@ mark.search-hit-mark {
 .chat-tab .rename-inline:focus { outline: none; box-shadow: var(--shadow-sm); }
 .chat-tab .tab-dot {
   width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
-  background: var(--blue); animation: tab-pulse 1.2s ease-in-out infinite;
+  background: var(--blue); animation: tab-pulse var(--dur-loop) var(--ease-std) infinite;
 }
 @keyframes tab-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 .chat-tab .tab-perm { font-size: var(--fs-cap); flex-shrink: 0; }
@@ -948,8 +1069,22 @@ mark.search-hit-mark {
   transition: transform var(--dur-fast) var(--ease-out);
 }
 .proc-box:not(.folded) .pb-caret { transform: rotate(90deg); }
-.proc-box-body { display: flex; flex-direction: column; gap: 2px; padding: 0 12px 8px; }
-.proc-box.folded .proc-box-body { display: none; }
+/* 操作过程框：展开/收起同样走 grid 0fr↔1fr；行数不固定，用 grid-auto-rows 一起收，
+   行距与底部内边距随轨道归零（小面板、低频操作，过渡成本可忽略） */
+.proc-box-body {
+  display: grid; grid-template-rows: 1fr; grid-auto-rows: 1fr;
+  gap: 2px; padding: 0 12px 8px;
+  transition: grid-template-rows var(--dur-base) var(--ease-std),
+              grid-auto-rows var(--dur-base) var(--ease-std),
+              row-gap var(--dur-base) var(--ease-std),
+              padding-bottom var(--dur-base) var(--ease-std),
+              visibility var(--dur-base);
+}
+.proc-box-body > * { min-height: 0; overflow: hidden; }
+.proc-box.folded .proc-box-body {
+  grid-template-rows: 0fr; grid-auto-rows: 0fr; row-gap: 0; padding-bottom: 0;
+  visibility: hidden; /* 收起后行里的按钮不再被 Tab 到 */
+}
 .proc-row {
   align-self: flex-start; width: 100%; max-width: var(--chat-max-w, 880px);
   padding: 0 2px;
@@ -1107,22 +1242,53 @@ html.code-wrap .md pre.has-lines { display: block; }
   transition: transform var(--dur-fast) var(--ease-out);
 }
 .tool-card.open .t-caret { transform: rotate(90deg); }
+/* 展开/收起：height auto↔0（interpolate-size）+ 透明度；transition 可打断、可反向。
+   分隔线与内边距放在首个子元素上，由外层 overflow 裁掉——0fr 轨道会被
+   子元素的 padding/border 撑出 6px 残影，height:0 才是真正的零高 */
 .tool-card .t-body {
-  display: none; margin: 2px 0 4px 26px; padding-top: 6px;
-  border-top: 1px dashed var(--line2);
+  display: block; height: 0; overflow: clip;
+  margin: 2px 0 0 26px;
+  opacity: 0;
+  transition: height var(--dur-base) var(--ease-std),
+              margin-bottom var(--dur-base) var(--ease-std),
+              opacity var(--dur-fast) var(--ease-std),
+              visibility var(--dur-base);
 }
-.tool-card.open .t-body { display: block; }
+.tool-card .t-body > :first-child { padding-top: 6px; border-top: 1px dashed var(--line2); }
+.tool-card.open .t-body { height: auto; margin-bottom: 4px; opacity: 1; }
+.tool-card:not(.open) .t-body { visibility: hidden; }
 .tool-card .t-body pre {
   white-space: pre-wrap; word-break: break-all; margin: 0;
   color: var(--text2); font-family: var(--font-mono); font-size: var(--fs-sm); line-height: 1.6;
 }
 
 /* ---------- 权限确认条：金色警示纸条 ---------- */
+/* 显示/收起由 .open 门控（app.js：先摘 hidden、强制一帧，再加 .open）。
+   基线的 max-height/padding/border 全为 0，是收起态的可过渡起点；
+   收起动画结束后 JS 再落 hidden，由全站 [hidden] 规则兜底摘除。 */
 #permission-bar {
   border-top: 2px solid var(--gold);
+  border-top-width: 0;
   background: linear-gradient(90deg, rgba(138, 100, 16, .16), rgba(138, 100, 16, .06));
-  padding: 12px 18px;
-  animation: rise var(--dur-base) var(--ease-pop) both;
+  padding-inline: 18px;
+  padding-block: 0;
+  max-height: 0; opacity: 0; overflow: clip; pointer-events: none;
+  visibility: hidden;
+  transition: max-height var(--dur-base) var(--ease-std),
+              padding-block var(--dur-base) var(--ease-std),
+              border-top-width var(--dur-base) var(--ease-std),
+              opacity var(--dur-fast) var(--ease-std),
+              visibility var(--dur-base);
+}
+#permission-bar.open {
+  border-top-width: 2px;
+  padding-block: 12px;
+  max-height: 70vh;
+  opacity: 1;
+  /* 长命令参数在条内滚动；横向溢出仍由基线的 clip 收住 */
+  overflow-y: auto;
+  pointer-events: auto;
+  visibility: visible;
 }
 .perm-head { margin-bottom: 8px; font-size: var(--fs-base); }
 .perm-head b { color: var(--gold); }
@@ -1164,6 +1330,11 @@ html.code-wrap .md pre.has-lines { display: block; }
   font-family: var(--font-mono);
 }
 .perm-actions { display: flex; gap: 9px; margin-top: 10px; }
+/* 决策键提交后三键立即禁用（被点那颗写「已提交…」）：.btn-ghost 没有禁用皮，
+   统一灰化告诉用户「已经发出去了」，不再像可点的样子 */
+#permission-bar .perm-actions button:disabled {
+  opacity: .55; cursor: not-allowed; box-shadow: none; transform: none;
+}
 
 /* ---------- 输入区 ----------
    纵向布局：附件托盘 / 输入框 / 工具条（功能图标 · 提示 · 模型 · 发送）。
@@ -1263,6 +1434,16 @@ html.code-wrap .md pre.has-lines { display: block; }
   background: var(--paper-sunken);
   cursor: default;
 }
+/* 点开的用户图片：与工具截图 .tool-image.zoom 同一套放大形态（JS 只切类）：
+   放开 220px 高度上限、宽度放到容器可用宽，光标换 zoom-out 表示再点收回 */
+.msg.user .user-image.zoom { max-width: 100%; max-height: none; cursor: zoom-out; }
+/* 放大态需要确定的参照宽度：.msg.user 平时是 auto 宽（由内容撑），不写 width 时
+   图片的 max-width:100% 会按收缩后的气泡解析、看起来没放大；width:100% 仍被
+   已有的 max-width:70% 夹住，保持右对齐的 70% 列宽，不会铺满整屏 */
+.msg.user:has(.user-image.zoom) { width: 100%; }
+/* .user-bubble 是 fit-content，图片的百分比 max-width 在它里面同样拿不到确定宽度；
+   放大态让气泡占满上面那条 70% 消息列，横图才真能长到列宽（不再停在 320px） */
+.msg.user:has(.user-image.zoom) .user-bubble { width: 100%; }
 .msg.user.image-only { padding: 8px; }
 
 /* 消息级操作：常驻在消息下方，纯简笔图标（助手：复制/分叉/回退/重新生成；用户：复制/编辑）
@@ -1431,6 +1612,22 @@ html.code-wrap .md pre.has-lines { display: block; }
   font-size: var(--fs-md); padding: 2px 4px;
 }
 .agenda-reminder .ar-close:hover { color: var(--reg); }
+/* 设置/工厂整屏视图的操作结果浮标：复用 agenda-reminder 的纸片与右上槽位，
+   文案更长，宽度收在 440；JS 关闭时先加 .out、180ms 后再摘节点，
+   这里给退场终点（否则 .out 只是一次空类切换，节点到点硬消失） */
+.notice-toast {
+  max-width: 440px;
+  transition: opacity var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out);
+}
+.notice-toast.out { opacity: 0; transform: translateY(-6px); }
+/* 导出诊断包失败、迁移导入报错等是多行文案且常带长路径：保留原生换行并能断词，
+   否则用户只看到一行截断的错误 */
+.notice-toast .notice-toast-msg {
+  white-space: pre-wrap; word-break: break-word; line-height: 1.6; font-size: var(--fs-md);
+}
+/* 日程提醒与操作浮标共用右上 fixed 槽位：提醒在时把浮标下移一行，
+   两张纸不再叠在一起。:not(.notice-toast) 把浮标自身排除在「提醒」之外 */
+body:has(.agenda-reminder:not(.notice-toast)) .notice-toast { top: 96px; }
 
 /* 规划模式开关 */
 .plan-actions { display: flex; align-items: center; gap: 6px; }
@@ -1494,6 +1691,26 @@ html.code-wrap .md pre.has-lines { display: block; }
   font-size: var(--fs-cap); color: var(--text2);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* 同一行既可能是「上一轮结果」也可能是「运行中 · 已跑 mm:ss」：
+   运行中用主色 + 加粗，扫一眼就能把在跑的那条从结果里分出来 */
+.cron-last.cron-running { color: var(--blue); font-weight: var(--fw-semi); }
+/* 秒表数字只说明跑了多久，说明不了进程还活着：呼吸的小圆点让「在跑」一眼可见；
+   只动 transform/opacity，不触发布局 */
+.cron-last.cron-running::before {
+  content: ""; display: inline-block; width: 6px; height: 6px;
+  margin-right: 5px; border-radius: 50%; background: currentColor;
+  vertical-align: middle;
+  animation: cron-run-pulse 1.6s ease-in-out infinite;
+}
+@keyframes cron-run-pulse {
+  0%, 100% { transform: scale(.8); opacity: .55; }
+  50% { transform: scale(1.15); opacity: 1; }
+}
+/* 定点例外（总闸之外）：持续呼吸的在跑指示，压到 1ms 会停在 100% 的暗小态；
+   reduce 下直接定格为实心圆点，在跑状态仍由蓝色文字表达 */
+@media (prefers-reduced-motion: reduce) {
+  .cron-last.cron-running::before { animation: none; }
+}
 .cron-ops { display: flex; gap: 2px; flex-shrink: 0; }
 .cron-op {
   background: none; border: none; color: var(--dim); cursor: pointer;
@@ -1502,6 +1719,8 @@ html.code-wrap .md pre.has-lines { display: block; }
 }
 .cron-op:hover:not(.danger) { color: var(--blue); }
 .cron-op.danger:hover { color: var(--reg); }
+/* 「运行」两字 ↔ ⏹ 切换：锁最小宽度，任务启停时整排操作图标不左右跳 */
+.cron-op[data-op="run"], .cron-op[data-op="stop"] { min-width: 26px; }
 /* 停用/启用的自绘图形：⏸/▷ 字符在 Windows 上落符号字体、基线与 ⧉✎✕ 不齐，
    CSS 画的双竖条/三角形恒与本行文字对齐，颜色经 currentColor 跟随悬停 */
 .cron-op .ic-pause {
@@ -2109,7 +2328,7 @@ html.code-wrap .md pre.has-lines { display: block; }
 .usage-models { display: flex; gap: 28px; align-items: center; padding: 8px 4px; flex-wrap: wrap; }
 .dm-chart { position: relative; width: 168px; height: 168px; flex-shrink: 0; }
 .dm-chart svg { width: 100%; height: 100%; transform: rotate(-90deg); }
-.dm-seg { transition: stroke-width .15s; }
+.dm-seg { transition: stroke-width var(--dur-fast) var(--ease-std); }
 .dm-chart .dm-seg:hover { stroke-width: 24; }
 .dm-center {
   position: absolute; inset: 0; display: flex; flex-direction: column;
@@ -2137,6 +2356,9 @@ html.code-wrap .md pre.has-lines { display: block; }
 /* 排除空列表提示（含 <br> 手动换行）与搜索结果项（各自有布局） */
 #session-list li:not(.empty-hint):not(.s-group):not(.has-snippet) {
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  /* 行尾固定槽位：时间（62px + right:8px）与归档/⋯ 叠在同一块区域里交叉淡入淡出，
+     悬停不再改变行宽、标题省略位置也不跳；72px 给长时间留出余量，不压标题 */
+  position: relative; padding-right: 72px;
 }
 #session-list li .s-title {
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
@@ -2145,7 +2367,14 @@ html.code-wrap .md pre.has-lines { display: block; }
   flex-shrink: 0; font-size: var(--fs-cap); color: var(--dim);
   font-variant-numeric: var(--num); white-space: nowrap;
 }
-#session-list li:hover .s-time { display: none; }
+#session-list li:where(:not(.empty-hint):not(.s-group):not(.has-snippet)) .s-time {
+  position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+  /* 62px：容得下「12 分钟前」与 toLocaleDateString() 的 2026/11/25；
+     44px 会把除「刚刚」外的时间全截成省略号 */
+  width: 62px; text-align: right; overflow: hidden; text-overflow: ellipsis;
+  opacity: 1; transition: opacity var(--dur-fast) var(--ease-std);
+}
+#session-list li:hover .s-time { opacity: 0; }
 #session-list li .s-sub {
   display: block; font-size: var(--fs-sm); color: var(--dim);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
@@ -2335,11 +2564,21 @@ html.code-wrap .md pre.has-lines { display: block; }
 .s-tag-pick:hover { border-color: var(--blue); color: var(--text); }
 #session-list li .s-archive,
 #session-list li .s-more {
-  flex-shrink: 0; background: none; border: none; color: var(--dim);
-  cursor: pointer; font-size: var(--fs-sm); display: none;
+  background: none; border: none; color: var(--dim);
+  cursor: pointer; font-size: var(--fs-sm);
 }
+#session-list li:where(:not(.empty-hint):not(.s-group):not(.has-snippet)) .s-archive,
+#session-list li:where(:not(.empty-hint):not(.s-group):not(.has-snippet)) .s-more {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  opacity: 0; pointer-events: none;
+  transition: opacity var(--dur-fast) var(--ease-std), color var(--dur-fast) var(--ease-std);
+}
+#session-list li .s-archive { right: 30px; }
+#session-list li .s-more { right: 8px; }
 #session-list li:hover .s-archive,
-#session-list li:hover .s-more { display: block; }
+#session-list li:hover .s-more,
+#session-list li .s-archive:focus-visible,
+#session-list li .s-more:focus-visible { opacity: 1; pointer-events: auto; }
 #session-list li .s-archive:hover,
 #session-list li .s-more:hover { color: var(--blue); }
 #session-list li .s-archive svg { width: 13px; height: 13px; display: block; }
@@ -2438,10 +2677,21 @@ html.code-wrap .md pre.has-lines { display: block; }
   display: flex; align-items: center; justify-content: center;
   background: color-mix(in srgb, var(--ink-line) 52%, transparent);
   backdrop-filter: blur(2px);
-  animation: ui-modal-in var(--dur-fast) var(--ease-out);
+  /* 出现/消失共用一条 transition（可打断、可反向）：遮罩只淡入淡出，不缩放——
+     缩放/位移交给里面的 .modal-box；遮罩跟着缩会在首帧顶出一条 8px 亮边 */
+  opacity: 1;
+  transition: opacity var(--dur-base) var(--ease-std),
+              visibility var(--dur-base);
+  /* 老内核不认 allow-discrete 时保底：淡出仍做，只是结束时同帧摘除 */
+  transition: opacity var(--dur-base) var(--ease-std),
+              display var(--dur-base) allow-discrete,
+              visibility var(--dur-base);
   padding: var(--sp-5); overflow: auto;
 }
-.overlay.hidden { display: none; }
+.overlay.hidden {
+  display: none; opacity: 0; pointer-events: none;
+  visibility: hidden; /* 淡出结束后才摘离 tab 序/读屏树 */
+}
 .modal-box {
   position: relative;
   background: var(--card); border: 2px solid var(--ink-line);
@@ -2453,7 +2703,17 @@ html.code-wrap .md pre.has-lines { display: block; }
      此前没有上限，整层靠遮罩滚动——标题会被滚出视口（表单类弹层尤其明显），
      定长高度只写在 :has(.archive-wrap) 那几条个案规则里 */
   max-height: 100%; display: flex; flex-direction: column;
-  margin: auto; animation: ui-modal-in var(--dur-fast) var(--ease-out);
+  margin: auto;
+  opacity: 1; transform: translateY(0) scale(1);
+  transition: opacity var(--dur-base) var(--ease-out),
+              transform var(--dur-base) var(--ease-out);
+}
+/* 关闭：盒子沿来路退回 8px / .985；退场曲线慢起快走，和遮罩同时结束 */
+.overlay.hidden .modal-box { opacity: 0; transform: translateY(8px) scale(.985); }
+/* 打开：display 由 none 变 flex 的同一帧，从起始态开始过渡（不闪终值一帧） */
+@starting-style {
+  .overlay:not(.hidden) { opacity: 0; }
+  .overlay:not(.hidden) .modal-box { opacity: 0; transform: translateY(8px) scale(.985); }
 }
 .modal-box > h3 { flex: none; }
 .modal-box::before {
@@ -2468,6 +2728,9 @@ html.code-wrap .md pre.has-lines { display: block; }
 #modal-content {
   font-size: var(--fs-base); line-height: 1.7;
   flex: 0 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  /* 校验报错由 JS scrollIntoView({block:"nearest"}) 带进视野：用平滑滚动，
+     不再从 0 瞬移到 65px（reduce 下由总闸压回 auto） */
+  scroll-behavior: smooth;
 }
 #modal-content p { margin: 6px 0; }
 .memory-text {
@@ -2541,9 +2804,9 @@ html.code-wrap .md pre.has-lines { display: block; }
 #accept-switch.full:hover { background: var(--bad); filter: brightness(1.06); }
 
 /* 语音输入按钮：录音中红色脉动，转写中呼吸；与其它 cp-icon 同底座 */
-#voice-btn.recording { color: var(--on-accent); background: var(--reg); animation: voice-pulse 1.1s ease-in-out infinite; }
+#voice-btn.recording { color: var(--on-accent); background: var(--reg); animation: voice-pulse var(--dur-loop) var(--ease-std) infinite; }
 #voice-btn.recording:hover { background: var(--reg); }
-#voice-btn.busy { color: var(--gold); animation: voice-busy 1.4s ease-in-out infinite; }
+#voice-btn.busy { color: var(--gold); animation: voice-busy var(--dur-loop) var(--ease-std) infinite; }
 @keyframes voice-pulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(143, 29, 29, .35); }
   50% { box-shadow: 0 0 0 5px rgba(143, 29, 29, 0); }
@@ -2588,6 +2851,11 @@ html.code-wrap .md pre.has-lines { display: block; }
   padding-left: 8px; border-left: 1px solid var(--line2);
 }
 #cp-right #btn-send { flex-shrink: 0; margin-left: 2px; }
+/* 「停止」运行中由 app.js 搬进本簇、贴在发送键左侧：与 #btn-send 同高，
+   并压掉写给顶栏的 margin-left:6px（否则与 #cp-right 的 gap:7px 叠加） */
+#cp-right #btn-stop { margin-left: 0; min-height: 32px; padding: 4px 10px; font-size: var(--fs-sm); }
+/* 点下后立刻禁用并写「正在停止…」：没有禁用皮肤看起来仍可点，反馈就失效了 */
+#cp-right #btn-stop:disabled { opacity: .55; cursor: not-allowed; box-shadow: none; transform: none; }
 
 /* ---------- 挤压降级：功能行高度永远一行 ----------
    flex-wrap 收死不换行；容器查询按「输入栏自身宽度」分级收缩——分屏把主栏挤窄时
@@ -2618,18 +2886,21 @@ html.code-wrap .md pre.has-lines { display: block; }
       width: 34px; height: 30px; padding: 0;
       display: inline-flex; align-items: center; justify-content: center;
     }
-    #composer-bar #model-chip { padding: 5px 7px; }
+    /* 纯图标档（文字已撤）：胶囊里只剩图标，右侧 chevron 变成没信息的装饰，
+       而且它占的 6px + 6px 外边距会把胶囊的最小宽度顶穿——#cp-right 里多一颗
+       停止键（运行中）时胶囊被压到 26px，箭头被裁成「..」。这一档撤掉箭头、
+       按图标 + 内边距收窄内边距，并且不再回缩（图标态已经是最小可用宽度） */
+    #composer-bar #model-chip { padding: 5px; flex-shrink: 0; }
+    #composer-bar #model-chip::after { display: none; }
     #reasoning-chip { padding: 2px 5px; }
   }
   @container cbar (max-width: 390px) {
     /* !important：环的基础规则（display:inline-flex）在本块之后，同优先级会反杀 */
     #ctx-ring, #mod-tray { display: none !important; }
-    /* 极窄档：间距与图标再收一号，保住最右的发送；胶囊只留图标，箭头裁边就撤 */
+    /* 极窄档：间距与图标再收一号，保住最右的发送 */
     #composer-bar { gap: 4px; }
     #composer-bar .cp-icon { width: 32px; }
     #btn-send { width: 30px; }
-    #composer-bar #model-chip { padding: 5px; }
-    #composer-bar #model-chip::after { display: none; }
   }
   @container sbar (max-width: 560px) {
     .split-bar .cp-state { display: none; }
@@ -2639,7 +2910,9 @@ html.code-wrap .md pre.has-lines { display: block; }
       width: 34px; height: 30px; padding: 0;
       display: inline-flex; align-items: center; justify-content: center;
     }
-    .split-model { padding: 2px 5px; }
+    /* 同主栏：纯图标档撤掉箭头、不回缩 */
+    .split-model { padding: 2px 5px; flex-shrink: 0; }
+    .split-model::after { display: none; }
     .split-reasoning { padding: 2px 5px; }
   }
   @container sbar (max-width: 400px) {
@@ -2931,7 +3204,7 @@ html.code-wrap .md pre.has-lines { display: block; }
   padding: 2px 8px; border-radius: var(--r-sm);
 }
 .teamcard .tc-fold:hover { background: var(--paper-inset); color: var(--text); }
-.teamcard.folded .tc-body { display: none; }
+/* 折叠过渡统一在文件尾部「折叠：Grid 0fr ↔ 1fr」段（display 硬切无法过渡） */
 
 /* 名册：头像 + 成员名（+ 模型 / 人设），尾部挂「用户总管」标识 */
 .tc-avatar {
@@ -3353,6 +3626,9 @@ html.code-wrap .md pre.has-lines { display: block; }
 .teamroom-root.tr-dash .tr-dash-status { padding: 6px 2px 0; }
 .tr-dash-status .tr-empty-title { font-weight: var(--fw-heavy); color: var(--text); margin-bottom: 6px; }
 .tr-dash-status .tr-empty-hint { margin: 0; }
+/* 「另有 N 支常驻团队」是对角标数字的解释，和上一行空态提示拉开一点距离，
+   免得挤成一段看不出是补充说明 */
+.tr-dash-status .tr-empty-resident { margin-top: 6px; }
 .tr-dash-block { display: flex; flex-direction: column; gap: 7px; }
 .tr-dash-title { font-size: var(--fs-sm); font-weight: var(--fw-bold); color: var(--dim); }
 .tr-tpl-grid { display: flex; flex-wrap: wrap; gap: 7px; }
@@ -3433,7 +3709,13 @@ html.code-wrap .md pre.has-lines { display: block; }
   align-self: flex-start; width: 100%; max-width: var(--chat-max-w, 880px);
   background: var(--paper-sunken); border: 1.5px solid var(--line2);
   border-radius: var(--r-md); padding: 8px 10px; box-shadow: var(--shadow-sm);
+  /* 五块内容：头 / 流程条 / 工具条 / 问题清单 / 空态。折叠时后四行一起收成 0fr，
+     下方消息平滑上移；行内边距的溢出由 .folded 的 overflow 裁掉 */
+  display: grid; grid-template-rows: auto 1fr auto auto auto;
+  transition: grid-template-rows var(--dur-base) var(--ease-std);
 }
+.adversarial > * { min-height: 0; }
+.adversarial > :not(.rt-head) { overflow: hidden; transition: visibility var(--dur-base); }
 .adversarial .rt-head { display: flex; align-items: center; gap: 8px; padding: 2px 4px 8px; cursor: pointer; }
 .adversarial .rt-title { color: var(--up); font-weight: var(--fw-heavy); font-size: var(--fs-md); flex-shrink: 0; }
 .adversarial .rt-sub { color: var(--dim); font-size: var(--fs-sm); flex: 1; min-width: 0; }
@@ -3442,10 +3724,13 @@ html.code-wrap .md pre.has-lines { display: block; }
   padding: 2px 8px; border-radius: var(--r-sm);
 }
 .adversarial .rt-fold:hover { background: var(--paper-inset); color: var(--text); }
-.adversarial.folded .adv-steps,
-.adversarial.folded .adv-toolbar,
-.adversarial.folded .adv-findings,
-.adversarial.folded .adv-empty { display: none; }
+/* 折叠：只收轨道不摘 display（摘了就没法过渡）；折叠态裁掉行内边距的溢出，
+   并让被收起的步骤/工具条/清单退出 tab 序（visibility 到过渡结束才生效） */
+.adversarial.folded {
+  grid-template-rows: auto 0fr 0fr 0fr 0fr;
+  overflow: hidden;
+}
+.adversarial.folded > :not(.rt-head) { visibility: hidden; }
 .adversarial.err .rt-title { color: var(--reg); }
 .adversarial.cancelled .rt-title { color: var(--dim); }
 /* 四阶段流程条：发现 → 调查 → 建议 → 裁判。编号只在流程条里出现，
@@ -3475,7 +3760,7 @@ html.code-wrap .md pre.has-lines { display: block; }
 }
 .adversarial .adv-step.active .adv-step-num {
   background: var(--up); color: var(--on-accent);
-  animation: advStepPulse 1.6s ease-in-out infinite;
+  animation: advStepPulse var(--dur-loop) var(--ease-std) infinite;
 }
 .adversarial .adv-step-link {
   flex: 1 1 14px; min-width: 8px; height: 1px;
@@ -3742,12 +4027,13 @@ html.code-wrap .md pre.has-lines { display: block; }
   .adversarial .adv-sev-filter { margin-left: 0; width: 100%; }
   .roundtable .rt-m-body { max-height: 200px; }
 }
+/* 定点例外（总闸之外）：协作卡的阶段脉冲与折叠箭头是「持续提醒」类动效，
+   压到 1ms 会留一帧中间态；reduce 下直接定格，不做假瞬变。 */
 @media (prefers-reduced-motion: reduce) {
   .adversarial .adv-step.active .adv-step-num { animation: none; }
   .teamcard .tc-closed-summary::before,
   .adv-finding .adv-f-details summary::before { transition: none; }
 }
-
 /* 上下文容量环形仪表（输入栏工具条，语音输入右侧）：
    环=已占用比例（stroke-dashoffset 由 setContextUsage 驱动），环内数字=百分比，
    ≥70% 转金、≥90% 转红；悬停/点按展开构成明细弹层 */
@@ -3765,12 +4051,12 @@ html.code-wrap .md pre.has-lines { display: block; }
   fill: none; stroke: var(--blue); stroke-width: 2.6; stroke-linecap: round;
   stroke-dasharray: 56.55; /* 2πr，r=9 */
   transform: rotate(-90deg); transform-origin: center;
-  transition: stroke-dashoffset .3s ease, stroke .2s ease;
+  transition: stroke-dashoffset var(--dur-base) var(--ease-std), stroke var(--dur-fast) var(--ease-std);
 }
 #ctx-ring .ring-txt, .split-ctx-ring .ring-txt {
   font-family: var(--font-mono); font-size: 12px; font-weight: var(--fw-bold);
   fill: var(--text2); text-anchor: middle; dominant-baseline: central;
-  transition: fill .15s ease;
+  transition: fill var(--dur-fast) var(--ease-std);
 }
 #ctx-ring.warn .ring-val, .split-ctx-ring.warn .ring-val { stroke: var(--gold); }
 #ctx-ring.warn .ring-txt, .split-ctx-ring.warn .ring-txt { fill: var(--gold); }
@@ -3786,11 +4072,20 @@ html.code-wrap .md pre.has-lines { display: block; }
   border-radius: var(--r-md); box-shadow: var(--shadow-lg);
   padding: 12px 14px 10px;
   font-size: var(--fs-md); color: var(--text);
-  animation: ctx-pop-in var(--dur-fast) var(--ease-out);
+  /* 贴着环形仪表向上展开：origin 锚在左下，关闭时原路缩回 */
+  --pop-origin: bottom left;
+  opacity: 1; transform: translateY(0) scale(1);
+  transform-origin: var(--pop-origin);
+  transition: opacity var(--dur-fast) var(--ease-std),
+              transform var(--dur-fast) var(--ease-out);
+  /* 老内核不认 allow-discrete 时保底：上一条仍然生效（只是关闭同帧摘除） */
+  transition: opacity var(--dur-fast) var(--ease-std),
+              transform var(--dur-fast) var(--ease-out),
+              display var(--dur-fast) allow-discrete;
 }
-@keyframes ctx-pop-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
+.ctx-pop.hidden { opacity: 0; transform: translateY(4px) scale(.985); pointer-events: none; }
+@starting-style {
+  .ctx-pop:not(.hidden) { opacity: 0; transform: translateY(4px) scale(.985); }
 }
 .ctx-pop .ctx-head {
   display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
@@ -3804,7 +4099,7 @@ html.code-wrap .md pre.has-lines { display: block; }
 }
 .ctx-pop .ctx-bar-fill {
   display: block; height: 100%; border-radius: 4px;
-  background: var(--blue); transition: width .3s ease;
+  background: var(--blue); transition: width var(--dur-base) var(--ease-std);
 }
 .ctx-pop .ctx-bar-fill.warn { background: var(--gold); }
 .ctx-pop .ctx-bar-fill.bad { background: var(--reg); }
@@ -3903,7 +4198,7 @@ html.code-wrap .md pre.has-lines { display: block; }
 .ssr-empty { padding: 8px 10px; }
 /* 搜索命中的卡片：闪烁两下提示落点 */
 @keyframes ssrFlash { 0%, 100% { box-shadow: none; } 30% { box-shadow: 0 0 0 3px var(--blue); } }
-.ssr-flash { animation: ssrFlash 0.8s ease-in-out 2; }
+.ssr-flash { animation: ssrFlash var(--dur-attn) var(--ease-std) 2; }
 
 /* 需重启生效统一横条：设置页顶栏右侧，保存了「重启才生效」的设置后出现 */
 .restart-banner {
@@ -3926,6 +4221,12 @@ html.code-wrap .md pre.has-lines { display: block; }
 #skill-list-view,
 #skill-manage-view,
 #skill-extras { display: flex; flex-direction: column; gap: 12px; }
+/* 子页切换的淡出/淡入（JS 在 app.js 的 swapSettingsPage 里切类）：
+   退场的那张保留到过渡结束才 hidden，.leaving 期间让出点击（淡出的旧页
+   不该还能被点到）。时长与 JS 的 SETTINGS_PAGE_LEAVE_MS 一致。 */
+.settings-page { transition: opacity var(--dur-fast) var(--ease-std); }
+.settings-page.leaving { opacity: 0; pointer-events: none; }
+.settings-page.entering { opacity: 0; }
 /* 技能页两个视图用 hidden 属性互斥切换（JS 里 .hidden = true/false），
    而 ID 选择器优先级高于 UA 的 [hidden]{display:none}——不显式兜底会让两个视图同时显示 */
 #skill-list-view[hidden],
@@ -4012,7 +4313,17 @@ html.code-wrap .md pre.has-lines { display: block; }
 .form-grid input::placeholder { color: var(--dim); }
 .form-grid .inline-check { flex-direction: row; align-items: center; gap: 7px; }
 .form-grid .inline-check input { width: auto; }
-.modal-err { margin-top: 10px; color: var(--reg); font-size: var(--fs-sm); font-weight: var(--fw-bold); line-height: 1.6; }
+.modal-err {
+  margin-top: 10px; color: var(--reg); font-size: var(--fs-sm); font-weight: var(--fw-bold); line-height: 1.6;
+  opacity: 1;
+  transition: opacity var(--dur-fast) var(--ease-std);
+  transition: opacity var(--dur-fast) var(--ease-std),
+              display var(--dur-fast) allow-discrete;
+}
+.modal-err[hidden] { display: none; opacity: 0; }
+@starting-style {
+  .modal-err:not([hidden]) { opacity: 0; }
+}
 
 /* 模型服务：列表视图 —— 一张整卡，行间用细线分隔（布局对齐参考图，配色用纸墨主题） */
 #provider-list {
@@ -4153,11 +4464,12 @@ html.code-wrap .md pre.has-lines { display: block; }
 }
 .switch .slider::before {
   content: ""; position: absolute; width: 18px; height: 18px; border-radius: 50%;
-  background: var(--knob-bg); top: 3px; left: 3px; transition: left var(--dur-fast);
+  background: var(--knob-bg); top: 3px; left: 3px;
+  transform: translateX(0); transition: transform var(--dur-fast) var(--ease-out);
   box-shadow: 0 1px 2px rgba(18, 16, 13, .27);
 }
 .switch input:checked + .slider { background: var(--blue); }
-.switch input:checked + .slider::before { left: 23px; }
+.switch input:checked + .slider::before { transform: translateX(20px); }
 .panel-note { font-size: var(--fs-sm); color: var(--dim); }
 .panel-note.ok { color: var(--down); }
 .panel-note.bad { color: var(--reg); }
@@ -4854,6 +5166,9 @@ li.mcp-failed .mcp-bad { font-weight: var(--fw-bold); }
   align-items: center; gap: 6px; min-width: 0;
   font-size: var(--fs-sm); color: var(--text2); font-family: var(--font-mono);
   white-space: nowrap;
+  /* 工具名后带「只读/写入/高危」徽章：窄列里让徽章掉到第二行，
+     不把单行撑宽、也不挤压相邻列；行距收到 2px 免得多行太散 */
+  flex-wrap: wrap; row-gap: 2px;
 }
 .tool-pick-grid .tool-pick input { width: auto; }
 
@@ -4863,6 +5178,7 @@ li.mcp-failed .mcp-bad { font-weight: var(--fw-bold); }
 #chat-main { position: relative; }
 .input-menu {
   position: absolute; left: 18px; right: 18px;
+  --pop-origin: bottom left; /* 向上翻：从输入框上沿长出来 */
   max-height: 300px; overflow-y: auto;
   background: var(--card); border: 2px solid var(--ink-line);
   border-radius: var(--r-md); box-shadow: var(--shadow-md);
@@ -5206,6 +5522,26 @@ li.mcp-failed .mcp-bad { font-weight: var(--fw-bold); }
   width: var(--rp-w, 420px); min-width: var(--rp-w, 420px);
   display: flex; flex-direction: column; min-height: 0;
   background: var(--card); border-left: 2px solid var(--ink-line);
+  /* 开/合与侧栏折叠同一种待遇：宽度（对话列随之让位）+ 边框 + 轻微右移一起过渡。
+     展开时从 14px 外滑入、收起时原路退回；拖动调宽期间关掉过渡，保持跟手（mo4） */
+  opacity: 1; transform: translateX(0);
+  transition: width var(--dur-base) var(--ease-std),
+              min-width var(--dur-base) var(--ease-std),
+              border-left-width var(--dur-base) var(--ease-std),
+              opacity var(--dur-fast) var(--ease-std),
+              transform var(--dur-base) var(--ease-out),
+              visibility var(--dur-base);
+}
+#right-panel.hidden {
+  display: flex !important; /* 关掉 display 就没法过渡宽度；零宽 + visibility 兜住焦点 */
+  width: 0 !important; min-width: 0 !important;
+  border-left-width: 0; opacity: 0; visibility: hidden;
+  transform: translateX(14px); pointer-events: none; overflow: hidden;
+  box-shadow: none; /* 零宽时投影（不被 overflow 裁剪）仍会浮在右缘 */
+}
+body.resizing-x #right-panel { transition: none; }
+@starting-style {
+  #right-panel:not(.hidden) { opacity: 0; transform: translateX(14px); }
 }
 
 /* 标签头：标签一多就压缩呈现——全部标签均分剩余宽度，文字截断加省略号；
@@ -5305,7 +5641,7 @@ li.mcp-failed .mcp-bad { font-weight: var(--fw-bold); }
 .rp-page { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
 /* 切换项目时右面板整体变暗（resetProjectPanels 加 / reloadProjectPanels 撤）：
    旧内容留屏 + 压暗表示加载中，新数据到手一次性替换——比先清空再回填少了「闪白」 */
-#rp-body .rp-page { transition: opacity .18s ease; }
+#rp-body .rp-page { transition: opacity var(--dur-base) var(--ease-std); }
 #rp-body.reloading .rp-page { opacity: .45; pointer-events: none; }
 
 /* MCP / Skills 页：顶部分段（MCP / Skills）+ 下方各自滚动的内容区，
@@ -5452,7 +5788,7 @@ li.mcp-failed .mcp-bad { font-weight: var(--fw-bold); }
 }
 .td-tab:hover { color: var(--text); background: var(--paper-sunken); }
 .td-tab.active { color: var(--text); border-color: var(--ink-line); background: var(--paper-raised); }
-.td-busy { color: var(--blue); font-size: var(--fs-cap); animation: td-pulse 1s ease-in-out infinite; }
+.td-busy { color: var(--blue); font-size: var(--fs-cap); animation: td-pulse var(--dur-loop) var(--ease-std) infinite; }
 @keyframes td-pulse { 50% { opacity: .25; } }
 .td-x {
   border: none; background: none; color: var(--dim); cursor: pointer;
@@ -5637,7 +5973,7 @@ li.mcp-failed .mcp-bad { font-weight: var(--fw-bold); }
   position: absolute; top: 12px; right: 14px; z-index: 6; pointer-events: none;
   padding: 4px 11px; border-radius: var(--r-pill); font-size: var(--fs-sm);
   background: var(--paper-raised); color: var(--text); border: 1px solid var(--line2);
-  box-shadow: var(--shadow-sm); opacity: 1; transition: opacity .25s ease;
+  box-shadow: var(--shadow-sm); opacity: 1; transition: opacity var(--dur-base) var(--ease-std);
 }
 .browser-zoom-hud-off { opacity: 0; }
 /* 外网站点拒绝内嵌时的说明行：压缩到一行，不把 iframe 挤没 */
@@ -5668,28 +6004,29 @@ li.mcp-failed .mcp-bad { font-weight: var(--fw-bold); }
 }
 #pet-img {
   width: 100%; display: block; pointer-events: none;
-  animation: pet-float 3.2s ease-in-out infinite;
+  animation: pet-float var(--pet-float) var(--ease-std) infinite;
 }
-/* 待机：轻轻上下浮动 */
+/* 待机：轻轻上下浮动（0% / 100% 与其它状态共用「正立」基准，切状态不跳姿势） */
 @keyframes pet-float {
-  0%, 100% { transform: translateY(0) rotate(-2deg); }
+  0%, 100% { transform: translateY(0) rotate(0); }
   50% { transform: translateY(-7px) rotate(2deg); }
 }
 /* Agent 干活中：轻轻呼吸式起伏（原来 0.5s 蹦跶 + 挤压旋转，抖得太厉害，
    改成慢速小幅：只上下浮 4px、几乎不转） */
-#chat-pet.running #pet-img { animation: pet-work 1.8s ease-in-out infinite; }
+#chat-pet.running #pet-img { animation: pet-work var(--pet-work) var(--ease-std) infinite; }
 @keyframes pet-work {
-  0%, 100% { transform: translateY(0) rotate(-1deg); }
+  0%, 100% { transform: translateY(0) rotate(0); }
   50% { transform: translateY(-4px) rotate(1deg); }
 }
-/* 等待权限确认：左右摇晃提醒 */
-#chat-pet.needs-perm #pet-img { animation: pet-shake .42s ease-in-out infinite; }
+/* 等待权限确认：左右摇晃提醒（端点同样回到正立，换状态时没有「咔」一下） */
+#chat-pet.needs-perm #pet-img { animation: pet-shake var(--pet-shake) var(--ease-std) infinite; }
 @keyframes pet-shake {
-  0%, 100% { transform: rotate(-7deg) translateX(-2px); }
-  50% { transform: rotate(7deg) translateX(2px); }
+  0%, 100% { transform: rotate(0) translateX(0); }
+  25% { transform: rotate(-7deg) translateX(-2px); }
+  75% { transform: rotate(7deg) translateX(2px); }
 }
 /* 一轮完成：开心转一下（一次性，由 JS 摘除 class） */
-#chat-pet.done #pet-img { animation: pet-done .8s var(--ease-pop) 1; }
+#chat-pet.done #pet-img { animation: pet-done var(--pet-done) var(--ease-pop) 1; }
 @keyframes pet-done {
   0% { transform: translateY(0) rotate(0) scale(1); }
   35% { transform: translateY(-16px) rotate(-9deg) scale(1.08); }
@@ -5697,20 +6034,21 @@ li.mcp-failed .mcp-bad { font-weight: var(--fw-bold); }
   100% { transform: translateY(0) rotate(0) scale(1); }
 }
 /* 被点击：挤一下脸 */
-#chat-pet.poke #pet-img { animation: pet-poke .34s var(--ease-pop) 1; }
+#chat-pet.poke #pet-img { animation: pet-poke var(--pet-poke) var(--ease-pop) 1; }
 @keyframes pet-poke {
   0% { transform: scale(1, 1); }
   40% { transform: scale(1.14, .84) translateY(3px); }
   100% { transform: scale(1, 1); }
 }
 /* 云朵重力·下落中：位置移动在 JS 引擎里，这里管姿态——慢速左右轻晃 */
-#chat-pet.falling #pet-img { animation: pet-fall-sway 1.9s ease-in-out infinite; }
+#chat-pet.falling #pet-img { animation: pet-fall-sway var(--pet-fall) var(--ease-std) infinite; }
 @keyframes pet-fall-sway {
-  0%, 100% { transform: rotate(-6deg) translateY(0); }
-  50% { transform: rotate(6deg) translateY(-4px); }
+  0%, 100% { transform: rotate(0) translateY(0); }
+  25% { transform: rotate(-6deg) translateY(-4px); }
+  75% { transform: rotate(6deg) translateY(-4px); }
 }
 /* 云朵重力·软着陆：底部 Q 弹挤一下（棉花糖落地） */
-#chat-pet.land #pet-img { animation: pet-land .5s var(--ease-pop) 1; }
+#chat-pet.land #pet-img { animation: pet-land var(--pet-land) var(--ease-pop) 1; }
 @keyframes pet-land {
   0% { transform: translateY(-8px) scale(1.04, .94); }
   45% { transform: translateY(2px) scale(1.18, .78); }
@@ -5725,13 +6063,24 @@ li.mcp-failed .mcp-bad { font-weight: var(--fw-bold); }
   border: 1.5px solid var(--ink-line); border-radius: var(--r-md);
   box-shadow: var(--shadow-sm);
   font-size: var(--fs-sm); font-weight: var(--fw-bold); line-height: 1.5; text-align: center;
-  animation: rise var(--dur-base) var(--ease-out) both;
+  /* 出现与消失同一条 transition（JS 只切 .hidden）：冒出来 140ms，收回 200ms */
+  opacity: 1; transform: translateY(0) scale(1);
+  transition: opacity var(--dur-fast) var(--ease-std),
+              transform var(--dur-base) var(--ease-out);
+  transition: opacity var(--dur-fast) var(--ease-std),
+              transform var(--dur-base) var(--ease-out),
+              display var(--dur-base) allow-discrete;
 }
 .pet-bubble::after {
   content: ""; position: absolute; top: 100%; right: 24px;
   border: 6px solid transparent; border-top-color: var(--ink-line);
 }
-.pet-bubble.hidden { display: none; }
+.pet-bubble.hidden {
+  display: none; opacity: 0; transform: translateY(4px) scale(.98); pointer-events: none;
+}
+@starting-style {
+  .pet-bubble:not(.hidden) { opacity: 0; transform: translateY(6px) scale(.98); }
+}
 
 /* 设置页里的开关行沿用 .toggle-row，无需额外样式 */
 
@@ -5927,6 +6276,8 @@ details.map-phase summary::-webkit-details-marker { display: none; }
   width: max-content; /* 恒 7 列宽，行数往下长 */
 }
 .map-heat-grid i { border-radius: 2px; background: var(--paper-inset); cursor: pointer; }
+/* 还没到的日子不绑点击（app-memmap.js:479 直接 return）：光标也不能再承诺手型 */
+.map-heat-grid i.future { cursor: default; }
 /* 空格/还没到的天淡化融入底色：一排「无活动」不再是一排实心方块（有活动
    的天反而被兑下去）。l0 同时用于图例首位，两处同步淡 */
 .map-heat-grid i.l0, .map-heat-legend i.l0 {
@@ -6114,7 +6465,7 @@ details.map-phase summary::-webkit-details-marker { display: none; }
   /* —— 墨（黛绿） —— */
   --text: #1c221d;
   --text2: #46504a;
-  --dim: #5f6a60;   /* 4.8:1 on --card（原 4.09 不达标） */
+  --dim: #5c665d;   /* 4.60:1 on --bg（压深后 dim/底 ≥ 4.5） */
   --line: #c6d2c2;
   --line2: #a9b8a5;
   --ink-line: #1c221d;
@@ -6326,7 +6677,7 @@ details.map-phase summary::-webkit-details-marker { display: none; }
   /* —— 墨（黛绿） —— */
   --text: #14211d;
   --text2: #3d5049;
-  --dim: #5c7068;   /* 4.8:1 on --card */
+  --dim: #566961;   /* 4.56:1 on --bg（压深后 dim/底 ≥ 4.5） */
   --line: #c3d8d0;
   --line2: #a5c3b8;
   --ink-line: #14211d;
@@ -6378,7 +6729,7 @@ details.map-phase summary::-webkit-details-marker { display: none; }
   /* —— 墨（豆沙褐） —— */
   --text: #241c1a;
   --text2: #54453f;
-  --dim: #6f5d57;   /* 5.1:1 on --card */
+  --dim: #6c5b55;   /* 4.61:1 on --bg（压深后 dim/底 ≥ 4.5） */
   --line: #d6c4be;
   --line2: #bfa9a2;
   --ink-line: #241c1a;
@@ -6430,7 +6781,7 @@ details.map-phase summary::-webkit-details-marker { display: none; }
   /* —— 墨（暖灰） —— */
   --text: #201e18;
   --text2: #4e4a3e;
-  --dim: #6b6557;   /* 5.0:1 on --card */
+  --dim: #696356;   /* 4.57:1 on --bg（压深后 dim/底 ≥ 4.5） */
   --line: #d6cfbb;
   --line2: #bdb49c;
   --ink-line: #201e18;
@@ -6482,7 +6833,7 @@ details.map-phase summary::-webkit-details-marker { display: none; }
   /* —— 墨（橄榄褐） —— */
   --text: #1e2116;
   --text2: #4a4c37;
-  --dim: #676a52;   /* 4.9:1 on --card */
+  --dim: #646750;   /* 4.62:1 on --bg（压深后 dim/底 ≥ 4.5） */
   --line: #dcd2b9;
   --line2: #c5b99a;
   --ink-line: #1e2116;
@@ -7843,10 +8194,17 @@ details.map-phase summary::-webkit-details-marker { display: none; }
 
 /* ---------- 窄屏（局域网手机访问 / 小窗口）基础适配 ---------- */
 @media (max-width: 860px) {
-  /* 抽屉背衬：任一抽屉打开时盖住其余区域，点它 = 收回所有抽屉（z 低于两个抽屉） */
-  body.sidebar-open #drawer-backdrop, body.right-open #drawer-backdrop {
+  /* 抽屉背衬：常驻一层、用透明度进出（display 硬切没有退场）。
+     底色 0.45 → 展开时淡入，与抽屉滑动同时开始、同时结束；
+     visibility 保证关掉后不挡点击，pointer-events 在淡出期间也不吃事件 */
+  #drawer-backdrop {
     display: block; position: fixed; inset: 0; z-index: var(--z-drawer-bk);
     background: rgba(29, 26, 22, .45);
+    opacity: 0; visibility: hidden; pointer-events: none;
+    transition: opacity var(--dur-base) var(--ease-std), visibility var(--dur-base);
+  }
+  body.sidebar-open #drawer-backdrop, body.right-open #drawer-backdrop {
+    opacity: 1; visibility: visible; pointer-events: auto;
   }
   /* 侧栏内部关闭钮：抽屉渲染过宽挤掉背衬时也有出口 */
   #sidebar-close {
@@ -7870,22 +8228,34 @@ details.map-phase summary::-webkit-details-marker { display: none; }
     position: fixed; z-index: var(--z-drawer); top: 0; bottom: 0; right: 0;
     width: 92vw !important; max-width: 420px !important; min-width: 0 !important;
     box-shadow: -6px 0 24px rgba(18, 16, 13, .32);
+    /* 窄屏是覆盖抽屉：整块从右缘滑入/滑出，不再 display 硬切；
+       宽度固定，不参与桌面档的宽度过渡（避免每帧重排对话列） */
+    transform: translateX(100%);
+    transition: transform var(--dur-base) var(--ease-out),
+                opacity var(--dur-fast) var(--ease-std),
+                visibility var(--dur-base);
   }
+  #right-panel.hidden {
+    width: 92vw !important; min-width: 0 !important; border-left-width: 2px;
+    opacity: 0; transform: translateX(100%); visibility: hidden; overflow: hidden;
+  }
+  #right-panel:not(.hidden) { opacity: 1; transform: translateX(0); }
   #rp-resizer { display: none; }
   /* 顶栏的面板开关要保留：手机上面板是覆盖抽屉，它是唯一的收回入口
      （启动时 app.js 会强制收起、点对话区也能收回，但都不该是唯一出路） */
   .rp-tab .rp-x { opacity: 1; }  /* 触屏没有 hover：标签关闭钮常显 */
   .msg .msg-ops { display: flex; }  /* 触屏没有 hover：消息操作常显 */
   /* 触屏没有 hover：各列表行内联操作常显（否则永远点不到——首下点按被行的 onclick 吃掉，
-     直接打开弹窗）。会话行的归档/⋯ 是 display:none，其余是 opacity/visibility */
+     直接打开弹窗）。会话行的归档/⋯ 常显时让出时间槽：按钮显形、时间淡出 */
   .agenda-item .agenda-ops { visibility: visible; }
   .project-list li .p-del { opacity: 1; }
   #session-list li.pgroup-head .pg-del { opacity: 1; }
   #session-list li.pgroup-head .pg-add { opacity: 1; }
-  #session-list li .s-archive,
-  #session-list li .s-more { display: block; }
-  /* 会话行：桌面端悬浮时用隐藏时间给按钮让位，触屏下按钮常显，时间不必再让位 */
-  #session-list li:hover .s-time { display: inline; }
+  #session-list li:where(:not(.empty-hint):not(.s-group):not(.has-snippet)) .s-archive,
+  #session-list li:where(:not(.empty-hint):not(.s-group):not(.has-snippet)) .s-more {
+    opacity: 1; pointer-events: auto;
+  }
+  #session-list li:where(:not(.empty-hint):not(.s-group):not(.has-snippet)) .s-time { opacity: 0; }
   #topbar { padding: 8px 10px; gap: 6px; }
   #usage { display: none; }
 }
@@ -7913,10 +8283,14 @@ details.map-phase summary::-webkit-details-marker { display: none; }
   #side-bottom { padding-bottom: env(safe-area-inset-bottom, 0px); }
 }
 
-/* ---------- 小手机档（≤520px）：弹窗近全屏、右面板抽屉铺满 ---------- */
+/* ---------- 小手机档（≤520px）：弹窗近全屏、右面板抽屉留一条背衬 ---------- */
 @media (max-width: 520px) {
   .overlay { padding: var(--sp-3); }
-  #right-panel { width: 100vw !important; max-width: none !important; }
+  /* 右面板不铺满整屏：左侧始终留 56px 可点背衬，不用先关标签就能收回面板 */
+  #right-panel,
+  #right-panel.hidden { width: calc(100vw - 56px) !important; max-width: none !important; }
+  /* 小羊不压消息气泡、不挡字抢点击（手机上它没有可拖动的余地） */
+  #chat-pet { display: none; }
 }
 
 /* ---------- 复制：代码块悬浮复制钮 + 助手消息复制（.msg-ops 样式复用） ---------- */
@@ -7930,6 +8304,10 @@ details.map-phase summary::-webkit-details-marker { display: none; }
 }
 .md pre:hover .code-copy, .md pre .code-copy:focus { opacity: 1; }
 .md pre .code-copy:hover { color: var(--blue); border-color: var(--blue); }
+/* 触屏没有 hover：复制钮常显（否则永远点不到） */
+@media (hover: none) {
+  .md pre .code-copy { opacity: 1; }
+}
 /* 分级权限模式开关（#accept-switch）样式并入上方「输入区工具条」的 .cp-icon 体系 */
 
 /* 右面板里的列表页（任务清单/日程/定时任务）：占满剩余高度、内部滚动 */
@@ -8128,9 +8506,16 @@ details.map-phase summary::-webkit-details-marker { display: none; }
   #settings-topbar { flex-wrap: wrap; row-gap: 6px; }
   /* 搜索框折行后吃满所在行：放开 140px 下限与 360px 上限（基础态为桌面单行设置） */
   .settings-search { flex: 1 1 170px; min-width: 0; max-width: none; }
-  /* 搜索结果浮层贴搜索框左缘展开：基础态 left:90px + min-width:300px
-     在窄屏会把 300px 面板推出视口右缘 */
-  .settings-search-results { left: 10px; min-width: 0; max-width: calc(100vw - 20px); }
+  /* 搜索结果浮层贴搜索框右缘展开（搜索框此时独占整行）：宽度封顶 320，
+     不再从 left:10px 起算把面板推出视口右缘。
+     right 取 14px = #settings-topbar 的左右内边距：绝对定位的包含块是 topbar 的
+     内边距盒（padding box），right:0 会对齐到 topbar 的边框内缘，比搜索框右缘
+     多出一个内边距（390 宽下实测差 13px，看着像错位）。 */
+  .settings-search-results {
+    left: auto; right: 14px;
+    width: min(320px, calc(100vw - 28px)); min-width: 0;
+    max-width: calc(100vw - 28px);
+  }
   /* 重启横条允许收缩与内部换行：文案/按钮/状态逐行排；
      状态文字可断行（保存结果文案可能很长），不再把横条撑出屏幕 */
   #restart-banner { flex-shrink: 1; flex-wrap: wrap; min-width: 0; max-width: 100%; row-gap: 2px; }
@@ -8142,17 +8527,55 @@ details.map-phase summary::-webkit-details-marker { display: none; }
   .usage-tiles { grid-template-columns: 1fr; }
 }
 
-/* ---------- 动效降级：跟随系统「减少动态效果」 ----------
-   Windows 设置里的动画开关会映射到这条查询。命中时把所有动画/过渡压到
-   一步到位：常驻循环（宠物浮动、标签脉冲、录音脉动）全部停止，
-   入场/弹层动画直接呈现终态，交互只剩瞬时状态切换。 */
+/* ---------- 动效降级：唯一总闸（跟随系统「减少动态效果」） ----------
+   Windows 设置里的动画开关映射到这条查询。命中时：
+   · 一切关键帧动画压到 1ms 且只跑一遍——入场/弹层直接呈现终态，
+     常驻循环（宠物浮动、标签脉冲、录音脉动、骨架呼吸）跑完首帧即停；
+   · 一切 transition 压到 1ms——按下/悬停/折叠仍立刻看到结果，只是没有过程；
+   · 平滑滚动归零。
+   时间型动画之外还剩五处定点例外（都由自身特性决定，写在各功能段旁）：
+   · .chat-log 的滚动驱动遮罩（animation-timeline，不吃 duration）；
+   · ::view-transition-* 伪元素（不在 * 选择器覆盖范围内）；
+   · 协作卡的阶段脉冲 / 折叠箭头（持续提醒类，定格而不是假瞬变）；
+   · 工厂画布的运行脉冲 / 抽屉滑入（canvas/JS 同步驱动）；
+   · 定时任务「在跑」呼吸点（持续指示，reduce 下定格为实心点）。
+   JS 侧 scrollIntoView({behavior:"smooth"}) 不受 CSS 影响，调用方需自行在
+   reduce 下改传 "auto"（本次未改 JS，见执行记录的遗留项）。
+   局部 @media (prefers-reduced-motion) 只允许上面登记的定点例外，
+   新增必须同步登记到这里。 */
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
-    animation-duration: .01ms !important;
+  *, *::before, *::after, details::details-content {
+    animation-duration: 1ms !important;
+    animation-delay: 0s !important;
     animation-iteration-count: 1 !important;
-    transition-duration: .01ms !important;
+    transition-duration: 1ms !important;
+    transition-delay: 0s !important;
     scroll-behavior: auto !important;
   }
+  /* 光标闪烁的 100% 帧是「不可见」：压到 1ms 会定格成消失，这里改回常显 */
+  .msg .md.streaming > div:last-child > :last-child::after {
+    animation: none !important;
+  }
+  /* 主题切换的过渡窗口由 .theme-swap 用 !important 简写显式打开，特异性高于
+     上面的 * 总闸——这里同权重、后写，压回 1ms，reduce 下切主题仍然瞬变 */
+  html.theme-swap,
+  html.theme-swap body,
+  html.theme-swap #sidebar,
+  html.theme-swap #topbar,
+  html.theme-swap #chat-main,
+  html.theme-swap #chat,
+  html.theme-swap #composer,
+  html.theme-swap #right-panel,
+  html.theme-swap .settings-body,
+  html.theme-swap .settings-page,
+  html.theme-swap .settings-card,
+  html.theme-swap .rp-page,
+  html.theme-swap .msg .md,
+  html.theme-swap .chat-tab {
+    transition-duration: 1ms !important;
+    transition-delay: 0s !important;
+  }
+  .theme-ground-fade { animation-duration: 1ms !important; }
 }
 
 /* ============================================================
@@ -8243,10 +8666,20 @@ details.map-phase summary::-webkit-details-marker { display: none; }
 .mod-dialog-host {
   position: fixed; inset: 0; z-index: var(--z-modal);
   display: flex; align-items: center; justify-content: center;
-  /* 与通用弹窗 .overlay 同一背衬语言：墨色半透 + 微模糊 + 统一入场 */
+  /* 与通用弹窗 .overlay 同一背衬语言：墨色半透 + 微模糊 + 统一淡入淡出 */
   background: color-mix(in srgb, var(--ink-line) 52%, transparent);
   backdrop-filter: blur(2px);
-  animation: ui-modal-in var(--dur-fast) var(--ease-out);
+  opacity: 1;
+  transition: opacity var(--dur-base) var(--ease-std);
+  transition: opacity var(--dur-base) var(--ease-std),
+              display var(--dur-base) allow-discrete,
+              visibility var(--dur-base);
+}
+.mod-dialog-host.hidden {
+  display: none; opacity: 0; pointer-events: none; visibility: hidden;
+}
+@starting-style {
+  .mod-dialog-host:not(.hidden) { opacity: 0; }
 }
 .mod-dialog {
   position: absolute; inset: 0;
@@ -8427,18 +8860,10 @@ li.mod-row {
 
 /* ============================================================
  * 点击后出现的 UI · interaction states
- * 所有浮层统一「纸片 + 墨线 + 阴影」；打开时有方向感，
+ * 所有浮层统一「纸片 + 墨线 + 阴影」；打开/关闭都走文件开头的动效语言：
+ * transition + .hidden 判定，出现与消失同一条曲线，可打断、可反向。
  * 重点控件保留清晰的选中/危险/禁用语义，不改变交互逻辑。
  * ============================================================ */
-
-@keyframes ui-pop-in {
-  from { opacity: 0; transform: translateY(5px) scale(.985); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
-}
-@keyframes ui-modal-in {
-  from { opacity: 0; transform: translateY(8px) scale(.985); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
-}
 
 /* 通用浮层：菜单、通知和模型选择都使用同一张「浮起的纸」 */
 .session-menu,
@@ -8447,8 +8872,6 @@ li.mod-row {
   border: 1.5px solid var(--ink-line);
   background: color-mix(in srgb, var(--card) 96%, var(--paper-raised));
   box-shadow: 4px 5px 0 color-mix(in srgb, var(--ink-line) 14%, transparent), var(--shadow-lg);
-  animation: ui-pop-in var(--dur-fast) var(--ease-out);
-  transform-origin: var(--pop-origin, bottom left);
 }
 .session-menu.hidden,
 .input-menu.hidden,
@@ -8531,6 +8954,11 @@ li.mod-row {
 /* 顶栏模型菜单：单列服务列表（点服务在右侧弹出该服务的模型层），取代原「默认/自定义」页签 */
 /* overflow 必须放开：模型弹层浮在服务列右侧，会被 .session-menu 的 overflow:hidden 裁掉 */
 #model-menu { width: 260px; overflow: visible; }
+/* 模型菜单贴着输入区/顶栏向上翻：缩放原点锚在左下，收起时原路缩回 */
+#model-menu, #aux-model-menu, #subagent-model-menu, #ref-menu,
+#reasoning-menu { --pop-origin: bottom left; }
+/* 通知中心挂在顶栏右端、向下展开：原点锚右上 */
+#notif-panel { --pop-origin: top right; }
 /* 列表容器：同一时间只显示服务列；「管理模型服务」入口缩在来源列下方 */
 #model-menu .mm-services {
   padding: 4px 2px; overflow-y: auto;
@@ -8639,6 +9067,12 @@ li.mod-row {
 @media (max-width: 520px) {
   #topbar { padding: 6px 8px; }
   #chat-tabs { max-width: calc(100% - 150px); }
+  /* 手机上的页签：几个会话挤在一条两百来像素的栏里时，每个只剩 68px、标题
+     截成「帮…」，触屏又没有 hover title 可看。放宽单个页签的下限（栏本来就能
+     横滚，右缘有渐隐提示），并露出序号——同一句话开出来的几个会话标题本来就
+     一样，序号 + 更长的标题前缀才分得清是哪一张 */
+  .chat-tab { min-width: 112px; }
+  .chat-tab .tab-idx { display: inline-block; }
   .msg.user { max-width: 88%; }
   .msg.assistant .md { padding: 11px 13px; }
 
@@ -8663,18 +9097,6 @@ li.mod-row {
   .rt-menu-actions { gap: 6px; flex-wrap: wrap; }
   .modal-box { width: calc(100vw - 24px); padding: 20px 16px 16px; }
 }
-
-/* 本区块位于新增交互态样式之后，确保系统的「减少动态效果」偏好覆盖新动画。 */
-@media (prefers-reduced-motion: reduce) {
-  .session-menu,
-  .input-menu,
-  .rt-menu,
-  .overlay,
-  .modal-box {
-    animation: none !important;
-  }
-}
-
 
 /* ---------- 运行中心（设置 · 运行中心） ---------- */
 .run-row {
@@ -8873,11 +9295,10 @@ li.mod-row {
 .fh-lamp:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .fh-lamp i {
   width: 7px; height: 7px; border-radius: 50%; background: var(--bad);
-  align-self: center; animation: fh-lamp 1.6s ease-in-out infinite;
+  align-self: center; animation: fh-lamp var(--dur-loop) var(--ease-std) infinite;
 }
 .fh-lamp b { font-size: var(--fs-title); color: var(--bad); }
 @keyframes fh-lamp { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
-@media (prefers-reduced-motion: reduce) { .fh-lamp i { animation: none; } }
 /* 样板厂标记：计数全在场景里，这里只说明「场景是演示的」 */
 .fh-demo {
   padding: 1px 9px; font-size: var(--fs-cap); border-radius: 0;
@@ -8984,7 +9405,7 @@ li.mod-row {
   width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
   background: var(--dim); box-shadow: 0 0 0 1px var(--line2);
 }
-.fx-dot.running { background: var(--blue); animation: fx-pulse 1.2s ease-in-out infinite; }
+.fx-dot.running { background: var(--blue); animation: fx-pulse var(--dur-loop) var(--ease-std) infinite; }
 .fx-dot.paused, .fx-dot.stopped { background: var(--gold); }
 .fx-dot.failed { background: var(--bad); }
 .fx-dot.warn { background: var(--gold); }
@@ -9112,6 +9533,13 @@ li.mod-row {
 @keyframes fx-drawer-in {
   from { opacity: 0; transform: translateX(16px); }
   to { opacity: 1; transform: translateX(0); }
+}
+/* 定点例外（总闸之外）：工厂画布的高频脉冲与抽屉滑入由 canvas/JS 同步驱动，
+   reduce 下直接停掉（画布侧另有 S.reduced 兜底）；1ms 假瞬变会闪一帧。 */
+@media (prefers-reduced-motion: reduce) {
+  .fx-dot.running { animation: none; }
+  #factory-drawer.factory-entered { animation: none; }
+  .fh-cell, .fx-chip, .fx-line, #factory-toolbar button { transition-duration: 1ms; }
 }
 .fx-drawer-head {
   display: flex; align-items: center; gap: 8px; flex-shrink: 0;
@@ -9269,14 +9697,6 @@ li.mod-row {
   #factory-notice { left: 8px; right: 8px; top: 8px; transform: none; max-width: none; z-index: 7; }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .fx-dot.running { animation: none; }
-  #factory-drawer.factory-entered { animation: none; }
-  .fh-cell, .fx-chip, .fx-line, #factory-toolbar button {
-    transition-duration: 0.01ms;
-  }
-}
-
 /* ============================================================
  * 全局命令面板（Ctrl+K）—— 清单与交互在 app.js 尾部「全局命令面板」段
  * 同一张「浮起的纸」：墨描边 + 铅字压印投影，与 .overlay / .rt-menu
@@ -9288,9 +9708,15 @@ li.mod-row {
   display: flex; align-items: flex-start; justify-content: center;
   padding: 10vh var(--sp-4) var(--sp-5);
   background: color-mix(in srgb, var(--ink-line) 32%, transparent);
-  animation: ui-modal-in var(--dur-fast) var(--ease-out);
+  opacity: 1;
+  transition: opacity var(--dur-base) var(--ease-std);
+  transition: opacity var(--dur-base) var(--ease-std),
+              display var(--dur-base) allow-discrete,
+              visibility var(--dur-base);
 }
-.palette-overlay.hidden { display: none; }
+.palette-overlay.hidden {
+  display: none; opacity: 0; pointer-events: none; visibility: hidden;
+}
 .palette-box {
   position: relative;
   width: min(560px, 100%); max-height: 70vh;
@@ -9299,7 +9725,14 @@ li.mod-row {
   border-radius: var(--r-lg);
   box-shadow: 5px 6px 0 color-mix(in srgb, var(--ink-line) 18%, transparent), var(--shadow-lg);
   overflow: hidden;
-  animation: ui-modal-in var(--dur-fast) var(--ease-out);
+  opacity: 1; transform: translateY(0) scale(1);
+  transition: opacity var(--dur-base) var(--ease-out),
+              transform var(--dur-base) var(--ease-out);
+}
+.palette-overlay.hidden .palette-box { opacity: 0; transform: translateY(8px) scale(.985); }
+@starting-style {
+  .palette-overlay:not(.hidden) { opacity: 0; }
+  .palette-overlay:not(.hidden) .palette-box { opacity: 0; transform: translateY(8px) scale(.985); }
 }
 /* 顶部主色条：与 .modal-box 同款识别条 */
 .palette-box::before {
@@ -9524,21 +9957,53 @@ li.mod-row {
 
 .teamcard {
   display: grid; grid-template-rows: auto 1fr;
-  transition: grid-template-rows var(--dur-base) var(--ease-out);
+  transition: grid-template-rows var(--dur-base) var(--ease-std);
 }
-.teamcard .tc-body { min-height: 0; overflow: hidden; }
+.teamcard .tc-body {
+  min-height: 0; overflow: hidden;
+  transition: visibility var(--dur-base);
+}
 .teamcard.folded { grid-template-rows: auto 0fr; }
-.teamcard.folded .tc-body { display: block; }
+/* 折叠时行内边距的溢出裁掉（轨道已为 0，不摘 display，过渡才可逆）；
+   收起后 body 里的按钮/链接退出 tab 序与读屏树 */
+.teamcard.folded { overflow: hidden; }
+.teamcard.folded .tc-body { visibility: hidden; }
 
-/* —— 流式打字：新进入的字符 blur(6px) 渐显，120ms，字间 30ms（JS 标延迟） —— */
+/* —— 原生 details 的展开/收起：::details-content 可插值（Chromium 131+）——
+   设置页「说明」、对抗卡证据段等都用 <details>；此前高度 14→36px 在 1ms 内跳完。
+   不支持该伪元素的内核整块忽略，退回原来的瞬时展开，不会更差。
+   箭头旋转仍由各组件自己的 transition 管，两边同长（dur-base）。 */
+@supports selector(details::details-content) {
+  details::details-content {
+    block-size: 0;
+    overflow: clip;
+    interpolate-size: allow-keywords;
+    transition: block-size var(--dur-base) var(--ease-std),
+                content-visibility var(--dur-base) allow-discrete;
+  }
+  details[open]::details-content { block-size: auto; }
+}
+
+/* —— 流式打字：新进入的字符 blur(6px) 渐显（dur-fast）；错峰 3ms/字、封顶 30ms
+   由 JS 标延迟（app-chat.js:661）。与 appendStream 的 180ms 重画间隔配套：
+   调 --dur-fast 要同步那个数，否则淡入会被下一次重画拦腰截断。
+   不给每个字符写 will-change：一次最多 600 个 span，常驻图层反而拖慢整轮 —— */
 @keyframes stream-char-in {
   from { opacity: 0; filter: blur(6px); }
   to   { opacity: 1; filter: blur(0); }
 }
 .stream-ch {
   display: inline;
-  animation: stream-char-in 120ms var(--ease-out) both;
-  will-change: opacity, filter;
+  animation: stream-char-in var(--dur-fast) var(--ease-out) both;
+}
+
+/* —— 流式光标：由 JS 给正文容器加 .streaming（app-chat.js），CSS 在最后一个
+   块级元素的末尾生成 ▍；定稿时摘掉类即消失，气泡高度不因光标多占一行而回弹。
+   光标只闪 opacity，不参与布局 —— */
+@keyframes stream-caret-blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+.msg .md.streaming > div:last-child > :last-child::after {
+  content: "▍"; margin-left: 2px; color: var(--dim);
+  animation: stream-caret-blink var(--dur-loop) steps(1) infinite;
 }
 
 /* —— 分屏拖拽遮罩：拖动期间盖住右侧预览，挡住悬停/点击/选中 —— */
@@ -9721,11 +10186,11 @@ li.mcp-failed { border-left: 0; }
 .image-thumb { view-transition-class: attach-card; }
 ::view-transition-old(root), ::view-transition-new(root) { animation: none; }
 ::view-transition-group(.attach-card) {
-  animation-duration: 180ms;
+  animation-duration: var(--dur-base);
   animation-timing-function: var(--ease-out);
 }
-::view-transition-new(.attach-card) { animation: attach-card-in 180ms var(--ease-out); }
-::view-transition-old(.attach-card) { animation: attach-card-out 140ms var(--ease-out); }
+::view-transition-new(.attach-card) { animation: attach-card-in var(--dur-base) var(--ease-out); }
+::view-transition-old(.attach-card) { animation: attach-card-out var(--dur-fast) var(--ease-in); }
 @keyframes attach-card-in {
   from { opacity: 0; transform: scale(.92); }
   to { opacity: 1; transform: none; }
@@ -9795,6 +10260,13 @@ li.mcp-failed { border-left: 0; }
 .collab-tpl-ops { display: flex; gap: 6px; flex-wrap: wrap; margin-top: auto; padding-top: 4px; }
 .collab-tpl-ops .collab-op { font-size: var(--fs-sm); padding: 3px 10px; }
 .collab-tpl-ops .collab-op.danger { color: var(--reg); }
+/* 零工具提示块：夹在编辑器标题与表单之间，读成「就地告警」而不是表单正文——
+   否则用户不知道保存被拦是因为没挂工具 */
+#collab-tpl-zerotool {
+  margin: 8px 0 10px; padding: 8px 10px;
+  border: 1px dashed var(--line2); border-radius: var(--r-lg);
+  background: var(--paper-sunken);
+}
 .collab-group-title {
   grid-column: 1 / -1;
   margin-top: 10px; padding-bottom: 3px;

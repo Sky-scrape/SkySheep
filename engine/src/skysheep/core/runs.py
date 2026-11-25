@@ -160,6 +160,12 @@ class RunCenter:
                 r.detail = "应用退出时该任务仍在运行"
                 r.retryable = bool(r.retry_text)
                 r.updated_at = now
+            elif r.detail and r.state != INTERRUPTED:
+                # 终态不该再有「正在执行 read_file」这类过程文案。旧快照是在
+                # update() 收口清 detail 之前落盘的，这里兜一层，否则运行中心
+                # 会出现「已完成 · 正在执行 read_file」自相矛盾的行（interrupted
+                # 的说明文案是有意义的，保留）。
+                r.detail = ""
             self._runs[r.id] = r
             self._order.append(r.id)
 
@@ -231,10 +237,16 @@ class RunCenter:
         run = self._runs.get(run_id)
         if run is None:
             return None
+        was_running = run.state in RUNNING_STATES
         if state is not None:
             run.state = state
         if detail is not None:
             run.detail = detail[:300]
+        elif state is not None and state in TERMINAL_STATES and was_running:
+            # 进终态就不再「正在执行 X」：调用方没给新文案就清掉过程文案，
+            # 否则运行中心会出现「已完成 · 正在执行 read_file」。
+            # 只清「运行态 → 终态」这一跳，interrupted 的说明文案照旧保留。
+            run.detail = ""
         if error is not None:
             run.error = error[:500]
         if tools_used is not None:
@@ -253,6 +265,7 @@ class RunCenter:
         if run is None or run.state not in RUNNING_STATES:
             return False
         run.state = CANCELLED
+        run.detail = ""  # 同 update()：终态不带「正在执行 X」的过程文案
         run.updated_at = time.time()
         run.finished_at = run.updated_at
         self.save()

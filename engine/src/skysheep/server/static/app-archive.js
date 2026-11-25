@@ -65,13 +65,10 @@ async function loadArchiveMgr() {
   renderArchiveMgr();
 }
 
-function renderArchiveMgr() {
-  const box = document.getElementById("archive-mgr-list");
-  const purge = document.getElementById("btn-archive-purge");
-  if (!_archiveMgr) return;
-  const all = _archiveMgr.sessions || [];
-  purge.hidden = all.length === 0;
-
+// 当前筛选 + 排序后的可见列表：渲染与「删除」共用同一口径，
+// 按钮删的范围必须就是屏幕上看到的那几条
+function archiveVisibleList() {
+  const all = (_archiveMgr && _archiveMgr.sessions) || [];
   const q = document.getElementById("archive-mgr-search").value.trim().toLowerCase();
   const sort = document.getElementById("archive-mgr-sort").value;
   const pid = document.getElementById("archive-mgr-project").value;
@@ -83,6 +80,22 @@ function renderArchiveMgr() {
     const key = sort === "created" ? "created_at" : "updated_at";
     list.sort((a, b) => (b[key] || 0) - (a[key] || 0));
   }
+  return list;
+}
+
+function renderArchiveMgr() {
+  const box = document.getElementById("archive-mgr-list");
+  const purge = document.getElementById("btn-archive-purge");
+  if (!_archiveMgr) return;
+  const all = _archiveMgr.sessions || [];
+
+  const q = document.getElementById("archive-mgr-search").value.trim().toLowerCase();
+  const pid = document.getElementById("archive-mgr-project").value;
+  const list = archiveVisibleList();
+  // 删除按钮跟着可见范围走：筛选后只删筛选结果，按钮文案与确认框都点明这一点
+  const filtering = !!q || !!pid;
+  purge.hidden = !list.length;
+  purge.textContent = filtering ? `🗑 删除筛选的 ${list.length} 个` : "🗑 全部删除";
   if (!all.length) {
     archiveMgrStatus(box, "没有已归档的会话。右键会话（或点 ⋯）选「归档」，它就会从侧栏消失并收进这里。");
     return;
@@ -249,16 +262,15 @@ document.getElementById("archive-mgr-search").addEventListener("input", () => {
 document.getElementById("archive-mgr-sort").onchange = () => { if (_archiveMgr) renderArchiveMgr(); };
 document.getElementById("archive-mgr-project").onchange = () => { if (_archiveMgr) renderArchiveMgr(); };
 document.getElementById("btn-archive-purge").onclick = async () => {
-  const n = _archiveMgr ? (_archiveMgr.sessions || []).length : 0;
-  if (!n) return;
+  // 只删当前筛选/排序后看得见的那些：不带筛选时才等于「全部已归档」
+  const ids = archiveVisibleList().map((s) => s.id);
+  if (!ids.length) return;
+  const scoped = !!document.getElementById("archive-mgr-search").value.trim()
+    || !!document.getElementById("archive-mgr-project").value;
   if (!(await confirmModal(
-    `删除全部 ${n} 个已归档会话？\n\n删除后无法恢复，确定继续？`,
-    { title: "确认删除", okLabel: "全部删除", danger: true }))) return;
-  try {
-    const r = await request("archive.delete", {});
-    closeTabsForSids(r.ids || []);
-    if (r.deleted <= 0) addNotice("没有可删除的会话");
-    refreshSessions();
-    await loadArchiveMgr();
-  } catch (e) { addNotice("删除失败: " + e.message); }
+    scoped
+      ? `删除当前筛选的 ${ids.length} 个已归档会话？\n\n删除后无法恢复，确定继续？`
+      : `删除全部 ${ids.length} 个已归档会话？\n\n删除后无法恢复，确定继续？`,
+    { title: "确认删除", okLabel: "删除", danger: true }))) return;
+  archiveBatchDelete(ids);
 };

@@ -444,6 +444,10 @@ async function renderSubagentCfg() {
   const toggle = document.getElementById("subagent-toggle");
   const form = document.getElementById("subagent-form");
   toggle.checked = !!d.enabled;
+  // 开关状态行：模板首次渲染与拨动开关后都用这一份文案，不各写一遍
+  const stateText = (on) => (on
+    ? "● 已启用：Agent 会在合适的任务里派出子代理并行干活"
+    : "○ 已关闭：Agent 只在主对话里逐步处理");
   form.innerHTML = `
     <div class="toolcfg-row"><label>每个子代理最多执行轮数</label>
       <input type="number" data-f="max_iterations" min="1" max="100" step="1"
@@ -454,15 +458,45 @@ async function renderSubagentCfg() {
              value="${d.max_concurrent ?? 3}" ${d.enabled ? "" : "disabled"}>
     </div>
     <div class="toolcfg-row">
-      <span class="toolcfg-state ${d.enabled ? "ok" : ""}">${d.enabled
-        ? "● 已启用：Agent 会在合适的任务里派出子代理并行干活"
-        : "○ 已关闭：Agent 只在主对话里逐步处理"}</span>
+      <span class="toolcfg-state ${d.enabled ? "ok" : ""}">${stateText(d.enabled)}</span>
       <span class="spacer"></span>
       <button class="btn-ghost" data-act="save">保存</button>
     </div>`;
-  toggle.onchange = () => {
+  // 开关单独落盘：拨一下立刻生效，不用再点「保存」——那个按钮留给下面两个数字。
+  // 数字只在合法范围内才一起提交（空 / 越界传 null = 后端不改）：写错的数字留给
+  // 「保存」按钮去报错，别把开关也一起钉死
+  const numOrNull = (f, lo, hi) => {
+    const raw = String(form.querySelector(`[data-f="${f}"]`).value).trim();
+    const v = Number(raw);
+    return raw && Number.isInteger(v) && v >= lo && v <= hi ? v : null;
+  };
+  const syncToggle = () => {
     form.querySelector('[data-f="max_iterations"]').disabled = !toggle.checked;
     form.querySelector('[data-f="max_concurrent"]').disabled = !toggle.checked;
+    const st = form.querySelector(".toolcfg-state");
+    if (st) {
+      st.textContent = stateText(toggle.checked);
+      st.className = "toolcfg-state" + (toggle.checked ? " ok" : "");
+    }
+  };
+  toggle.onchange = async () => {
+    syncToggle(); // 输入框先跟着开关走，失败再随 toggle 一起回滚
+    try {
+      const r = await request("subagent.save", {
+        enabled: toggle.checked,
+        max_iterations: numOrNull("max_iterations", 1, 100),
+        max_concurrent: numOrNull("max_concurrent", 1, 8),
+      });
+      toggle.checked = !!r.enabled;
+      syncToggle();
+      subagentStatus(r.enabled
+        ? `✓ 已启用子代理（已保存）：最多 ${r.max_iterations} 轮 / 同时 ${r.max_concurrent} 个`
+        : "✓ 已关闭子代理（已保存）", true);
+    } catch (e) {
+      toggle.checked = !toggle.checked;
+      syncToggle();
+      subagentStatus("✗ 保存失败：" + e.message, false);
+    }
   };
   form.querySelector('[data-act="save"]').onclick = async () => {
     const maxIters = form.querySelector('[data-f="max_iterations"]').value.trim();
@@ -852,8 +886,18 @@ function subagentEditorModal(d, existing = null) {
       </label>
       <label class="wide" data-f="tools-pick" ${policy === "custom" ? "" : "hidden"}>
         <span class="dim small">勾选要给它的工具（可多选）：</span>
-        <span class="tool-pick-grid">${(d.tools || []).map((t) => `
-          <label class="tool-pick"><input type="checkbox" value="${escapeHtml(t.name)}"${checked.includes(t.name) ? " checked" : ""}> ${escapeHtml(t.name)}</label>`).join("")}
+        <span class="tool-pick-grid">${(d.tools || []).map((t) => {
+          // 安全级别徽章：勾 run_command / write_file 之前就能看出这是在交什么权限。
+          // 数据来自 subagents_detail 已给的 {name, safety, description}
+          const safetyCls = t.safety === "dangerous" ? "danger-mark"
+            : t.safety === "write" ? "write-mark" : "safe-mark";
+          const safetyLabel = SAFETY_LABELS[t.safety] || t.safety || "";
+          const badge = safetyLabel
+            ? `<span class="chip ${safetyCls}">${escapeHtml(safetyLabel)}</span>` : "";
+          return `<label class="tool-pick" title="${escapeHtml(t.description || "")}">
+            <input type="checkbox" value="${escapeHtml(t.name)}"${checked.includes(t.name) ? " checked" : ""}>
+            <span>${escapeHtml(t.name)}</span>${badge}</label>`;
+        }).join("")}
         </span>
       </label>
       <label>使用模型

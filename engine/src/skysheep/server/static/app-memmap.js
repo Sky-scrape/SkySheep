@@ -53,11 +53,25 @@ function mapBasename(p) {
 // mapHeatWeeksFor / mapHeatAvailWidth 与 app.js 里按宽度重铺的 ResizeObserver
 // 已随宽度优先方案移除
 
+let mapLoadSeq = 0; // 连点项目/时间范围时只认最后一次请求，迟到的旧结果直接丢掉
+
+// 请求期间先把旧数据从屏上撤掉：切项目/改时间范围时不能先亮着上一个项目的地图
+function mapShowLoading() {
+  const graph = mapState.view === "graph";
+  const viewBox = document.getElementById(graph ? "map-graph" : "map-timeline");
+  const otherBox = document.getElementById(graph ? "map-timeline" : "map-graph");
+  if (otherBox) otherBox.innerHTML = "";
+  if (viewBox) viewBox.innerHTML = '<div class="map-empty dim">正在装配记忆地图…</div>';
+  const aside = document.getElementById("map-aside");
+  if (aside) aside.classList.add("hidden");
+}
+
 async function loadMemoryMap(force) {
-  const tl = document.getElementById("map-timeline");
   // 记忆候选是全局的（不随项目/时间窗过滤），与地图载荷并行各拉各的；
   // 地图挂了（如还没有项目）也不影响候选区
   loadMemoryCandidates();
+  const seq = ++mapLoadSeq;
+  mapShowLoading();
   try {
     if (!mapProjects.length || force) {
       const pl = await request("project.list").catch(() => ({ projects: [] }));
@@ -72,14 +86,42 @@ async function loadMemoryMap(force) {
       const days = parseInt(mapState.range, 10);
       if (days > 0) params.start_ts = Date.now() / 1000 - days * 86400;
     }
-    mapState.data = await request("map.get", params);
+    const data = await request("map.get", params);
+    if (seq !== mapLoadSeq) return; // 期间又切了项目/时间范围，这份结果已过时
+    mapState.data = data;
     renderMapChrome();
     renderMapView();
     renderMapAside();
   } catch (e) {
-    if (tl) tl.innerHTML = `<div class="map-empty dim">${escapeHtml(e.message)}</div>`;
-    document.getElementById("map-aside").classList.add("hidden");
+    if (seq !== mapLoadSeq) return;
+    // 失败不留旧图：载荷清空、控件与视图回空态，再把原因写在当前可见的视图里
+    mapState.data = null;
+    renderMapChrome();
+    renderMapView();
+    renderMapAside();
+    const box = document.getElementById(mapState.view === "graph" ? "map-graph" : "map-timeline");
+    if (box) box.innerHTML = `<div class="map-empty dim">加载记忆地图失败：${escapeHtml(e.message)}</div>`;
   }
+}
+
+// 点热力格跳到时间线那一天：当前时间窗里没有它（如点了 90 天以前的格子）时，
+// 自动把范围切到「全部」重拉后再定位，不再点了没反应
+async function mapJumpToDay(day) {
+  const findItem = () => Array.from(document.querySelectorAll("#map-timeline .map-item"))
+    .find((n) => n.textContent.includes(day.slice(5)));
+  if (mapState.view !== "timeline") {
+    mapState.view = "timeline";
+    renderMapChrome();
+    renderMapView();
+    renderMapAside();
+  }
+  let target = findItem();
+  if (!target && mapState.range !== "0") {
+    mapState.range = "0";
+    await loadMemoryMap(true);
+    target = findItem();
+  }
+  if (target) target.scrollIntoView({ block: "center", behavior: smoothBehavior() });
 }
 
 // ---------- 轮次记忆沉淀：待审候选（memory.candidates / candidate_adopt / candidate_ignore） ----------
@@ -158,6 +200,10 @@ function renderMemoryCandidates() {
       loadMemoryCandidates();
     };
     el.querySelector('[data-op="ignore"]').onclick = async () => {
+      // 忽略是一去不回的黑名单（同类信息之后不再提出）：先问一次，手滑不至于永久拉黑
+      if (!(await confirmModal(
+        "忽略后，同类信息之后不再向你提出，这条候选也会丢弃。确定忽略？",
+        { title: "确认忽略", okLabel: "忽略" }))) return;
       try {
         await request("memory.candidate_ignore", { candidate_id: cid });
       } catch (err) { addNotice("忽略失败: " + err.message); }
@@ -406,7 +452,7 @@ function renderMapAside() {
       const tip = future ? `${key}：还没到`
         : st ? `${key}：${st.sessions} 个会话  ${tok >= 1000 ? Math.round(tok / 1000) + "k" : tok} tokens`
         : `${key}：无活动`;
-      cells += `<i class="${lv}${isToday ? " today" : ""}" data-day="${key}" title="${escapeHtml(tip)}"></i>`;
+      cells += `<i class="${lv}${future ? " future" : ""}${isToday ? " today" : ""}" data-day="${key}" title="${escapeHtml(tip)}"></i>`;
     }
     // 空态：整个窗口（含未来天）没有任何活动记录——一排空格子加图例不
     // 说明任何信息，整块收起，底栏只剩文件足迹（或全部收起）。注意不要
@@ -429,16 +475,8 @@ function renderMapAside() {
       const scroller = heatBox.querySelector(".map-heat-scroll");
       if (scroller) scroller.scrollTop = scroller.scrollHeight;
       heatBox.querySelectorAll("[data-day]").forEach((el) => {
-        el.onclick = () => {
-          const day = el.dataset.day;
-          mapState.view = "timeline";
-          renderMapChrome();
-          renderMapView();
-          renderMapAside();
-          const target = Array.from(document.querySelectorAll("#map-timeline .map-item"))
-            .find((n) => n.textContent.includes(day.slice(5).replace("-", "-")));
-          if (target) target.scrollIntoView({ block: "center", behavior: "smooth" });
-        };
+        if (el.classList.contains("future")) return; // 还没到的日子不响应点击
+        el.onclick = () => mapJumpToDay(el.dataset.day);
       });
     }
   }

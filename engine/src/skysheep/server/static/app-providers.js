@@ -113,6 +113,7 @@ function renderProviderList() {
   list.innerHTML = "";
   if (!entries.length) {
     list.innerHTML = '<p class="empty-hint">还没有可用的模型服务，点「＋ 添加自定义服务」新建一个，或在下方「已停用的服务」里恢复。</p>';
+    renderHiddenProviders(); // 列表空了「已停用的服务」更不能少：恢复入口只剩它
     return;
   }
   const wantPreset = providerTab === "preset";
@@ -121,47 +122,53 @@ function renderProviderList() {
     list.innerHTML = wantPreset
       ? '<p class="empty-hint">内置服务都停用了？在下方「已停用的服务」里点「恢复」即可找回。</p>'
       : '<p class="empty-hint">还没有自定义服务，点右上角「＋ 添加自定义服务」新建一个。</p>';
+    renderHiddenProviders();
     return;
   }
   rows.forEach((e) => list.appendChild(providerRow(e)));
+  renderHiddenProviders();
+}
 
-  // —— 已停用的服务（内置 + 自定义都在这里，可恢复） ——
+// —— 已停用的服务（内置 + 自定义都在这里，可恢复） ——
+// 单独抽出来：上面两条早退路径（一个服务都没有 / 当前页签没行）也要画，
+// 否则「关掉最后一个服务」之后恢复入口随之消失，用户就回不去了
+function renderHiddenProviders() {
   const hiddenBox = document.getElementById("provider-hidden");
-  const hidden = providerCfg.disabled || [];
+  if (!hiddenBox) return;
+  const hidden = (providerCfg && providerCfg.disabled) || [];
   hiddenBox.innerHTML = "";
   hiddenBox.hidden = !hidden.length;
-  if (hidden.length) {
-    hiddenBox.innerHTML = `
-      <h4>已停用的服务</h4>
-      <p class="settings-hint">停用只是从列表里隐藏，配置都保留：内置服务恢复时按最新出厂默认重建（默认模型可能已更新），API Key 不丢；自定义服务恢复后原样回来。</p>
-      <div class="hidden-list">${hidden
-        .map(
-          (n) =>
-            `<span class="hidden-item"><span class="item-name">${escapeHtml(n)}</span>
-             <button class="btn-ghost restore" data-name="${escapeHtml(n)}">恢复</button></span>`
-        )
-        .join("")}</div>`;
-    hiddenBox.querySelectorAll(".restore").forEach((btn) => {
-      btn.onclick = async (e) => {
-        e.stopPropagation();
-        try {
-          await request("config.restore_provider", { name: btn.dataset.name });
-        } catch (err) {
-          providerStatus(`✗ 恢复失败：${err.message}`, false);
-          return;
-        }
-        await renderSettings();
-        boot();
-        // 恢复的服务若不在当前页签的分组里，自动切过去，让它在列表中立即可见
-        const restored = providerCfg.providers[btn.dataset.name];
-        if (restored && restored.is_preset !== (providerTab === "preset")) {
-          providerTab = restored.is_preset ? "preset" : "custom";
-          renderProviderList();
-        }
-        providerStatus();
-      };
-    });
-  }
+  if (!hidden.length) return;
+  hiddenBox.innerHTML = `
+    <h4>已停用的服务</h4>
+    <p class="settings-hint">停用只是从列表里隐藏，配置都保留：内置服务恢复时按最新出厂默认重建（默认模型可能已更新），API Key 不丢；自定义服务恢复后原样回来。</p>
+    <div class="hidden-list">${hidden
+      .map(
+        (n) =>
+          `<span class="hidden-item"><span class="item-name">${escapeHtml(n)}</span>
+           <button class="btn-ghost restore" data-name="${escapeHtml(n)}">恢复</button></span>`
+      )
+      .join("")}</div>`;
+  hiddenBox.querySelectorAll(".restore").forEach((btn) => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
+      try {
+        await request("config.restore_provider", { name: btn.dataset.name });
+      } catch (err) {
+        providerStatus(`✗ 恢复失败：${err.message}`, false);
+        return;
+      }
+      await renderSettings();
+      boot();
+      // 恢复的服务若不在当前页签的分组里，自动切过去，让它在列表中立即可见
+      const restored = providerCfg.providers[btn.dataset.name];
+      if (restored && restored.is_preset !== (providerTab === "preset")) {
+        providerTab = restored.is_preset ? "preset" : "custom";
+        renderProviderList();
+      }
+      providerStatus();
+    };
+  });
 }
 
 // ---------- 模型服务：详情视图（点列表某一行进入） ----------
@@ -234,6 +241,10 @@ function renderProviderDetail(name) {
     : p.proxy === ""
       ? "当前：强制直连（此服务不走任何代理）"
       : "当前：仅该服务走此代理";
+  // 没配 Key 的服务切不过去：构建 provider 时会直接报「还没有配置 API Key」。
+  // 在按钮上先说清楚，别让用户点完才知道——Key 填进输入框但还没保存不算
+  const noKeyTip = "先在上面填 API Key 并保存";
+  const noKey = !p.has_key;
   box.innerHTML = `
     <h4 class="sec-title">基本信息</h4>
     <div class="flat-panel">
@@ -391,8 +402,8 @@ function renderProviderDetail(name) {
 
     <div class="pr-ops">
       <button class="btn-primary save">保存</button>
-      <button class="btn-ghost use"${p.is_active ? ' disabled title="正在使用"' : ""}>${p.is_active ? "使用中" : "切换使用"}</button>
-      <button class="btn-ghost setdef"${p.is_default ? ' disabled title="已是默认"' : ""}>设为默认 ★</button>
+      <button class="btn-ghost use"${p.is_active ? ' disabled title="正在使用"' : (noKey ? ` disabled title="${noKeyTip}"` : "")}>${p.is_active ? "使用中" : "切换使用"}</button>
+      <button class="btn-ghost setdef"${p.is_default ? ' disabled title="已是默认"' : (noKey ? ` disabled title="${noKeyTip}"` : "")}>设为默认 ★</button>
       <button class="btn-ghost danger del">${p.is_preset ? "停用" : "删除"}</button>
     </div>
     <div class="pr-msg"></div>`;
@@ -513,6 +524,8 @@ function renderProviderDetail(name) {
       <button class="em-del" type="button" title="从已启用列表删除">✕</button>`;
     li.querySelector(".em-name").onclick = async () => {
       if (isCur) return;
+      // 表格上面还有没保存的改动时先问一句，别让 renderSettings 把它们静默冲掉
+      if (!(await confirmProviderSwitch(box, name))) return;
       try {
         await request("model.switch", { name, model: m });
         await renderSettings();
@@ -858,7 +871,10 @@ function renderProviderDetail(name) {
 
   box.querySelector(".save").onclick = () =>
     saveProvider(box, name, false, q("select[data-f='kind']").value);
-  box.querySelector(".use").onclick = () => switchProvider(box, name);
+  box.querySelector(".use").onclick = async () => {
+    if (!(await confirmProviderSwitch(box, name))) return;
+    await switchProvider(box, name);
+  };
   box.querySelector(".setdef").onclick = () =>
     saveProvider(box, name, true, q("select[data-f='kind']").value);
   box.querySelector(".del").onclick = () => deleteProviderModal(name, p.is_preset);
@@ -878,6 +894,45 @@ function detailFormFingerprint(box) {
     parts.push(f + "=" + (el.type === "checkbox" ? (el.checked ? "1" : "0") : el.value.trim()));
   });
   return parts.join("|");
+}
+
+// 切换使用前的脏检查：详情表单有没保存的改动时三选一（保存后再切换 / 放弃改动 / 取消）。
+// 返回 true = 可以继续切（已保存或明确放弃），false = 用户取消。
+async function confirmProviderSwitch(box, name) {
+  if (!box || !detailSnapshot || detailFormFingerprint(box) === detailSnapshot) return true;
+  const choice = await providerUnsavedChoice();
+  if (choice === "cancel") return false;
+  if (choice === "save") {
+    const kindEl = box.querySelector("select[data-f='kind']");
+    // 保存失败（Key 不对、地址非法）时留在详情页：连同填的内容一起冲掉最糟
+    const saved = await saveProvider(box, name, false, kindEl ? kindEl.value : "");
+    if (!saved) return false;
+  }
+  return true;
+}
+
+// 三选一的确认层。confirmModal 只有两个按钮，这里把「放弃改动」做成正文里的链接按钮：
+// 「保存后再切换」= 弹层确认键，「取消」= 取消键（Esc 同义）
+function providerUnsavedChoice() {
+  return new Promise((resolve) => {
+    const box = document.createElement("div");
+    box.innerHTML = `
+      <p class="confirm-text">这个服务还有没保存的改动。切换使用会按已保存的配置重画页面，改动会丢。</p>
+      <p class="dim small">也可以 <button class="link-btn" type="button" data-a="discard">放弃改动</button> 后直接切换。</p>`;
+    const modalEl = document.getElementById("modal");
+    let settled = false;
+    const settle = (v) => { if (!settled) { settled = true; resolve(v); } };
+    // 取消 / Esc / 点遮罩都会隐藏弹层（隐藏即视为取消），统一在这里收口
+    const obs = new MutationObserver(() => {
+      if (modalEl.classList.contains("hidden")) { settle("cancel"); obs.disconnect(); }
+    });
+    obs.observe(modalEl, { attributes: true, attributeFilter: ["class"] });
+    box.querySelector('[data-a="discard"]').onclick = () => {
+      settle("discard");
+      hideModal();
+    };
+    showModal("有未保存的改动", box, () => settle("save"), "保存后再切换");
+  });
 }
 
 // ---------- 模型服务：添加视图（新建自定义服务，页内表单不用弹层） ----------

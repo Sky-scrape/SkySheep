@@ -98,8 +98,9 @@ async function refreshSessions(prefetched) {
             // 先记住目标会话再切项目：切完的列表重画会照它恢复选中高亮
             activeSessionSid = s.id;
             try {
-              await request("project.switch", { path: target.root_path });
-              await applyWorkspaceData(await fetchWorkspaceData());
+              // 切项目统一走 switchProject：右侧文件/任务/审查面板一起换到新项目，
+              // 并有「已切换到项目 X」的提示（别在这里手抄 switch + applyWorkspaceData）
+              await switchProject(target.root_path);
             } catch (e) {
               addNotice("切换到该项目失败：" + e.message);
               return;
@@ -133,6 +134,12 @@ async function refreshSessions(prefetched) {
   });
   const grouped = tagMap.size > 0;
   const untagged = classicList.filter((s) => !(s.tags || []).length);
+  // 标签过滤只在被过滤的标签仍存在于本次列表时有效：最后一条带它的会话改了标签、
+  // 或切到没有它的项目后自动解除——否则整列被一个已不存在的组挡空，
+  // 连点回全量的组头都没有（组头跟着标签一起没了）
+  if (activeTagFilter && !sessions.some((s) => (s.tags || []).includes(activeTagFilter))) {
+    activeTagFilter = null;
+  }
   const groups = [];
   if (grouped) {
     for (const [tag, list] of tagMap) groups.push({ tag, list });
@@ -287,6 +294,9 @@ function renderSessionItem(s, ul) {
   const tagChips = (s.tags || [])
     .map((t) => `<span class="s-tag">${escapeHtml(t)}</span>`).join("");
   const stamp = s.updated_at ? new Date(s.updated_at * 1000).toLocaleString() : "";
+  // 行尾的时间 / 归档 / ⋯ 共用同一个固定槽位：槽位由 li 的 padding-right 留出、
+  // 三者绝对定位叠在同一块里交叉淡入淡出（样式全在 app.css，DOM 保持平铺）。
+  // 槽宽不随悬浮变化 → 标题省略位置不横跳；归档按钮也不落在时间原来的落点上
   li.innerHTML = `
       ${s.pinned ? '<span class="pin" title="已置顶">📌</span>' : ""}
       <span class="s-title">${escapeHtml(s.title || "(未命名)")}</span>
@@ -299,7 +309,7 @@ function renderSessionItem(s, ul) {
   if (activeSessionSid != null && String(s.id) === String(activeSessionSid)) {
     li.classList.add("sess-active");
   }
-  // 悬浮时时间让位：右侧出现归档与 ⋯
+  // 行尾槽位里的归档与 ⋯（悬浮/聚焦时与时间交叉淡入淡出，见 app.css）
   li.querySelector(".s-archive").onclick = (e) => {
     e.stopPropagation();
     archiveSession(s);
@@ -632,7 +642,7 @@ function renderProjectGroup(frag, { key, name, list, isCurrent, rootPath, projec
     // （project=null 且非快聊）仍不提供新建：那些会话本属某项目，
     // 只是项目被移除后成了孤儿，新建无意义
     (project
-      ? `<button class="pg-del" title="${isCurrent ? "重置这个项目（清空会话与记录）" : "从列表中移除这个项目"}">✕</button>` : "") +
+      ? `<button class="pg-del" title="${isCurrent ? "彻底删除当前项目（含它的全部会话，不可恢复）" : "彻底删除这个项目（含它的全部会话，不可恢复）"}">✕</button>` : "") +
     // 兜底组「其他」（project=null 且非快聊）不提供新建：那些会话本属某项目，
     // 只是项目被移除后成了孤儿，新建无意义
     (headPlus || project
@@ -693,8 +703,9 @@ function renderProjectGroup(frag, { key, name, list, isCurrent, rootPath, projec
         // 先记住目标会话再切项目：切完的列表重画会照它恢复选中高亮
         activeSessionSid = s.id;
         try {
-          await request("project.switch", { path: rootPath });
-          await applyWorkspaceData(await fetchWorkspaceData());
+          // 同「全部项目」搜索命中的流程：切项目走 switchProject（面板随项目换、
+          // 有切换提示），不在这里手抄 switch + applyWorkspaceData
+          await switchProject(rootPath);
         } catch (e) {
           addNotice("切换到该项目失败：" + e.message);
           return;
@@ -1043,13 +1054,18 @@ async function openArchiveModal() {
   restoreSel.onclick = async () => {
     const rows = pickedOf();
     if (!rows.length) { addNotice("先勾选要恢复的会话"); return; }
+    let restored = 0;
     for (const el of rows) {
       try {
         await request("session.archive", { id: el.dataset.sid, archived: false });
         el.remove();
+        restored += 1;
       } catch (e) { addNotice("恢复失败: " + e.message); }
     }
     syncBulk();
+    // 有恢复成功的就重画侧栏：恢复的会话回到各自位置，底部归档计数一起更新。
+    // 失败的那几条 el 没删，仍留在列表里，按钮可以再点
+    if (restored) refreshSessions();
     closeIfEmpty();
   };
   delSel.onclick = async () => {
@@ -1088,9 +1104,16 @@ async function openArchiveModal() {
     restore.className = "rp-mini";
     restore.textContent = "恢复";
     restore.onclick = async () => {
-      await request("session.archive", { id: s.id, archived: false });
+      try {
+        await request("session.archive", { id: s.id, archived: false });
+      } catch (e) {
+        // 失败：条目与按钮原样留在原地（可再点一次），把原因说清楚
+        addNotice("恢复失败: " + e.message);
+        return;
+      }
       row.remove();
       syncBulk();
+      refreshSessions(); // 恢复的会话立刻回到侧栏对应位置，底部归档计数同步
       closeIfEmpty();
     };
     const del = document.createElement("button");
@@ -1120,6 +1143,8 @@ async function openArchiveModal() {
 // ---------- 会话搜索（标题 + 消息全文，对标 Claude Code /resume 检索） ----------
 const searchEl = document.getElementById("session-search");
 let searchTimer = null;
+// 搜索请求序号（用于 renderSessionList）：只有最后一次查询的结果允许上屏
+let sessionSearchSeq = 0;
 searchEl.addEventListener("input", () => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => renderSessionList(searchEl.value.trim()), 200);
@@ -1148,6 +1173,9 @@ function highlightSnippet(text, q) {
 
 async function renderSessionList(query) {
   const ul = document.getElementById("session-list");
+  // 请求序号：连续输入时每轮自增，晚到的旧响应回来发现序号已过期就丢弃，
+  // 只让最后一次查询的结果上屏（清空搜索也走这里，同样作废还在路上的搜索）
+  const seq = ++sessionSearchSeq;
   if (!query) {
     sessionSearchActive = false;
     refreshSessions();
@@ -1156,16 +1184,47 @@ async function renderSessionList(query) {
   sessionSearchActive = true;
   // 搜索固定跨全部项目（含快聊）：一个范围少一个开关，跨项目命中自带项目名标注、
   // 点击自动切过去；切换器已删（2026-09-22），分组视图此前本就固定 all，两视图统一。
-  const r = await request("session.search", { query, scope: "all" })
-    .catch(() => ({ results: [] }));
+  // 并行补一路标题命中：session.search 只查消息正文（会话改名后拿新标题搜一条都搜不到），
+  // 这里按标题过滤跨项目会话列表再与消息命中合并；project.list 补项目名与工作目录，
+  // 跨项目标题命中才能标注来源、点击时先切过去
+  const [r, all, projs] = await Promise.all([
+    request("session.search", { query, scope: "all" }).catch(() => ({ results: [] })),
+    request("session.list", { all_projects: 1 }).catch(() => null),
+    request("project.list").catch(() => null),
+  ]);
+  if (seq !== sessionSearchSeq) return; // 已有更新的一轮在后面，别拿旧结果盖新
+  const results = (r.results || []).slice();
+  const seen = new Set(results.map((x) => String(x.session_id)));
+  const ql = String(query).toLowerCase();
+  const projById = new Map(((projs && projs.projects) || []).map((p) => [String(p.id), p]));
+  const titleHits = [];
+  ((all && all.sessions) || []).forEach((s) => {
+    if (seen.has(String(s.id))) return; // 消息命中优先（它带可跳转的命中片段与 seq）
+    // 已移除项目名下的会话不在侧栏里、归属校验也打不开，不陈列
+    if (s.project_id != null && !projById.has(String(s.project_id))) return;
+    if (!String(s.title || "").toLowerCase().includes(ql)) return;
+    const p = s.project_id == null ? null : projById.get(String(s.project_id));
+    seen.add(String(s.id));
+    titleHits.push({
+      session_id: s.id,
+      title: s.title,
+      snippet: "标题匹配", // 没有命中消息可定位，片段如实说明这是标题命中
+      updated_at: s.updated_at,
+      project_id: s.project_id,
+      project_name: p ? p.name : "快聊", // project_id 为 NULL 的就是快聊
+      project_path: p ? (p.root_path || "") : "",
+    });
+  });
+  titleHits.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+  results.push(...titleHits); // 消息命中保持后端顺序在前，标题命中按最近活跃接在后面
   ul.innerHTML = "";
   syncFoldAllBtn(); // 搜索结果是平铺列表，没有组可折，「折叠全部」随之隐藏
-  if (!r.results.length) {
+  if (!results.length) {
     ul.innerHTML = '<li class="empty-hint">所有项目里都没有匹配的会话或消息</li>';
     revealSidebarListHead(ul);
     return;
   }
-  r.results.forEach((s) => {
+  results.forEach((s) => {
     const li = document.createElement("li");
     li.className = "has-snippet";
     li.innerHTML =
@@ -1184,8 +1243,8 @@ async function renderSessionList(query) {
       if (s.project_path &&
           s.project_path.toLowerCase() !== (bootSnap?.working_dir || "").toLowerCase()) {
         try {
-          await request("project.switch", { path: s.project_path });
-          await applyWorkspaceData(await fetchWorkspaceData());
+          // 与侧栏其它入口同一套切换流程：面板随项目换、有切换提示
+          await switchProject(s.project_path);
         } catch (e) {
           addNotice("切换到该项目失败：" + e.message);
           return;
@@ -1195,7 +1254,10 @@ async function renderSessionList(query) {
       const t = openTabForSession(s.session_id, s.title);
       clearTodoPanel();
       addNotice(`已打开会话 ${s.title || s.session_id}`);
-      refreshSessions();
+      // 退出搜索态回到正常列表：直接 refreshSessions 会被 sessionSearchActive
+      // 挡住（侧栏一直停在旧搜索结果上）；renderSessionList("") 同时把在途搜索
+      // 的序号作废，之后新建/归档会话的刷新立刻能在侧栏看到
+      renderSessionList("");
       // 命中消息跳转：等历史加载完再定位。openTabForSession 的 loadTabHistory
       // 是异步的（标签已激活但消息可能还没画完），所以轮询等待目标 seq 出现，
       // 超时静默放弃（跳转失败不该挡着会话打开）。
@@ -1264,7 +1326,7 @@ function jumpToMessageSeq(tab, seq, opts = {}) {
 
 function paintJumpTarget(tab, el, opts) {
   if (!el || !el.isConnected) return;
-  el.scrollIntoView({ block: "center", behavior: "smooth" });
+  el.scrollIntoView({ block: "center", behavior: smoothBehavior() });
   el.classList.remove("msg-hit-flash");
   void el.offsetWidth; // 强制回流以重启动画
   el.classList.add("msg-hit-flash");

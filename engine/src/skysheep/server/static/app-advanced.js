@@ -167,6 +167,7 @@ async function saveHooks() {
     // 生效计数也要跟着刷新，否则刚保存完还显示「未配置」，看起来像没生效
     renderHooksCounts(d.active_pre, d.active_post, d.active_stop);
     renderHookRecentRuns(d.recent || []);
+    hooksStatus("✓ 已保存（下一轮起生效）");
   } catch (e) {
     hooksStatus("✗ 保存失败：" + e.message, false);
   }
@@ -246,6 +247,11 @@ async function renderAdvancedCfg() {
   // 「安全与后台」：定时调度总开关与命令沙箱。读取点都在各自执行路径上按
   // 当前配置取值，保存后即热生效，无需重启
   q("adv-system-schedule").checked = !!d.system_schedule;
+  // 这两个开关在卡里没有自己的保存按钮（原先只能去上面「运行参数」卡点保存，
+  // 拨完不落盘、切页回来就回弹）：改为拨动即存。每次渲染重挂一次接线
+  const safetyChange = (e) => saveSafetyCard(e.target);
+  q("adv-restrict-workdir").onchange = safetyChange;
+  q("adv-system-schedule").onchange = safetyChange;
   q("adv-job-containment").checked = d.job_containment !== false;
   q("adv-sandbox-level").value = d.sandbox_level === "restricted" ? "restricted" : "job";
   syncSandboxLevel();
@@ -307,6 +313,12 @@ async function renderAdvancedCfg() {
     }
   }
   await renderRoutingCfg(d);
+  // 切换卡的即改即存状态行是就地插进卡里的元素，重进页面时把上一条收起
+  const safetyEl = document.getElementById("safety-status");
+  if (safetyEl) {
+    safetyEl.hidden = true;
+    safetyEl.textContent = "";
+  }
   advancedStatus("");
 }
 
@@ -363,6 +375,41 @@ async function saveRouting() {
   }
 }
 
+// 「安全与后台」卡里没有预置状态行（#advanced-status 在隔了几张卡的「运行参数」
+// 卡上，拨这里的开关看不到）：反馈就地给——状态行建一次、插在被拨开关的下面
+function safetyStatus(anchorEl, text, ok = true) {
+  let el = document.getElementById("safety-status");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "safety-status";
+    const row = anchorEl && anchorEl.closest(".adv-toggle");
+    if (!row) return;
+    row.insertAdjacentElement("afterend", el);
+  }
+  el.textContent = text;
+  el.className = "card-status " + (ok ? "ok" : "bad");
+  el.hidden = !text;
+  autoHideStatus(el, text, ok);
+}
+
+// 「仅允许 Agent 访问当前工作目录」「系统级定时调度」即改即存：提交整卡当前值
+// （与网络卡/归档卡的即改即存同一习惯），不再要求用户再去点另一张卡的「保存」
+async function saveSafetyCard(toggleEl) {
+  const q = (id) => document.getElementById(id);
+  try {
+    await request("advanced.save", {
+      restrict_to_workdir: q("adv-restrict-workdir").checked,
+      system_schedule: q("adv-system-schedule").checked,
+      job_containment: q("adv-job-containment").checked,
+      sandbox_level: q("adv-sandbox-level").value,
+    });
+    safetyStatus(toggleEl, "✓ 已保存（立即生效）");
+  } catch (e) {
+    toggleEl.checked = !toggleEl.checked; // 失败回拨：开关别停在没存上的位置
+    safetyStatus(toggleEl, "✗ 保存失败：" + e.message, false);
+  }
+}
+
 async function saveAdvanced() {
   const q = (id) => document.getElementById(id);
   const newHotkey = (q("adv-hotkey").value || "").trim();
@@ -386,8 +433,11 @@ async function saveAdvanced() {
       hotkey: newHotkey,
     });
     await renderAdvancedCfg();
-    // 热键随窗口创建注册，改键要重启才生效：提示留在重启横条里，不再另写「已保存」
+    // 热键随窗口创建注册，改键要重启才生效：重启入口在页顶横条，状态行里一并说明
     if (newHotkey !== oldHotkey) needsRestart(); // 页顶横条给出就地重启入口
+    advancedStatus(newHotkey !== oldHotkey
+      ? "✓ 已保存（下一轮起生效）；新热键需按页顶提示重启后生效"
+      : "✓ 已保存（下一轮起生效）");
     const st = r.autostart || {};
     if (q("adv-autostart").checked && st.enabled) {
       addNotice("✓ 已设置开机自启；定时任务从此可以无人值守");
@@ -414,7 +464,7 @@ async function saveNetwork() {
       network_no_proxy: (q("adv-network-no-proxy").value || "").trim(),
       network_ca_cert: (q("adv-network-ca").value || "").trim(),
     });
-    networkStatus();
+    networkStatus("✓ 已保存（下一轮起生效）");
   } catch (e) {
     networkStatus("✗ 保存失败：" + e.message, false);
   }
@@ -463,14 +513,12 @@ async function renderTrustList() {
       box.innerHTML = `<p>撤销对 <b>${escapeHtml(it.path)}</b> 的信任？</p>
         <p class="dim small">撤销后，下次打开该项目时其中的 .skysheep/ 配置（MCP 与技能）会重新询问确认。</p>`;
       showModal("撤销信任", box, async () => {
-        try {
-          await request("trust.revoke_path", { path: it.path });
-          await renderTrustList();
-          renderTrustState();
-          addNotice(`已撤销信任：${it.path}`);
-        } catch (err) {
-          addNotice("撤销失败：" + err.message);
-        }
+        // 失败不在这里吞掉：抛回给 showModal，弹层留在原地显示行内原因
+        // （设置页里 addNotice 挂在对话区，用户根本看不到）
+        await request("trust.revoke_path", { path: it.path });
+        await renderTrustList();
+        renderTrustState();
+        addNotice(`已撤销信任：${it.path}`);
       }, "撤销");
     };
     ul.appendChild(li);
@@ -501,7 +549,7 @@ async function renderTerminalCfg() {
   if (im) im.value = p.interaction_mode === "steer" ? "steer" : "queue";
 }
 
-function saveTerminalCfg() {
+async function saveTerminalCfg() {
   const shell = (document.getElementById("term-shell") || {}).value || "auto";
   const font = (document.getElementById("term-font") || {}).value || "Cascadia Mono";
   const rawSize = Number((document.getElementById("term-font-size") || {}).value);
@@ -509,14 +557,26 @@ function saveTerminalCfg() {
   termFont = font;
   termFontSize = size;
   if (typeof applyTermAppearance === "function") applyTermAppearance();
-  saveUiPrefs({
-    term_shell: shell === "auto" ? null : shell,
-    term_font: font === "Cascadia Mono" ? null : font,
-    term_font_size: size === 13 ? null : size,
-  });
   const el = document.getElementById("terminal-status");
+  // 走 saveUiPrefs 只管发出去（它自己吞错），这里要「存成功了再报」，所以直接等 ui.save
+  try {
+    await request("ui.save", {
+      prefs: {
+        term_shell: shell === "auto" ? null : shell,
+        term_font: font === "Cascadia Mono" ? null : font,
+        term_font_size: size === 13 ? null : size,
+      },
+    });
+  } catch (e) {
+    if (el) {
+      el.textContent = "✗ 保存失败：" + e.message;
+      el.className = "card-status bad";
+      el.hidden = false;
+    }
+    return;
+  }
   if (el) {
-    el.textContent = "已保存：新开/重启的终端使用这个 Shell，字体已应用到已打开的标签";
+    el.textContent = "✓ 已保存：新开/重启的终端使用这个 Shell，字体已应用到已打开的标签";
     el.className = "card-status ok";
     el.hidden = false;
     autoHideStatus(el, el.textContent, true);

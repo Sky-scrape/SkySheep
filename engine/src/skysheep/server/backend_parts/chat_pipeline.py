@@ -1145,6 +1145,9 @@ class ChatPipelineMixin:
         self.runs.update(
             run_id, state=run_final_state,
             error=run_error,
+            # 终态把过程文案清掉：否则「已完成」的行下面还挂着
+            # 「正在执行 read_file」的残留（旧 runs.json 不迁移，只保证新轮正确）
+            detail="",
             tools_used=turn_stats["tool_calls"],
         )
 

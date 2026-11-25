@@ -328,8 +328,10 @@ function restoreBackupConfirm(name, when, btn, size = 0) {
       await boot(); // 会话/项目列表按恢复后的库重画
       await loadBackups();
     } catch (e) {
-      addNotice("恢复失败：" + e.message);
+      // 弹层留在原地显示行内原因（如「还有会话正在运行，先停止（Esc）或等它结束再恢复」）：
+      // 抛回给 showModal 写进 modal-err，不再吞成一条设置页看不见的通知
       btn.disabled = false;
+      throw e;
     }
   }, "恢复");
 }
@@ -423,7 +425,7 @@ async function saveRetention() {
       reports_days: days("retention-reports"),
     });
     await renderRetentionCfg();
-    retentionStatus();
+    retentionStatus("✓ 已保存（下次自动清理起生效）");
   } catch (e) {
     retentionStatus("✗ 保存失败：" + e.message, false);
   }
@@ -462,7 +464,7 @@ async function renderStorageCard() {
         `<span class="st-count"><b>${t.rows}</b> 条</span>` +
         `<span class="st-ops">` +
           `<button class="btn-ghost" data-clean-table="${escapeHtml(t.table)}" title="删除 30 天前的记录">清理 30 天前</button>` +
-          `<button class="btn-ghost" data-clean-all="${escapeHtml(t.table)}" title="清空整表（不可恢复）">清空</button>` +
+          `<button class="btn-ghost danger" data-clean-all="${escapeHtml(t.table)}" title="清空整表（不可恢复）">清空</button>` +
         `</span>` +
       `</li>`
     );
@@ -483,6 +485,7 @@ async function renderStorageCard() {
       const r = await request("storage.cleanup", { targets: [], vacuum: true });
       await renderStorageCard();
       if (r.freed_bytes <= 0) storageStatus("数据库已经整理过了");
+      else storageStatus(`✓ 数据库已整理，释放 ${retentionBytes(r.freed_bytes)}`);
     } catch (e) {
       storageStatus("✗ 整理失败：" + e.message, false);
     } finally { vb.disabled = false; }
@@ -490,10 +493,18 @@ async function renderStorageCard() {
 }
 
 async function cleanTable(table, days, btn) {
-  const label = btn.closest("li").textContent.split("：")[0];
-  const what = days > 0 ? `删除「${label}」中 30 天前的记录` : `清空「${label}」（全部记录，不可恢复）`;
+  // 表名取行里的 .st-name：整行 textContent 会把条数和两个按钮的文案一起吞进来，
+  // 确认框里就成了「删除『用量记录312 条清理 30 天前清空』…」
+  const li = btn.closest("li");
+  const nameEl = li && li.querySelector(".st-name");
+  const label = nameEl ? nameEl.textContent.trim() : table;
+  const countEl = li && li.querySelector(".st-count b");
+  const count = countEl ? Number(countEl.textContent) || 0 : 0;
+  const what = days > 0
+    ? `删除「${label}」中 30 天前的记录（该表现有 ${count} 条）`
+    : `清空「${label}」的全部 ${count} 条记录`;
   if (!(await confirmModal(`${what}？\n\n清理后无法恢复，确定继续？`,
-      { title: "确认清理", okLabel: "清理", danger: true }))) return;
+      { title: "确认清理", okLabel: days > 0 ? "清理" : "清空", danger: true }))) return;
   btn.disabled = true;
   try {
     const r = await request("storage.cleanup", {

@@ -1330,8 +1330,13 @@ def test_frontend_project_switch_is_in_page(home):
     # 列表渲染支持传入预取数据（否则又要在清空后等网络）
     assert "async function refreshSessions(prefetched)" in code
     assert "async function refreshProjects(prefetched)" in code
-    # 底色仍留在 html 上（浏览器模式 F5 刷新时的防白底兜底）
-    assert "html { background: var(--bg); }" in css
+    # 底色仍留在 html 上（浏览器模式 F5 刷新时的防白底兜底）。2026-11-25 起整块
+    # 地面（渐变 + 网点）都挂在根元素上、作 canvas 背景：主题切换时淡出的
+    # 「旧底」层（.theme-ground-fade，z-index:-1）要站在 canvas 之上、内容之下，
+    # 仍挂在 body 上会被 body 自己的背景盖住（淡出层等于没画）
+    assert "html { background: var(--body-bg); background-attachment: fixed; }" in css
+    body_block = css.split("\nbody {")[1].split("}")[0]
+    assert "background: transparent" in body_block
     assert "data-theme-mode" in html
 
 

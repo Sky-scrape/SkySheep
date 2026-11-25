@@ -1508,6 +1508,25 @@ class AutomationMixin:
     async def cron_list(self) -> dict:
         self._require_project("列出定时任务")
         tasks = await self.store.list_cron_tasks(self.project.id)
+        # 在跑的运行挂在各自任务行上：任务列表就能画「运行中 · 已跑 mm:ss」
+        # 并就地叫停，不必再切到工厂看板去找同一条产线。账本读失败只降级成
+        # 「都不在跑」，不让一个观测面拖垮任务列表。
+        running: dict[int, dict] = {}
+        try:
+            rows = await self.store.list_automation_runs(
+                kind="cron", status="running", limit=200)
+        except Exception:  # noqa: BLE001 - 账本读不到不影响任务列表本身
+            rows = []
+        for run in rows:
+            tid = run.get("task_id")
+            if tid is None:
+                continue
+            # 已按 started_at 倒序：同一任务有多条残留 running 时留最新那条
+            running.setdefault(int(tid), run)
+        for task in tasks:
+            run = running.get(int(task["id"]))
+            task["running_run_id"] = int(run["id"]) if run else None
+            task["running_since"] = float(run.get("started_at") or 0) if run else 0.0
         return {"tasks": tasks}
 
     def _cron_model_fields(self, params: dict, *, is_team: bool) -> tuple[str, str]:

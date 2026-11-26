@@ -23,11 +23,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ipaddress
 import json
 import logging
 import random
 import time
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 
@@ -59,6 +60,33 @@ STALE_COOLDOWN = 3600.0
 
 # 扫码登录的轮询间隔；服务器侧是长轮询（hold 最多 35 秒）
 QR_POLL_TIMEOUT = 35.0
+
+
+def _is_safe_https_host_or_url(candidate: str, *, bare_host: bool) -> bool:
+    """校验服务端下发的 redirect_host / baseurl：拒绝 userinfo/路径注入/内网回环。"""
+    s = (candidate or "").strip()
+    if not s or any(c.isspace() or ord(c) < 32 for c in s):
+        return False
+    if bare_host:
+        if any(ch in s for ch in ("/", "\\", "@", "?", "#")):
+            return False
+        s = f"https://{s}"
+    try:
+        parsed = urlsplit(s)
+    except ValueError:
+        return False
+    if parsed.scheme.lower() != "https" or not parsed.netloc or parsed.username or parsed.password:
+        return False
+    if bare_host and (parsed.path or parsed.query or parsed.fragment):
+        return False
+    host = (parsed.hostname or "").strip().lower()
+    if not host or host in ("localhost", "0.0.0.0", "::"):
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return True
+    return ip.is_global
 
 
 class WeixinChannel(Channel):
@@ -230,9 +258,11 @@ class WeixinChannel(Channel):
         if status == "scaned_but_redirect":
             # IDC 迁移：官方包直接把轮询主机换到 redirect_host 再继续
             host = str(resp.get("redirect_host", "") or "").strip()
-            if host:
+            if host and _is_safe_https_host_or_url(host, bare_host=True):
                 self.base_url = f"https://{host}"
                 logger.info("weixin 扫码轮询按服务器指示切换主机：%s", host)
+            elif host:
+                logger.warning("weixin 忽略不合法的 redirect_host：%r", host[:120])
             return {"status": "scaned"}
         if status == "verify_code_blocked":
             # 配对码错太多次：官方按二维码过期处理——重新生成（前端有次数上限）
@@ -258,7 +288,10 @@ class WeixinChannel(Channel):
             for source in (resp, creds):
                 value = str(source.get("baseurl", "") or source.get("base_url", "") or "").strip()
                 if value:
-                    base = value.rstrip("/")
+                    if _is_safe_https_host_or_url(value, bare_host=False):
+                        base = value.rstrip("/")
+                    else:
+                        logger.warning("weixin 忽略不合法的 baseurl：%r", value[:120])
                     break
             if token:
                 result["bot_token"] = token

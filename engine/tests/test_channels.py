@@ -2730,3 +2730,40 @@ async def test_channel_binding_count_includes_topic_keys_and_cleans_on_delete(st
     await store.delete_session(ids[0])
     assert await store.count_channel_bindings("feishu") == 3
     assert await store.get_channel_binding("feishu#t0") is None
+
+
+async def test_weixin_rejects_unsafe_redirect_host_and_baseurl():
+    """scaned_but_redirect / confirmed 返回的非公网或带注入字符地址一律忽略。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "bad-redir" in url:
+            return httpx.Response(200, json={
+                "status": "scaned_but_redirect", "ret": 0,
+                "redirect_host": "evil.com@127.0.0.1",
+            })
+        if "bad-path" in url:
+            return httpx.Response(200, json={
+                "status": "scaned_but_redirect", "ret": 0,
+                "redirect_host": "il-hop.weixin.qq.com/evil",
+            })
+        return httpx.Response(200, json={
+            "status": "confirmed", "ret": 0,
+            "bot_token": "bt-x",
+            "baseurl": "http://127.0.0.1:8080",
+        })
+
+    ch = _wx({})
+    ch._transport = _mock_transport(handler)
+    st1 = await ch.poll_qrcode("bad-redir")
+    assert st1 == {"status": "scaned"}
+    assert ch.base_url == "https://ilinkai.weixin.qq.com"
+
+    st2 = await ch.poll_qrcode("bad-path")
+    assert st2 == {"status": "scaned"}
+    assert ch.base_url == "https://ilinkai.weixin.qq.com"
+
+    st3 = await ch.poll_qrcode("ok-but-bad-baseurl")
+    assert st3["status"] == "confirmed"
+    assert st3["bot_token"] == "bt-x"
+    assert "base_url" not in st3
+    await ch.stop()

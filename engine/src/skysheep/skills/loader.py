@@ -38,7 +38,7 @@ from ..sanitize import (
     MAX_PROMPT_DESCRIPTION_CHARS,
     sanitize_description,
 )
-from ..textio import write_text_atomic
+from ..textio import read_text_file, write_text_atomic
 
 # 范围模式：所有项目 / 仅指定项目 / 任何项目都不用
 SCOPE_ALL = "all"
@@ -184,9 +184,12 @@ def _load_skill_from_dir(skill_dir: Path, source: str) -> Skill | None:
     if not regular:
         return None
     try:
-        text = md.read_text(encoding="utf-8", errors="replace")
+        tf = read_text_file(md)
     except OSError:
         return None
+    if tf.binary:
+        return None
+    text = tf.text
     meta, body = _parse_frontmatter(text)
     name = meta.get("name") or skill_dir.name
     description = meta.get("description")
@@ -457,7 +460,7 @@ class SkillLoader:
         skill = self._skills.get(name)
         if skill is None:
             raise KeyError("skill not found: " + name)
-        _, body = _parse_frontmatter(skill.path.read_text(encoding="utf-8", errors="replace"))
+        _, body = _parse_frontmatter(read_text_file(skill.path).text)
         return body
 
     def raw_text(self, name: str) -> str:
@@ -465,7 +468,7 @@ class SkillLoader:
         skill = self._skills.get(name)
         if skill is None:
             raise KeyError("skill not found: " + name)
-        return skill.path.read_text(encoding="utf-8", errors="replace")
+        return read_text_file(skill.path).text
 
     # ---- 系统提示词注入 ----
 

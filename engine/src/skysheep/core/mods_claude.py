@@ -30,11 +30,13 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 
 from ..messages import Message
 from ..models.base import ProviderDone, ProviderTextDelta
 from ..textio import read_text_file, write_text_atomic
+from .mods import ModError, _validate_mod_id
 from .mods_node import NodeRuntime, NodeRuntimeError, probe_node
 from .mods_ui import normalize_ui_tree
 
@@ -91,6 +93,24 @@ def _find_manifest(mod_dir: Path) -> tuple[Path | None, dict | None]:
     return None, None
 
 
+def _validate_entry_path(mod_dir: Path, entry: str) -> Path:
+    """校验入口路径必须位于 Mod 目录内部，拒绝绝对路径与目录穿越。"""
+    raw = str(entry or "").strip()
+    if not raw:
+        raise ClaudeModError("入口文件路径不能为空")
+    p = Path(raw)
+    if p.is_absolute() or (len(raw) >= 2 and raw[1] == ":"):
+        raise ClaudeModError(f"入口不能是绝对路径：{raw}")
+    try:
+        root_resolved = Path(mod_dir).resolve()
+        resolved = (mod_dir / p).resolve()
+    except OSError as e:
+        raise ClaudeModError(f"入口路径不可解析：{e}") from e
+    if resolved == root_resolved or not resolved.is_relative_to(root_resolved):
+        raise ClaudeModError(f"入口指向 Mod 目录之外，已拒绝：{raw}")
+    return resolved
+
+
 def _normalize_manifest(mod_dir: Path, data: dict) -> dict:
     """把 plugin.json / mod.json / mods.json 归一成内部清单 dict。
 
@@ -100,14 +120,17 @@ def _normalize_manifest(mod_dir: Path, data: dict) -> dict:
         ENTRY_CANDIDATES 猜、hooks 缺省时视为全事件（register 决定实际）
     """
     out: dict = {}
-    # id：优先显式 id，否则 name 规范化（小写、非标识符字符换 -）
+    # id：优先显式 id，否则 name 规范化（小写、非标识符字符换 -）；统一过 _validate_mod_id
+    # 拒绝路径分隔符/冒号/../保留名 state 与点开头名，防止 store.json 落到 mods 根之外
     raw_id = str(data.get("id") or "").strip()
     if not raw_id:
         raw_name = str(data.get("name") or mod_dir.name).strip()
-        import re as _re
-        raw_id = _re.sub(r"[^A-Za-z0-9_-]+", "-", raw_name).strip("-").lower() or mod_dir.name
-    out["id"] = raw_id
-    out["name"] = str(data.get("name") or raw_id)
+        raw_id = re.sub(r"[^A-Za-z0-9_-]+", "-", raw_name).strip("-").lower() or mod_dir.name
+    try:
+        out["id"] = _validate_mod_id(raw_id)
+    except ModError as e:
+        raise ClaudeModError(str(e)) from e
+    out["name"] = str(data.get("name") or out["id"])
     out["version"] = str(data.get("version") or "0.0.0")
     out["description"] = str(data.get("description") or "")
 
@@ -118,7 +141,9 @@ def _normalize_manifest(mod_dir: Path, data: dict) -> dict:
             if (mod_dir / cand).is_file():
                 entry = cand
                 break
-    out["entry"] = entry or "main.js"
+    entry = entry or "main.js"
+    _validate_entry_path(mod_dir, entry)
+    out["entry"] = entry
 
     hooks_raw = data.get("hooks")
     if isinstance(hooks_raw, list):
@@ -221,14 +246,15 @@ class ClaudeLoadedMod:
         if self.load_error:
             return False
         try:
+            entry_resolved = _validate_entry_path(self.dir, self.entry)
             rt = NodeRuntime(
-                self.id, self.entry_path, mod_dir=self.dir, session_id=session_id,
+                self.id, entry_resolved, mod_dir=self.dir, session_id=session_id,
                 host_handler=self._host_handler,
             )
             await rt.start()
             self._runtime = rt
             return True
-        except (NodeRuntimeError, OSError) as e:
+        except (ClaudeModError, NodeRuntimeError, OSError) as e:
             self.load_error = str(e)
             return False
 
@@ -322,10 +348,23 @@ class ClaudeModManager:
         for child in sorted(self.root.iterdir()):
             if not child.is_dir():
                 continue
+            # 跳过状态目录与隐藏/暂存目录（如 .importing-*），与 ModManager.load_all 同口径
+            if child.name == "state" or child.name.startswith("."):
+                continue
             manifest_path, raw = _find_manifest(child)
             if manifest_path is None or raw is None:
                 continue
-            manifest = _normalize_manifest(child, raw)
+            try:
+                manifest = _normalize_manifest(child, raw)
+            except ClaudeModError as e:
+                broken_id = child.name
+                broken = ClaudeLoadedMod(child, {
+                    "id": broken_id, "name": broken_id, "version": "",
+                    "description": "", "entry": "", "events": [], "permissions": "full",
+                })
+                broken.load_error = str(e)
+                self.mods[broken_id] = broken
+                continue
             mod = ClaudeLoadedMod(
                 child, manifest,
                 host_handler=self._make_host_handler(manifest["id"]),
@@ -346,7 +385,15 @@ class ClaudeModManager:
         return handler
 
     def _store_path(self, mod_id: str) -> Path:
-        return self.root / mod_id / "store.json"
+        try:
+            clean = _validate_mod_id(mod_id)
+        except ModError as e:
+            raise ClaudeModError(str(e)) from e
+        root_resolved = self.root.resolve()
+        target = (self.root / clean / "store.json").resolve()
+        if not target.is_relative_to(root_resolved):
+            raise ClaudeModError(f"Mod 存储路径越界，已拒绝：{clean}")
+        return target
 
     def _read_store(self, mod_id: str) -> dict:
         try:

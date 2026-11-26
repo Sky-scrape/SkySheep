@@ -169,3 +169,48 @@ async def test_handler_error_reported(tmp_path):
         assert any("oops" in e for e in r["errors"])
     finally:
         await mgr.close()
+
+
+@pytest.mark.asyncio
+async def test_load_all_skips_state_and_hidden_and_blocks_traversal(tmp_path):
+    """state / 点开头目录不加载；manifest 里的 id/entry 越界一律标 load_error 拒绝加载。"""
+    root = tmp_path / "mods"
+    (root / "state").mkdir(parents=True)
+    (root / "state" / "mod.json").write_text(json.dumps({"id": "state", "entry": "m.js"}), encoding="utf-8")
+    (root / ".importing-123").mkdir(parents=True)
+    (root / ".importing-123" / "mod.json").write_text(
+        json.dumps({"id": "tmp", "entry": "m.js"}), encoding="utf-8"
+    )
+
+    outside = tmp_path / "outside.js"
+    outside.write_text("register('tool.check', () => ({ decision: 'allow' }));", encoding="utf-8")
+
+    # 1) id 越界
+    bad_id = root / "bad-id"
+    bad_id.mkdir(parents=True)
+    (bad_id / "mod.json").write_text(
+        json.dumps({"id": "../escape", "entry": "main.js"}), encoding="utf-8"
+    )
+    (bad_id / "main.js").write_text("", encoding="utf-8")
+
+    # 2) entry 越界
+    bad_entry = root / "bad-entry"
+    bad_entry.mkdir(parents=True)
+    (bad_entry / "mod.json").write_text(
+        json.dumps({"id": "bad-entry", "entry": "../../outside.js"}), encoding="utf-8"
+    )
+
+    mgr = ClaudeModManager(
+        enabled=True, enabled_ids=["state", ".importing-123", "bad-id", "bad-entry"], root=root
+    )
+    mgr.load_all()
+    try:
+        assert "state" not in mgr.mods
+        assert ".importing-123" not in mgr.mods
+        assert mgr.mods["bad-id"].load_error
+        assert mgr.mods["bad-entry"].load_error
+        r = await mgr.on_tool_check("run_command", {}, "s")
+        assert r["decision"] is None
+        assert len(r["errors"]) == 2
+    finally:
+        await mgr.close()

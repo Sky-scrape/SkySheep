@@ -16,7 +16,7 @@ import json
 import re
 from pathlib import Path
 
-from ..textio import write_text_atomic
+from ..textio import read_text_file, write_text_atomic
 from .client import MCPServerConfig
 from .headers import encrypt_headers
 
@@ -168,11 +168,13 @@ def parse_file(path: str | Path) -> dict[str, MCPServerConfig]:
     if not p.is_file():
         raise MCPInstallError("文件不存在：" + str(p))
     try:
-        text = p.read_text(encoding="utf-8", errors="replace")
+        tf = read_text_file(p)
     except OSError as e:
         raise MCPInstallError("读取失败：" + str(e)) from e
+    if tf.binary:
+        raise MCPInstallError(f"{p.name}：文件是二进制内容，无法解析为 JSON")
     try:
-        return parse_snippet(text)
+        return parse_snippet(tf.text)
     except MCPInstallError as e:
         raise MCPInstallError(f"{p.name}：{e}") from e
 

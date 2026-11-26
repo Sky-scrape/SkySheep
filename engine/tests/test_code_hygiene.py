@@ -109,3 +109,55 @@ def test_skill_state_tolerates_non_utf8(tmp_path):
     state.write_text('["not", "an", "object"]', encoding="utf-8")
     loader2 = SkillLoader(global_dir=tmp_path / "skills2", state_path=state)
     loader2.discover()
+
+
+def test_no_unsafe_utf8_replace_read_text():
+    """用户手写或外部导入的文件不得用 utf-8 errors=replace 读取（会损坏 GB18030 内容）。
+
+    只放行引擎自产固定 UTF-8 缓存（tools/memory*）、展示用失败回落（gate 预览）与日志读取（support）。
+    """
+    allowed = {
+        "security/gate.py",          # _read_text_for_preview：decode_bytes 不确定时的纯展示兜底
+        "support.py",                # 诊断日志切片读取（log 文件）
+        "tools/memory.py",           # 引擎自产 UTF-8 memory.md 内部读取
+        "tools/memory_distill.py",   # 引擎自产 UTF-8 memory.md 内部读取
+        "tools/memory_embed.py",     # 引擎自产 UTF-8 memory.md 内部读取
+    }
+    offenders: list[str] = []
+    for path in SRC.rglob("*.py"):
+        rel = path.relative_to(SRC).as_posix()
+        if rel in allowed:
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for idx, line in enumerate(text.splitlines(), 1):
+            if ".read_text(" in line and 'errors="replace"' in line:
+                offenders.append(f"{rel}:{idx}")
+    assert not offenders, (
+        "发现未放行的 read_text(..., errors=\"replace\")，请改走 textio.read_text_file："
+        f"{offenders}"
+    )
+
+
+def test_skill_and_mcp_import_tolerate_gb18030(tmp_path):
+    """GB18030 编码的 SKILL.md 与 mcp.json 导入不得变成 U+FFFD 乱码。"""
+    from skysheep.mcp.installer import parse_file
+    from skysheep.skills.loader import SkillLoader
+
+    skill_dir = tmp_path / "skills" / "gbk-skill"
+    skill_dir.mkdir(parents=True)
+    md = skill_dir / "SKILL.md"
+    md.write_bytes(
+        "---\nname: gbk-skill\ndescription: 中文技能描述\n---\n中文正文指令\n".encode("gb18030")
+    )
+    loader = SkillLoader(global_dir=tmp_path / "skills")
+    loader.discover()
+    assert loader.get("gbk-skill").description == "中文技能描述"
+    assert loader.read_body("gbk-skill") == "中文正文指令"
+    assert "\ufffd" not in loader.raw_text("gbk-skill")
+
+    mcp_file = tmp_path / "servers.json"
+    mcp_file.write_bytes(
+        '{"mcpServers": {"demo": {"command": "uvx", "args": ["中文参数"]}}}'.encode("gb18030")
+    )
+    parsed = parse_file(mcp_file)
+    assert parsed["demo"].args == ["中文参数"]

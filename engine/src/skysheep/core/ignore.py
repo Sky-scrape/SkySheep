@@ -19,6 +19,8 @@ from __future__ import annotations
 from fnmatch import fnmatch
 from pathlib import Path
 
+from ..textio import read_text_file
+
 IGNORE_FILE = ".skysheepignore"
 # 内建默认：密钥文件与 git 元数据永远不进「发现」结果。
 # .skysheep/transcripts 是压缩时落盘的会话原文（可能含读过的 .env、密钥、
@@ -86,7 +88,9 @@ class IgnoreRules:
             p = Path(working_dir) / name
             try:
                 if p.is_file():
-                    lines.extend(p.read_text(encoding="utf-8", errors="replace").splitlines())
+                    tf = read_text_file(p)
+                    if not tf.binary:
+                        lines.extend(tf.text.splitlines())
             except OSError:
                 continue
         lines.extend(BUILTIN_PATTERNS)

@@ -349,6 +349,60 @@ def test_run_center_persists_snapshot(tmp_path):
     assert rc2.get("run-1").state == "completed"
 
 
+def test_run_center_forget_session_drops_records_and_persists(tmp_path):
+    """删会话清它的运行记录：别的会话不动，落盘快照也不再带已删会话的原文。"""
+    p = tmp_path / "runs.json"
+    rc = RunCenter(p)
+    rc.register("doomed", "turn", "s1", title="要删的", retry_text="已删会话的原话")
+    rc.update("doomed", state="completed")
+    rc.register("kept", "turn", "s2", title="保留的", retry_text="保留")
+    rc.update("kept", state="completed")
+    rc.register("unbound", "subagent", "", title="无会话子代理", retry_text="无主")
+
+    assert rc.forget_session("") == 0, "空 session_id 不能当成一批无主运行的键"
+    assert rc.forget_session("s1") == 1
+    assert {r["id"] for r in rc.list_runs()} == {"kept", "unbound"}
+    snapshot = json.loads(p.read_text(encoding="utf-8"))
+    assert {r["id"] for r in snapshot["runs"]} == {"kept", "unbound"}
+    assert "已删会话的原话" not in json.dumps(snapshot, ensure_ascii=False)
+
+
+def test_run_center_retain_sessions_drops_orphans_only(tmp_path):
+    """启动/库恢复的孤儿清理：只丢会话已不存在的记录，无主子代理保留。"""
+    rc = RunCenter(tmp_path / "runs.json")
+    rc.register("live", "turn", "s1", retry_text="x")
+    rc.register("orphan", "turn", "gone", retry_text="走丢的原文")
+    rc.register("unbound", "subagent", "", retry_text="y")
+
+    assert rc.retain_sessions({"s1"}) == 1
+    assert {r["id"] for r in rc.list_runs()} == {"live", "unbound"}
+
+
+def test_startup_prunes_runs_of_missing_sessions(home):
+    """启动装载按会话库实况自愈：旧版本留下的「已删会话」运行行不再出现。
+
+    旧版本删会话不清 runs.json；升级后不清理的话，运行中心的「打开会话」
+    仍会指向一张空标签。
+    """
+    from test_server import make_client, recv_until
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "n1", "method": "session.new"})
+        live = recv_until(ws, "n1")["result"]["id"]
+
+    rc = RunCenter(home / "home" / "runs.json")
+    rc.register("turn-live", "turn", live, title="还在的会话", retry_text="保留")
+    rc.update("turn-live", state="completed")
+    rc.register("turn-gone", "turn", "deleted-session", title="已删会话",
+                retry_text="已删会话的原话")
+    rc.update("turn-gone", state="completed")
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "r1", "method": "runs.list", "params": {"limit": 50}})
+        runs = recv_until(ws, "r1")["result"]["runs"]
+    assert {r["id"] for r in runs} == {"turn-live"}, runs
+
+
 def test_run_center_save_failure_swallows_but_logs_debug(tmp_path, caplog):
     """快照写失败（盘满/权限）：照旧吞错不反噬运行，但 debug 留线索（except 审计 #20）。
 

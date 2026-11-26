@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -270,6 +271,41 @@ class RunCenter:
         run.finished_at = run.updated_at
         self.save()
         return True
+
+    # ---- 清理 ----
+
+    def forget_session(self, session_id: str) -> int:
+        """会话删除：丢弃它名下的全部运行记录，返回清理条数。
+
+        记录里带着会话标题与原文首段（retry_text），会话删了这些内容也不该
+        继续留在 runs.json；留着只会让运行中心的「打开会话」变成死入口。
+        在飞的轮已由 delete_session 先取消，之后的 update() 找不到记录自然
+        落空，不会把刚清掉的条目重建回来。
+        """
+        if not session_id:
+            return 0
+        return self._drop(lambda r: r.session_id == session_id)
+
+    def retain_sessions(self, alive: set[str]) -> int:
+        """只保留会话仍在库里的记录（返回清理条数）。
+
+        启动与库整体替换（备份恢复/导入）后调用：旧版本删会话不清运行条目，
+        备份回退也会让快照指向库里已不存在的会话。只判带 session_id 的记录，
+        空 session_id 的运行（不归属任何会话的子代理）原样保留。
+        """
+        return self._drop(lambda r: bool(r.session_id) and r.session_id not in alive)
+
+    def _drop(self, predicate: Callable[[Run], bool]) -> int:
+        doomed = [rid for rid in self._order
+                  if rid in self._runs and predicate(self._runs[rid])]
+        if not doomed:
+            return 0
+        doomed_set = set(doomed)
+        for rid in doomed_set:
+            self._runs.pop(rid, None)
+        self._order = [rid for rid in self._order if rid not in doomed_set]
+        self.save()
+        return len(doomed)
 
     # ---- 查询 ----
 

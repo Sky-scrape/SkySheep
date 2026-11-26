@@ -26,6 +26,7 @@ _release_team_providers（原注释保留在调用点），删会话不再裸碰
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
 
 from ...messages import Message
@@ -101,6 +102,9 @@ class LifecycleMixin:
             self._session_accepts.pop(sid, None)
             self._manually_named.discard(sid)
             self._default_model_sessions.pop(sid, None)
+            # 运行条目同口径（正常空会话不会有运行记录，这里兜底：
+            # 删过的会话不该在运行中心留下打不开的入口）
+            self.runs.forget_session(sid)
             rt = self.runtimes.get(sid)
             if rt is not None and (rt.run_task is None or rt.run_task.done()) and not rt.queue:
                 self.runtimes.pop(sid, None)
@@ -284,6 +288,21 @@ class LifecycleMixin:
         b = imgs[index]
         return {"media_type": b.media_type, "data": b.data}
 
+    async def prune_run_center_orphans(self) -> int:
+        """运行中心孤儿记录清理：会话已不存在的运行行一律丢弃，返回条数。
+
+        三个调用点同一口径——启动装载（旧版本遗留 / 备份回退）、库整体替换
+        （备份恢复 / 导入）、彻底删除项目（其会话被级联删除）。不清理的话，
+        运行中心里会留下点开即加载失败的「打开会话」。清理失败不拦主流程：
+        少清几条旧记录，比启动或删项目失败轻得多。
+        """
+        try:
+            return self.runs.retain_sessions(await self.store.list_session_ids())
+        except Exception as e:  # noqa: BLE001 - 清理失败不反噬主流程
+            logging.getLogger("skysheep").warning(
+                "运行中心孤儿记录清理失败（忽略）：%s", e)
+            return 0
+
     async def _switch_after_removal(self) -> dict | None:
         """当前会话被删除/移走后：优先切到最近的其他会话；一个都不剩就回到"待新建"状态。"""
         latest = await self.store.latest_session(self._cur_project_id())
@@ -355,6 +374,18 @@ class LifecycleMixin:
         if orch is not None:
             self._release_team_providers(orch)
         await self.store.delete_session(session_id)
+        # 运行中心条目随会话清：runs.json 里存着标题与原文首段（retry_text），
+        # 会话删了这些内容也该一起消失；不清的话「打开会话」会开出一张
+        # 加载失败的空标签（运行中心里点开是死入口）。
+        self.runs.forget_session(session_id)
+        # 工厂运行账本的会话链接同口径断开：账本行是长期历史（日报统计要读），
+        # 保留行但清掉指向已删会话的 session_id，工厂抽屉不再出现死掉的
+        # 「打开会话」。删除已成功，清理失败只记日志不反噬删除本身。
+        try:
+            await self.store.clear_automation_run_session(session_id)
+        except Exception as e:  # noqa: BLE001 - 次要清理不挡删除
+            logging.getLogger("skysheep").warning(
+                "工厂账本会话链接清理失败（忽略）：%s", e)
         # 后台进程结束提示也随会话清：会话没了，桶不该继续驻留到进程退出
         from ...tools.shell import clear_bg_notes  # 局部导入避免 tools↔server 循环
 
@@ -564,6 +595,10 @@ class LifecycleMixin:
         if cur is None:
             cur = await self.store.get_or_create_project(str(self.working_dir), self.working_dir.name)
         self.project = cur
+        # 运行快照按新库收敛：备份回退/导入可能让 runs.json 指向库里已不存在
+        # 的会话（恢复点之后新建的那些）——否则运行中心的「打开会话」会指向
+        # 一张空标签（与启动、删项目同一口径，见 prune_run_center_orphans）。
+        await self.prune_run_center_orphans()
         info = await self.open_initial_session()
         self._base_agent.load_history([Message.system(self.compose_system())])
         return {

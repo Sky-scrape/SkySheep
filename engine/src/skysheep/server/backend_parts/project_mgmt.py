@@ -241,6 +241,10 @@ class ProjectMgmtMixin:
         removed = await self.store.delete_project(project_id)
         if not removed:
             raise RuntimeError("项目不存在，可能已被删除")
+        # 该项目的会话已被级联删除：运行中心里它们的运行记录一并收敛，
+        # 否则「打开会话」会指向库里已不存在的会话（整项目删除是本路径，
+        # 不走 delete_session，清不到运行条目）。
+        await self.prune_run_center_orphans()
         if proj is not None and self.is_remote_project(proj):
             self._remote_project_id_cache = None  # 渠道再用时经 ensure 重建
         # 该项目的检查点目录（改前文件快照）一并清掉：项目没了，留着它的

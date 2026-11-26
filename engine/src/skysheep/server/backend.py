@@ -1286,6 +1286,14 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 后续在设置页保存网络配置时同样会热更新（见 save_network_settings）。
         set_child_network(self.cfg.network)
         self.store = self._store_override or await SessionStore(db_path()).connect()
+        # 运行中心的孤儿记录：旧版本删会话不清运行条目，备份回退也会让快照
+        # 指向库里已不存在的会话——留着会让「打开会话」开出一张空标签，
+        # 且 runs.json 继续存着已删会话的标题与原文首段。启动时按库实况清一次
+        # （与库整体替换、删项目后的清理同一口径，见 prune_run_center_orphans）。
+        dropped = await self.prune_run_center_orphans()
+        if dropped:
+            logging.getLogger("skysheep").info(
+                "运行中心：清理 %d 条会话已不存在的运行记录", dropped)
         # 工厂运行账本：automation_runs 的写入口 + factory_run 事件出口。
         # 保留策略取 [factory] 配置；factory.save 保存后热更新这两项。
         # 事件出口 _emit_factory_run 自拆分批 4 起由 FactoryMixin 提供

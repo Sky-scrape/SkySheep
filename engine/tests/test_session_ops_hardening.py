@@ -1,9 +1,10 @@
 """会话操作体系加固回归：2026-09 审计发现的问题逐条钉死。
 
-覆盖：删项目级联清理定时任务/流水线、删会话清理检查点、检查点落盘失败的
-内存兜底、blob 丢失不再误删现文件、bytes 随 meta 持久化、forget_session、
-空会话角标与清理口径一致（置顶/归档不动）、LIKE 兜底转义通配符、FTS 回填
-失败置脏、运行中会话拒绝分叉/回滚、删除返回契约（new_active / truncate id）。
+覆盖：删项目级联清理定时任务/流水线、删会话清理检查点与运行中心条目、
+检查点落盘失败的内存兜底、blob 丢失不再误删现文件、bytes 随 meta 持久化、
+forget_session、空会话角标与清理口径一致（置顶/归档不动）、LIKE 兜底转义
+通配符、FTS 回填失败置脏、运行中会话拒绝分叉/回滚、删除返回契约
+（new_active / truncate id）。
 """
 
 from __future__ import annotations
@@ -59,6 +60,32 @@ async def test_delete_project_cascades_cron_and_pipelines(home):
             con.close()
     finally:
         await store.close()
+
+
+async def test_delete_project_prunes_run_center(home):
+    """彻底删除项目：其会话被级联删除，运行中心里对应条目也要一起清掉。
+
+    项目删除不走 delete_session（store 直接级联删会话），漏接清理的话
+    运行中心会留下一排指向已不存在会话的「打开会话」。
+    """
+    provider = FakeProvider([[TextBlock(text="答")]])
+    from skysheep.server import create_app
+
+    app = create_app(working_dir=home / "proj", provider_name="fake",
+                     provider_factory=lambda: provider)
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as client, client.websocket_connect("/ws") as ws:
+        backend = app.state.backend
+        ws.send_json({"id": "c1", "method": "chat.send",
+                      "params": {"text": "项目里的原话"}})
+        recv_until(ws, "c1")
+        pid = backend.project.id
+        assert backend.runs.list_runs(), "先有本轮运行记录"
+
+        ws.send_json({"id": "d1", "method": "project.delete", "params": {"id": pid}})
+        assert recv_until(ws, "d1")["ok"] is True
+        assert backend.runs.list_runs() == [], "项目会话没了，运行中心的条目也不该留下"
 
 
 # ---- 空会话：角标口径与清理一致；置顶/归档的都不清 ----
@@ -233,6 +260,52 @@ async def test_delete_session_cleans_checkpoints_and_fails_queue(home):
         assert not any((home / "home" / "backups" / "checkpoints").rglob(cp["id"])), \
             "磁盘上的检查点目录也一并移除"
         assert sid not in backend._manually_named
+
+
+async def test_delete_session_cleans_run_center(home):
+    """删会话连带清掉运行中心里它的条目（别的会话不受影响）。
+
+    运行记录带标题与原文首段；会话删了还留着的话，运行中心的「打开会话」
+    是一张加载失败的空标签，runs.json 也继续存着已删会话的内容。
+    """
+    provider = FakeProvider([[TextBlock(text="答一")], [TextBlock(text="答二")]])
+    from skysheep.server import create_app
+
+    app = create_app(working_dir=home / "proj", provider_name="fake",
+                     provider_factory=lambda: provider)
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as client, client.websocket_connect("/ws") as ws:
+        backend = app.state.backend
+        ws.send_json({"id": "c1", "method": "chat.send",
+                      "params": {"text": "第一屏的原话"}})
+        recv_until(ws, "c1")
+        first = backend.session.id
+        ws.send_json({"id": "n1", "method": "session.new"})
+        recv_until(ws, "n1")
+        ws.send_json({"id": "c2", "method": "chat.send",
+                      "params": {"text": "第二屏的原话"}})
+        recv_until(ws, "c2")
+        second = backend.session.id
+        assert {first, second} <= {r["session_id"] for r in backend.runs.list_runs()}
+        # 工厂账本里也挂一条指向该会话的运行：删会话后行保留、链接要断开
+        ledger = await backend.store.add_automation_run(
+            kind="cron", task_id=1, project_id=backend.project.id,
+            session_id=first, trigger="schedule", status="done", started_at=0)
+
+        ws.send_json({"id": "d1", "method": "session.delete", "params": {"id": first}})
+        assert recv_until(ws, "d1")["ok"] is True
+
+        left = backend.runs.list_runs(limit=50)
+        assert first not in {r["session_id"] for r in left}, "已删会话的运行条目应一并清掉"
+        assert second in {r["session_id"] for r in left}, "别的会话的运行记录不受影响"
+        snapshot = json.loads((home / "home" / "runs.json").read_text(encoding="utf-8"))
+        assert all(r["session_id"] != first for r in snapshot["runs"])
+        assert "第一屏的原话" not in json.dumps(snapshot, ensure_ascii=False), \
+            "已删会话的原文不该继续留在运行快照里"
+        row = await backend.store.get_automation_run(ledger["id"])
+        assert row is not None, "工厂账本行本身保留（历史与日报统计）"
+        assert not row["session_id"], "账本里的会话链接随会话断开，工厂不再挂着死入口"
 
 
 async def test_truncate_returns_session_id_for_tracking(home):

@@ -120,8 +120,8 @@
     paint: "#d9a33c", paintDark: "#96691f", paintLight: "#f2c86e",
     mark: "#efe6d2", stain: "rgba(72, 50, 28, 0.16)", soil: "#8b6a45",
     glassGlow: "#cfe8e6", concreteWarm: "#b6a894",
-    bgSteel: "#c7bda9", bgSteelDark: "#bcb19c", bgSteelLight: "#ddd3bf",
-    bgRust: "#cfb098", bgRustDark: "#c2a58c", bgRustLight: "#ddc0a6",
+    bgSteel: "#b2a896", bgSteelDark: "#8f8574", bgSteelLight: "#d9cfbe",
+    bgRust: "#c19a80", bgRustDark: "#9c765f", bgRustLight: "#dab49a",
     bgHaze: "#e8c9a4",
     shadow: "rgba(58, 40, 24, 0.34)", glow: "rgba(255, 196, 110, 0.20)",
     glowCool: "rgba(206, 232, 255, 0.22)",
@@ -400,8 +400,10 @@
     cacheDom();
 
     var allBtn = $("factory-all-runs");
+    var panelRunsBtn = $("factory-panel-runs");
 
     if (allBtn) allBtn.onclick = function () { openAllRunsDrawer(); };
+    if (panelRunsBtn) panelRunsBtn.onclick = function () { openAllRunsDrawer(); };
     if (dom.centerBtn) {
       dom.centerBtn.onclick = function () {
         fitCamera(true);
@@ -525,8 +527,13 @@
 
   // ---------- 数据加载 ----------
   function factoryReload() {
-    if (S.loading) return;
+    if (S.loading) {
+      // 不丢在途刷新之后到达的新状态变化，本轮收尾后补拉一次
+      S.reloadPending = true;
+      return;
+    }
     S.loading = true;
+    S.reloadPending = false;
     // project.list 用来把厂区排成侧栏的 project_order（factory.state 按建库序返回）；
     // 取不到就沿用服务端顺序，不因为排序失败挡住工厂首屏。
     Promise.all([
@@ -546,6 +553,10 @@
         });
       }
       applyState(st);
+      if (S.reloadPending && S.mounted) {
+        S.reloadPending = false;
+        factoryReload();
+      }
     }).catch(function (e) {
       S.loading = false;
       S.loaded = true;
@@ -553,6 +564,10 @@
         "<div class=\"fx-notice-ops\"><button class=\"btn-ghost\" data-notice-retry=\"1\">重试</button></div>", true);
       bindNoticeOps();
       showPanelMessage("读取失败（" + escapeHtml(e && e.message ? e.message : "未知错误") + "）");
+      if (S.reloadPending && S.mounted) {
+        S.reloadPending = false;
+        factoryReload();
+      }
     });
   }
 
@@ -1481,9 +1496,10 @@
       if (!s) return;
       if (r.status === "running") s.busy += 1;
       if (!isToday(r.finished_at)) return;
+      var okOverride = r.outcome === "ok";
       var partial = r.outcome === "partial" || r.outcome === "failed";
-      if (r.status === "done" && !partial) s.done += 1;
-      else if (r.status === "error" || partial) s.rework += 1;
+      if ((r.status === "done" || okOverride) && !partial) s.done += 1;
+      else if ((r.status === "error" || partial) && !okOverride) s.rework += 1;
     });
     // 成色变化 → 出货：每攒满一托盘放一辆车出厂（首帧 / 重拉时不补放，
     // 否则每次切项目都会有一队车同时涌出来）。
@@ -2151,7 +2167,7 @@
   /** 悬停信息牌：跟随命中点的轻量 DOM（中文文案不入 canvas）。
       文本与 hoverTitle 同源；隐藏 / 显示都不接收指针事件。 */
   function showHoverTip(hit, ev) {
-    if (!dom.tip) return;
+    if (!dom.tip || !dom.stage) return;
     var text = hoverTitle(hit);
     if (!text) {
       hideHoverTip();
@@ -2354,26 +2370,41 @@
       // 不能因为状态是 done 就给它 +1 并飘「+1 成品」。旧行没有 outcome 时
       // 仍按 done 计，避免升级当天的历史凭空少一截。
       var runOutcome = run.outcome || "";
-      var made = run.status === "done"
-        && runOutcome !== "partial" && runOutcome !== "failed";
+      var okOverride = runOutcome === "ok";
+      var partial = runOutcome === "partial" || runOutcome === "failed";
+      var made = (run.status === "done" || okOverride) && !partial;
       if (made && isToday(run.finished_at)) {
         st.counters.done_today = (st.counters.done_today || 0) + 1;
+      }
+      if (isToday(run.finished_at)) {
+        var addedTok = (Number(run.in_tokens) || 0) + (Number(run.out_tokens) || 0);
+        if (addedTok > 0) st.counters.tokens_today = (st.counters.tokens_today || 0) + addedTok;
       }
       var rec2 = S.world && S.world.lines.get(runKey(run));
       if (rec2) {
         rec2.line.running_run_id = null;
         rec2.line.progress = null; // 这一轮结束了：机台上不该还挂着上一个工具名
+        if (run.kind === "pipeline_node" && Array.isArray(rec2.line.nodes)) {
+          var nodeStatus = run.status === "error" ? "failed"
+            : (run.status === "done" || run.status === "empty") ? "done"
+              : (run.status === "cancelled" ? "cancelled" : run.status);
+          rec2.line.nodes.forEach(function (n) {
+            if (Number(n.id) === Number(run.task_id) && nodeStatus) n.status = nodeStatus;
+          });
+        }
         rec2.line.status = rec2.kind === "pipeline"
           ? (run.status === "error" ? "failed" : (run.status === "done" || run.status === "empty") ? "done" : "idle")
           : (rec2.line.status === "paused" || rec2.line.status === "stopped" ? rec2.line.status : "idle");
         rec2.line.last_status = statusToLast(run.status);
         rec2.line.last_run_at = run.finished_at || nowMs() / 1000;
         var attnKind = "";
-        if (run.status === "error" || run.status === "interrupted"
-            || run.status === "skipped" || run.status === "empty") {
-          attnKind = run.status;
-        } else if (run.status === "done" && runOutcome === "partial") {
-          attnKind = "partial";
+        if (!okOverride) {
+          if (run.status === "error" || run.status === "interrupted"
+              || run.status === "skipped" || run.status === "empty") {
+            attnKind = run.status;
+          } else if (run.status === "done" && runOutcome === "partial") {
+            attnKind = "partial";
+          }
         }
         if (attnKind) {
           st.attention = st.attention || [];
@@ -2393,6 +2424,7 @@
           }
         }
       }
+      scheduleResync();
       var pkg = S.packages.get(run.id);
       if (pkg) {
         pkg.run = run;
@@ -2462,12 +2494,17 @@
       started_at: run.started_at || nowMs() / 1000, finished_at: run.finished_at || null,
       duration_s: run.duration_s != null ? run.duration_s : null,
       result_excerpt: run.result_excerpt || "", error: run.error || "",
-      // 判定类字段必须跟着事件走，否则「被拦 N 次 / 没做成 / 归因」只在重开抽屉时才有
+      // 判定与用量字段必须跟着事件走，否则「被拦 N 次 / 用量 / 验收备注 / 本轮配置」只在重开抽屉时才有
+      in_tokens: Number(run.in_tokens) || 0,
+      out_tokens: Number(run.out_tokens) || 0,
+      cached_tokens: Number(run.cached_tokens) || 0,
       denied_count: Number(run.denied_count) || 0,
       denied_tools: run.denied_tools || "",
       error_kind: run.error_kind || "",
       outcome: run.outcome || "",
       outcome_source: run.outcome_source || "",
+      review_note: run.review_note || "",
+      config_snapshot: run.config_snapshot || "",
       result_path: run.result_path || "",
     };
   }

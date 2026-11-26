@@ -36,6 +36,14 @@ STATIC_DIR = ROOT / "src" / "skysheep" / "server" / "static"
 NODE_BIN = shutil.which("node") or find_node()
 
 _NEW_KINDS = ("cooling", "pipeRack", "transferBridge")
+_ARCHITECTURAL_KINDS = (
+    "archHangar",
+    "sphereTank",
+    "bridgeCrane",
+    "solarArray",
+    "commTower",
+    "windTurbine",
+)
 # 厂外建筑（前场料场 / 罐区）：模型种类 → buildIndustrialSite 里所属的建筑群
 _FRONT_BUILDING_KINDS = ("coalShed", "siloBattery", "gasholder", "basin", "loadingRack", "flare")
 _FRONT_GROUPS = ("stockyard", "tankFarm")
@@ -78,6 +86,12 @@ _EXPORTED = (
     "drawBasinModel",
     "drawLoadingRackModel",
     "drawFlareModel",
+    "drawArchHangarModel",
+    "drawSphereTankModel",
+    "drawBridgeCraneModel",
+    "drawSolarArrayModel",
+    "drawCommTowerModel",
+    "drawWindTurbineModel",
 )
 
 # 在 Node 里跑的探针。所有断言只收集进 report，由 Python 逐项断言，
@@ -383,6 +397,22 @@ _DRIVER_JS = r'''
         })
       };
     });
+    report.landmarkGroups = {};
+    ["commHill", "windSolarField", "sphereTerminal", "eastWindRidge"].forEach(function (name) {
+      var group = baseSite.models.filter(function (m) { return m.facility === name; });
+      var expanded = fx.buildIndustrialSite({ x: 0, y: 0 },
+        Array.from({ length: 9 }, function (_, i) { return fakeFactory("landmark-" + i); }));
+      var moved = expanded.models.filter(function (m) { return m.facility === name; });
+      report.landmarkGroups[name] = {
+        count: group.length,
+        kinds: group.map(function (m) { return m.kind; }),
+        independent: group.every(function (m) { return m.bg && m.peripheral && !m.projectId; }),
+        rigidMove: moved.length === group.length && group.every(function (m, i) {
+          var a = m.path ? m.path[0] : m, b = moved[i].path ? moved[i].path[0] : moved[i];
+          return eqNum(b.x - a.x, m.facilityAnchor.x) && eqNum(b.y - a.y, m.facilityAnchor.y);
+        })
+      };
+    });
 
     // ---- 厂外建筑（前场料场 / 罐区）：种类齐全、占地为正、贴着公路不越界 ----
     report.frontGroups = {};
@@ -601,7 +631,9 @@ _DRIVER_JS = r'''
     var newSource = [
       fx.drawCoolingTowerModel, fx.drawPipeRackModel, fx.drawTransferBridgeModel, fx.drawRackSupports,
       fx.drawCoalShedModel, fx.drawSiloBatteryModel, fx.drawGasholderModel,
-      fx.drawBasinModel, fx.drawLoadingRackModel, fx.drawFlareModel
+      fx.drawBasinModel, fx.drawLoadingRackModel, fx.drawFlareModel,
+      fx.drawArchHangarModel, fx.drawSphereTankModel, fx.drawBridgeCraneModel,
+      fx.drawSolarArrayModel, fx.drawCommTowerModel, fx.drawWindTurbineModel
     ].map(function (fn) { return fn.toString(); }).join("\n");
     var refs = {};
     newSource.replace(/\bpal\.([A-Za-z0-9_]+)/g, function (all, key) { refs[key] = true; return all; });
@@ -1108,6 +1140,18 @@ def test_factory_scene_upper_utilities_stay_independent_and_move_together(scene_
         assert group["rigidMove"]
 
 
+def test_factory_scene_new_landmark_groups_scale_rigidly_and_cover_architectures(scene_report):
+    groups = scene_report["landmarkGroups"]
+    assert set(groups) == {"commHill", "windSolarField", "sphereTerminal", "eastWindRidge"}
+    seen_kinds = set()
+    for name, info in groups.items():
+        assert info["count"] >= 3, f"{name} 零件数不足"
+        assert info["independent"], f"{name} 应保持独立外围设施属性"
+        assert info["rigidMove"], f"{name} 在扩圈后未保持刚体平移"
+        seen_kinds.update(info["kinds"])
+    assert {"archHangar", "sphereTank", "solarArray", "commTower", "windTurbine"} <= seen_kinds
+
+
 def test_factory_scene_front_groups_are_near_and_move_with_the_road(scene_report):
     """前场料场 / 罐区：满色近景、直接落在沙地上（无平台）、位置按台地前缘公路算。"""
     groups = scene_report["frontGroups"]
@@ -1390,6 +1434,8 @@ def test_factory_scene_draw_model_has_no_nonfinite_pixels(scene_report):
     fills = scene_report["fillCounts"]
     for kind in _NEW_KINDS:
         assert fills.get(kind, 0) > 0, f"{kind} 没有画出任何像素（drawModel 分派缺失）"
+    for kind in _ARCHITECTURAL_KINDS:
+        assert fills.get(kind, 0) > 0, f"新增建筑模型 {kind} 没有画出任何像素"
     for kind, count in fills.items():
         assert count > 0, f"{kind} 没有画出任何像素"
 

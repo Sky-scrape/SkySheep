@@ -359,46 +359,102 @@
       || kind === "snow" || kind === "thunder" || kind === "fog";
     var sky = ctx.createLinearGradient(0, 0, 0, skyH + 26);
     sky.addColorStop(0, pal.skyTop);
-    sky.addColorStop(0.62, pal.skyMid);
+    sky.addColorStop(0.58, pal.skyMid);
     sky.addColorStop(1, pal.skyLow);
     ctx.fillStyle = sky;
     ctx.fillRect(0, 0, W, skyH + 26);
     // 太阳/月亮放在左上：与墙面受光（左面中、右面暗）和右下投影同一方向
     var sunX = Math.round(W * 0.24);
     var sunY = Math.round(skyH * 0.30);
-    var glow = ctx.createRadialGradient(sunX, sunY, 2, sunX, sunY, Math.round(W * 0.36));
+    var glow = ctx.createRadialGradient(sunX, sunY, 2, sunX, sunY, Math.round(W * 0.38));
     glow.addColorStop(0, pal.sun);
     glow.addColorStop(1, "rgba(255, 210, 130, 0)");
-    ctx.globalAlpha = (S.night ? 0.14 : 0.38) * (heavy ? 0.25 : 1);
+    ctx.globalAlpha = (S.night ? 0.18 : 0.42) * (heavy ? 0.25 : 1);
     ctx.fillStyle = glow;
     ctx.fillRect(0, 0, W, skyH + 26);
     var sunBreath = S.reduced ? 0 : Math.sin(S.ticks * 0.025) * 0.025;
-    ctx.globalAlpha = ((S.night ? 0.5 : 0.42) + sunBreath) * (heavy ? 0.35 : 1);
-    var orbR = Math.max(2, Math.round(W * 0.010));
+    var orbR = Math.max(2, Math.round(W * 0.011));
+    if (!heavy) {
+      ctx.globalAlpha = S.night ? 0.12 : 0.16;
+      fillOval(ctx, sunX, sunY, orbR * 2, orbR * 2, pal.sun);
+    }
+    ctx.globalAlpha = ((S.night ? 0.62 : 0.48) + sunBreath) * (heavy ? 0.35 : 1);
     fillOval(ctx, sunX, sunY, orbR, orbR, pal.sun);
+    if (S.night && !heavy && orbR >= 3) {
+      // 月牙暗缘：用夜空顶色错位遮出一弯柔和新月
+      ctx.globalAlpha = 0.72;
+      fillOval(ctx, sunX + Math.max(1, Math.round(orbR * 0.45)), sunY - 1,
+               Math.max(1, Math.round(orbR * 0.8)), Math.max(1, Math.round(orbR * 0.8)), pal.skyTop);
+    }
     ctx.globalAlpha = 1;
-    // 夜空星点：阴雨 / 雾天被云层挡住
+    // 夜空星点：两档亮度 + 偶尔一颗十字星芒；阴雨 / 雾天被云层挡住
     if (S.night && !heavy) {
-      ctx.fillStyle = pal.glassLight;
-      for (var st = 0; st < 30; st += 1) {
+      for (var st = 0; st < 42; st += 1) {
         var stx = (st * 97 + 31) % W;
-        var sty = (st * 53 + 17) % Math.max(4, skyH - 4);
-        ctx.globalAlpha = 0.22 + (st % 4) * 0.12;
+        var sty = (st * 53 + 11) % Math.max(4, skyH - 5);
+        var twinkle = S.reduced ? 0 : Math.sin(S.ticks * 0.05 + st * 1.3) * 0.14;
+        ctx.globalAlpha = Math.max(0.12, 0.24 + (st % 4) * 0.13 + twinkle);
+        ctx.fillStyle = st % 7 === 0 ? pal.sun : pal.glassLight;
         ctx.fillRect(stx, sty, 1, 1);
+        if (st % 11 === 0 && sty > 2 && stx > 2) {
+          ctx.globalAlpha *= 0.45;
+          ctx.fillRect(stx - 1, sty, 3, 1);
+          ctx.fillRect(stx, sty - 1, 1, 3);
+        }
       }
       ctx.globalAlpha = 1;
     }
+    // 远山剪影（必须高于工业天际线才能不被近景建筑遮没）：
+    // 第一层远山连峰 + 第二层风化台地平顶丘陵 + 极细日照/月光山脊亮边
+    var mtnHeight = Math.max(12, Math.round(skyH * 0.44));
+    var ridgePts = [{ x: 0, y: skyH + 3 }];
+    var ridgeSeed = seeded(0x3017A1);
+    var ridgeSteps = 22;
+    var ridgeTone = lerpColor(pal.skyLow, pal.bgSteelDark, S.night ? 0.56 : 0.46);
+    for (var ri = 0; ri <= ridgeSteps; ri += 1) {
+      var rx = Math.round(ri * W / ridgeSteps);
+      var wave = Math.sin(ri * 0.72) * 0.34 + Math.cos(ri * 0.31) * 0.24 + 0.42;
+      var rh = Math.max(8, Math.round(mtnHeight * (0.38 + wave * 0.44 + ridgeSeed() * 0.22)));
+      ridgePts.push({ x: rx, y: skyH - rh });
+    }
+    ridgePts.push({ x: W, y: skyH + 3 });
+    ctx.globalAlpha = S.night ? 0.68 : 0.56;
+    fillPoly(ctx, ridgePts, ridgeTone);
+    ctx.globalAlpha = S.night ? 0.22 : 0.26;
+    linePath(ctx, ridgePts.slice(1, -1), 1, S.night ? pal.steelLight : pal.groundHi);
+
+    var mesaPts = [{ x: 0, y: skyH + 2 }];
+    var mesaTone = lerpColor(pal.skyLow, pal.groundDark, S.night ? 0.52 : 0.58);
+    for (var mi = 0; mi < 7; mi += 1) {
+      var mx0 = Math.round(mi * W / 7);
+      var mx1 = Math.round((mi + 1) * W / 7);
+      var mh = Math.max(6, Math.round(mtnHeight * (0.24 + (mi % 3) * 0.14)));
+      mesaPts.push({ x: mx0 + Math.round((mx1 - mx0) * 0.14), y: skyH - mh });
+      mesaPts.push({ x: mx1 - Math.round((mx1 - mx0) * 0.16), y: skyH - mh });
+    }
+    mesaPts.push({ x: W, y: skyH + 2 });
+    ctx.globalAlpha = S.night ? 0.74 : 0.52;
+    fillPoly(ctx, mesaPts, mesaTone);
+    ctx.globalAlpha = S.night ? 0.18 : 0.20;
+    linePath(ctx, mesaPts.slice(1, -1), 1, S.night ? pal.glassLight : pal.groundLight);
+    ctx.globalAlpha = 1;
+
     drawSkyline(ctx, pal, skyH, W);
     if (!S.night && !heavy) {
-      // 晴天 / 多云的薄云：低速漂移，给固定视角的天空一点远景呼吸感。
-      ctx.globalAlpha = 0.15;
+      // 晴天 / 多云的分层积云：平底暖影 + 上部日光亮朵，与黄金天空拉出清晰层次
       var cloudDrift = S.reduced ? 0 : (S.ticks % 4800) * 0.025;
-      for (var cl = 0; cl < 5; cl += 1) {
-        var cw = Math.round(W * (0.05 + (cl % 2) * 0.03));
-        var cx2 = ((cl * 211 + 70 + cloudDrift) % (W + cw * 2)) - cw;
-        var cy2 = Math.round(skyH * (0.16 + (cl % 3) * 0.13));
-        fillOval(ctx, cx2, cy2, cw, Math.max(2, Math.round(skyH * 0.05)), pal.sun);
-        fillOval(ctx, cx2 + cw * 0.55, cy2 + 1, cw * 0.6, Math.max(2, Math.round(skyH * 0.038)), pal.sun);
+      for (var cl = 0; cl < 6; cl += 1) {
+        var cw = Math.round(W * (0.048 + (cl % 3) * 0.022));
+        var cx2 = ((cl * 193 + 55 + cloudDrift) % (W + cw * 2)) - cw;
+        var cy2 = Math.round(skyH * (0.14 + (cl % 3) * 0.14));
+        var ch = Math.max(2, Math.round(skyH * 0.042));
+        ctx.globalAlpha = 0.20;
+        fillOval(ctx, cx2 + 2, cy2 + 2, cw, ch, pal.skyMid);
+        ctx.globalAlpha = 0.34;
+        fillOval(ctx, cx2, cy2, cw, ch, pal.sun);
+        fillOval(ctx, cx2 + cw * 0.45, cy2 + 1, cw * 0.58, Math.max(2, Math.round(ch * 0.78)), pal.groundHi);
+        ctx.globalAlpha = 0.28;
+        fillOval(ctx, cx2 - cw * 0.34, cy2 - 1, cw * 0.46, Math.max(1, Math.round(ch * 0.72)), pal.sun);
       }
       ctx.globalAlpha = 1;
     }
@@ -417,45 +473,56 @@
       }
       ctx.globalAlpha = 1;
     }
-    // 沙地
+    // 沙地：柔和远近过渡 + 天际线接壤路基带 + 沿等距斜线的风成沙阶（消除生硬直尺切线）
     var ground = ctx.createLinearGradient(0, skyH, 0, H);
     ground.addColorStop(0, pal.groundLight);
     ground.addColorStop(0.24, pal.ground);
     ground.addColorStop(1, pal.groundDark);
     ctx.fillStyle = ground;
     ctx.fillRect(0, skyH, W, H - skyH);
-    // 远景沙丘：屏幕空间、只压在地平线以下，给远处的仓库与储罐一个地平面
-    for (var dune = 0; dune < 9; dune += 1) {
-      var dx2 = (dune * 137 + 53) % W;
-      var dy2 = skyH + 16 + ((dune * 71) % Math.max(8, Math.round(H * 0.14)));
-      var dw2 = Math.round(W * (0.05 + (dune % 4) * 0.012));
-      ctx.globalAlpha = 0.10 + (dune % 3) * 0.03;
-      fillOval(ctx, dx2, dy2, dw2, Math.max(2, Math.round(H * 0.012)), pal.groundDark);
+    // 远景工业带底座护堤：跨幅起伏碎边衔接天空与地面
+    ctx.globalAlpha = S.night ? 0.42 : 0.30;
+    ctx.fillStyle = pal.groundDark;
+    ctx.fillRect(0, skyH - 1, W, 3);
+    for (var berm = 0; berm < 26; berm += 1) {
+      var bx = Math.round((berm * 67 + 19) % Math.max(1, W - 24));
+      var bw = 12 + (berm % 4) * 7;
+      ctx.fillRect(bx, skyH - 2 + (berm % 2), bw, 2);
+    }
+    // 风成地形层阶：沿等距视角浅浅拉出宽阔高原纹理
+    for (var shelf = 0; shelf < 7; shelf += 1) {
+      var sy = skyH + Math.round((shelf + 0.4) * (H - skyH) * 0.12);
+      var sx = Math.round(((shelf * 157 + 23) % Math.max(1, W * 0.62)));
+      var sw = Math.round(W * (0.26 + (shelf % 3) * 0.13));
+      var sh = Math.max(1, Math.round(H * 0.009));
+      ctx.globalAlpha = shelf % 2 ? 0.11 : 0.08;
+      ctx.fillStyle = shelf % 2 ? pal.groundDark : pal.groundHi;
+      ctx.fillRect(sx, sy, sw, sh);
+      ctx.fillStyle = pal.groundLight;
+      ctx.globalAlpha = 0.06;
+      ctx.fillRect(sx + 6, sy + sh, Math.max(6, Math.round(sw * 0.72)), 1);
+    }
+    // 外盆地低伏沙脊斜线（弱对比顺透视方向，让四周空沙地更有尺度感）
+    ctx.globalAlpha = S.night ? 0.09 : 0.10;
+    for (var dn = 0; dn < 5; dn += 1) {
+      var dnx = Math.round(W * (0.06 + dn * 0.21));
+      var dny = skyH + Math.round((H - skyH) * (0.18 + (dn % 3) * 0.22));
+      var dnl = Math.round(W * 0.14);
+      linePath(ctx, [{ x: dnx, y: dny }, { x: dnx + dnl, y: dny + Math.round(dnl * 0.45) }],
+               1, dn % 2 ? pal.groundHi : pal.groundDark);
     }
     ctx.globalAlpha = 1;
-    // 地平线雾带
-    var haze = ctx.createLinearGradient(0, skyH - 4, 0, skyH + 28);
-    haze.addColorStop(0, pal.bgHaze);
+    // 地平线雾带（拉柔天空—地坪交界）
+    var haze = ctx.createLinearGradient(0, skyH - 8, 0, skyH + 34);
+    haze.addColorStop(0, "rgba(0,0,0,0)");
+    haze.addColorStop(0.28, pal.bgHaze);
     haze.addColorStop(1, "rgba(0,0,0,0)");
     var hazeAlpha = kind === "fog"
-      ? (S.night ? 0.34 : 0.42)
-      : (S.night ? 0.16 : 0.22) * (heavy ? 1.3 : 1);
+      ? (S.night ? 0.42 : 0.48)
+      : (S.night ? 0.22 : 0.28) * (heavy ? 1.25 : 1);
     ctx.globalAlpha = hazeAlpha;
     ctx.fillStyle = haze;
-    ctx.fillRect(0, skyH - 4, W, 32);
-    ctx.globalAlpha = 1;
-    // 远处沙丘剪影
-    ctx.globalAlpha = S.night ? 0.30 : 0.22;
-    for (var i = 0; i < 7; i += 1) {
-      var mx = Math.round((i + 0.5) * W / 7);
-      var mw = Math.round(W / 12 + (i % 3) * 6);
-      var mh = Math.round(5 + (i % 4) * 4);
-      fillPoly(ctx, [
-        { x: mx - mw, y: skyH + 2 },
-        { x: mx, y: skyH - mh },
-        { x: mx + mw, y: skyH + 2 },
-      ], pal.groundDark);
-    }
+    ctx.fillRect(0, skyH - 8, W, 42);
     ctx.globalAlpha = 1;
   }
 
@@ -466,14 +533,24 @@
     var hw = Math.max(120, Math.round(pl.hw * z));
     var hh = Math.max(60, Math.round(pl.hh * z));
     fillDiamond(ctx, c.x, c.y, hw, hh, pal.ground);
-    // 园区边界与外围道路处于同一地面，不画侧壁或下沉投影。
+    // 园区边界：双线石缘框出工业台地（外实内淡，与地面衔接自然）
     var rim = [
       { x: c.x - hw, y: c.y }, { x: c.x, y: c.y - hh },
       { x: c.x + hw, y: c.y }, { x: c.x, y: c.y + hh },
       { x: c.x - hw, y: c.y },
     ];
-    linePath(ctx, rim, 1, pal.stoneLight);
-    // 干道贴着台地前缘两条边，两端再各自顺走向延长出去——出图的方向感
+    linePath(ctx, rim, 1, pal.stoneDark);
+    var innerRim = [
+      { x: c.x - Math.max(4, hw - 2), y: c.y },
+      { x: c.x, y: c.y - Math.max(2, hh - 1) },
+      { x: c.x + Math.max(4, hw - 2), y: c.y },
+      { x: c.x, y: c.y + Math.max(2, hh - 1) },
+      { x: c.x - Math.max(4, hw - 2), y: c.y },
+    ];
+    ctx.globalAlpha = 0.45;
+    linePath(ctx, innerRim, 1, pal.stoneLight);
+    ctx.globalAlpha = 1;
+    // 干道贴着台地前缘两条边，两端顺走向延长出去——并补充虚线中分与路肩灯桩
     var armL = { x: pl.cx - pl.hw - 14, y: pl.cy };
     var armR = { x: pl.cx + pl.hw + 14, y: pl.cy };
     var face = { x: pl.cx, y: pl.cy + pl.hh + 8 };
@@ -482,10 +559,19 @@
       var l = Math.hypot(dx, dy) || 1;
       return { x: from.x - dx / l * len, y: from.y - dy / l * len };
     }
-    var road = [extendRoad(armL, face, 150), armL, face, armR, extendRoad(armR, face, 150)]
-      .map(function (p) { return viewPoint(p.x, p.y); });
-    linePath(ctx, road, vlen(10), pal.road);
-    linePath(ctx, road, 1, pal.roadLight);
+    var worldRoad = [extendRoad(armL, face, 150), armL, face, armR, extendRoad(armR, face, 150)];
+    var road = worldRoad.map(function (p) { return viewPoint(p.x, p.y); });
+    linePath(ctx, road, vlen(12), pal.roadDark);
+    linePath(ctx, road, vlen(9), pal.road);
+    // 公路中线虚线标线：增强工业大道的纵深节奏
+    var rLen = pathLength(road);
+    ctx.fillStyle = pal.mark;
+    ctx.globalAlpha = 0.42;
+    for (var rd = 4; rd < rLen; rd += Math.max(6, vlen(14))) {
+      var rp = pointAt(road, rLen ? rd / rLen : 0);
+      ctx.fillRect(Math.round(rp.x), Math.round(rp.y), Math.max(1, vlen(2)), 1);
+    }
+    ctx.globalAlpha = 1;
   }
 
   function drawGroundPatches(ctx, pal) {
@@ -493,9 +579,9 @@
     if (!site) return;
     var z = S.cam.zoom;
     var pl = (S.world && S.world.plateau) || { cx: 0, cy: 0, hw: 260, hh: 125 };
-    // 沙地风纹：几道很淡的横向长弧，压住大面积平涂
+    // 沙地风纹与轻质感铺装：弱化圆斑坑洼感，让路面与厂坪成为视觉主角
     var wr = seeded(0x6C0FFEE);
-    ctx.globalAlpha = 0.06;
+    ctx.globalAlpha = 0.05;
     for (var w = 0; w < 7; w += 1) {
       var wx = pl.cx + (wr() * 2 - 1) * pl.hw * 0.66;
       var wy = pl.cy + (wr() * 2 - 1) * pl.hh * 0.62;
@@ -503,13 +589,20 @@
                Math.max(6, Math.round(pl.hw * (0.10 + wr() * 0.16) * z)),
                Math.max(1, Math.round(2 * z)), pal.groundHi);
     }
-    ctx.globalAlpha = 0.16;
+    ctx.globalAlpha = 0.08;
     site.patches.forEach(function (b) {
       var p = viewPoint(b.x, b.y);
-      fillOval(ctx, p.x, p.y, Math.max(2, Math.round(b.rx * z)),
-               Math.max(1, Math.round(b.ry * z)),
+      fillOval(ctx, p.x, p.y, Math.max(2, Math.round(b.rx * 1.15 * z)),
+               Math.max(1, Math.round(b.ry * 0.9 * z)),
                b.light ? pal.groundHi : pal.groundDark);
     });
+    // 工业区地坪伸缩缝格网（极淡等距微线，让大面积场院像工程地面而非空沙漠）
+    ctx.globalAlpha = 0.05;
+    for (var gi = -2; gi <= 2; gi += 1) {
+      var gx0 = pl.cx + gi * 36;
+      linePath(ctx, [viewPoint(gx0, pl.cy - pl.hh * 0.48), viewPoint(gx0, pl.cy + pl.hh * 0.48)],
+               1, pal.groundDark);
+    }
     // 砾石点：撒在台面范围内，近处更密
     var grit = seeded(0x5A17C0);
     for (var g = 0; g < 130; g += 1) {
@@ -517,7 +610,7 @@
       var gy = pl.cy + (grit() * 2 - 1) * pl.hh * 0.94;
       if (Math.abs(gx - pl.cx) / pl.hw + Math.abs(gy - pl.cy) / pl.hh > 0.98) continue;
       var gp = viewPoint(gx, gy);
-      ctx.globalAlpha = 0.12 + grit() * 0.16;
+      ctx.globalAlpha = 0.12 + grit() * 0.14;
       ctx.fillStyle = grit() < 0.55 ? pal.groundDark : pal.groundHi;
       ctx.fillRect(gp.x, gp.y, 1, 1);
     }
@@ -596,8 +689,17 @@
         fillDiamond(ctx, p.x + vlen(2), p.y + vlen(1), m.hw * z * 1.02, m.hh * z * 1.02, pal.shadow);
       } else if (m.kind === "floodlight") {
         fillOval(ctx, p.x + vlen(2), p.y + vlen(1), vlen(5), vlen(2.5), pal.shadow);
-      } else if (m.kind === "gantry") {
-        fillOval(ctx, p.x + vlen(2), p.y + vlen(1), vlen(m.w || 8), vlen(3), pal.shadow);
+      } else if (m.kind === "gantry" || m.kind === "bridgeCrane") {
+        fillOval(ctx, p.x + vlen(2), p.y + vlen(1), vlen(m.hw || m.w || 8), vlen(3), pal.shadow);
+      } else if (m.kind === "archHangar") {
+        fillDiamond(ctx, p.x + vlen(7), p.y + vlen(3.5), m.hw * z * 1.02, m.hh * z * 1.02, pal.shadow);
+      } else if (m.kind === "sphereTank") {
+        fillOval(ctx, p.x + vlen(6), p.y + vlen(3), vlen(m.r * 1.15), vlen(m.r * 0.56), pal.shadow);
+      } else if (m.kind === "solarArray") {
+        fillDiamond(ctx, p.x + vlen(2), p.y + vlen(1), (m.hw || 16) * z, (m.hh || 8) * z, pal.shadow);
+      } else if (m.kind === "commTower" || m.kind === "windTurbine") {
+        fillOval(ctx, p.x + vlen(4), p.y + vlen(2), vlen(Math.max(4, (m.r || 6) * 1.1)),
+                 vlen(Math.max(2, (m.r || 6) * 0.5)), pal.shadow);
       } else if (m.path) {
         var pts = m.path.map(function (q) { return viewPoint(q.x, q.y); });
         linePath(ctx, pts, vlen(m.width || 6), pal.shadow);
@@ -858,17 +960,16 @@
     var hazed = !world.drawHasBg;
     items.forEach(function (it) {
       if (!hazed && !it.m.bg) {
-        // 远景画完、主体之前压一层薄雾：背景带整体退后，仍保留轮廓
+        // 远景画完、主体之前压一层轻雾：只轻柔虚化天际带，不再漂白前/中景工业设施
         var W = S.bufW, H = S.bufH;
         var horizon = sceneHorizon();
         ctx.fillStyle = pal.bgHaze;
-        // 阶梯式薄雾（不用渐变：假 Canvas / 老 WebView 都只认纯色填充）
-        for (var hb = 0; hb < 6; hb += 1) {
-          ctx.globalAlpha = (S.night ? 0.10 : 0.14) * (1 - hb / 6);
-          ctx.fillRect(0, horizon - 18 + hb * Math.max(3, Math.round(H * 0.06)),
-                       W, Math.max(3, Math.round(H * 0.06)) + 1);
+        var bandStep = Math.max(3, Math.round(H * 0.045));
+        for (var hb = 0; hb < 5; hb += 1) {
+          ctx.globalAlpha = (S.night ? 0.08 : 0.10) * (1 - hb / 5);
+          ctx.fillRect(0, horizon - 14 + hb * bandStep, W, bandStep + 1);
         }
-        ctx.globalAlpha = S.night ? 0.05 : 0.07;
+        ctx.globalAlpha = S.night ? 0.025 : 0.03;
         ctx.fillRect(0, 0, W, H);
         ctx.globalAlpha = 1;
         hazed = true;
@@ -935,6 +1036,12 @@
     else if (m.kind === "flag") drawFlagModel(ctx, pal, m);
     else if (m.kind === "gate") drawGateModel(ctx, pal, m);
     else if (m.kind === "rework") drawReworkModel(ctx, pal, m);
+    else if (m.kind === "archHangar") drawArchHangarModel(ctx, pal, m);
+    else if (m.kind === "sphereTank") drawSphereTankModel(ctx, pal, m);
+    else if (m.kind === "bridgeCrane") drawBridgeCraneModel(ctx, pal, m);
+    else if (m.kind === "solarArray") drawSolarArrayModel(ctx, pal, m);
+    else if (m.kind === "commTower") drawCommTowerModel(ctx, pal, m);
+    else if (m.kind === "windTurbine") drawWindTurbineModel(ctx, pal, m);
   }
 
   /** 大门道闸：两根柱 + 一根栏杆。开工时抬起，停工 / 出事时落下（出事时染红）。
@@ -1393,10 +1500,18 @@
                       { x: base.x + hw * 0.58, y: baseY - h + hh * 0.58 - 1 }], 1, pal.metalLight);
       }
       if (m.bg && hw > 12) {
-        // 远景大屋面也别是一块平板：补一个检修口/通风帽
+        // 远景大厂房平屋面补两台通风机组 + 纵向分缝线，不再像一块素色方盒
+        linePath(ctx, [{ x: base.x - hw * 0.52, y: baseY - h - hh * 0.44 },
+                      { x: base.x + hw * 0.48, y: baseY - h + hh * 0.44 }],
+                 1, pal.bgSteelDark);
         drawIsoBoxAt(ctx, base.x - hw * 0.24, baseY - h + hh * 0.24,
                      Math.max(2, Math.round(hw * 0.12)), Math.max(1, Math.round(hh * 0.12)),
                      Math.max(1, Math.round(2 * z)), pal.bgSteelLight, pal.bgSteel, pal.bgSteelDark);
+        if (hw > 24) {
+          drawIsoBoxAt(ctx, base.x + hw * 0.20, baseY - h - hh * 0.08,
+                       Math.max(2, Math.round(hw * 0.10)), Math.max(1, Math.round(hh * 0.10)),
+                       Math.max(1, Math.round(2 * z)), pal.bgSteelLight, pal.bgSteel, pal.bgSteelDark);
+        }
       }
     }
     // 屋顶通风器 / 排气帽
@@ -1802,6 +1917,20 @@
       // 顶部人孔与呼吸阀
       ctx.fillStyle = pal.metalDark;
       ctx.fillRect(base.x - 1, baseY - h - 1, 2, 2);
+      if (rx >= 10) {
+        // 大型储罐补充顶缘防坠护栏立柱 + 盘梯平台线条，破除单调大色块
+        var railH = Math.max(2, Math.round(2.5 * z));
+        ctx.fillStyle = m.bg ? pal.bgSteelLight : pal.steelLight;
+        [-0.65, -0.22, 0.22, 0.65].forEach(function (rp) {
+          var rxp = base.x + Math.round(rx * rp);
+          var ryp = baseY - h + Math.round(ry * (1 - Math.abs(rp)) * 0.65);
+          ctx.fillRect(rxp, ryp - railH, 1, railH);
+        });
+        linePath(ctx, [{ x: base.x - Math.round(rx * 0.65), y: baseY - h + Math.round(ry * 0.22) - railH },
+                      { x: base.x, y: baseY - h + Math.round(ry * 0.65) - railH },
+                      { x: base.x + Math.round(rx * 0.65), y: baseY - h + Math.round(ry * 0.22) - railH }],
+                 1, m.bg ? pal.bgSteelLight : pal.steelLight);
+      }
     }
     // 爬梯 + 护笼
     if (m.ladder) {
@@ -2354,17 +2483,19 @@
                      Math.max(2, Math.round(4 * z)), Math.max(2, Math.round(3 * z)));
       }
     });
-    // 小旗 + 托盘编号牌
-    var poleX = base.x + Math.round(w / 2) - 1;
-    var poleH = Math.max(4, Math.round(9 * z));
-    ctx.fillStyle = pal.metalDark;
-    ctx.fillRect(poleX, baseY - h - poleH, 1, poleH);
-    ctx.fillStyle = pal.ok;
-    ctx.fillRect(poleX + 1, baseY - h - poleH, Math.max(2, Math.round(3 * z)),
-                 Math.max(1, Math.round(2 * z)));
+    // 托盘标牌；仅在今天已有产出但未装满一托盘时竖进行中角标（空托盘不立绿旗，满垛已插高旗）
     ctx.fillStyle = pal.paint;
     ctx.fillRect(base.x - hw + 1, baseY - h - Math.max(1, Math.round(2 * z)),
                  Math.max(2, Math.round(3 * z)), 1);
+    if (done > 0 && done < PALLET_SIZE) {
+      var poleX = base.x + Math.round(w / 2) - 1;
+      var poleH = Math.max(4, Math.round(7 * z));
+      ctx.fillStyle = pal.metalDark;
+      ctx.fillRect(poleX, baseY - h - poleH, 1, poleH);
+      ctx.fillStyle = pal.ok;
+      ctx.fillRect(poleX + 1, baseY - h - poleH, Math.max(2, Math.round(3 * z)),
+                   Math.max(1, Math.round(2 * z)));
+    }
   }
 
   function drawCrateModel(ctx, pal, m) {
@@ -2606,43 +2737,67 @@
 
   function drawSkyline(ctx, pal, skyH, W) {
     var rand = seeded(0x51C1E);
-    ctx.globalAlpha = S.night ? 0.45 : 0.38;
-    ctx.fillStyle = pal.bgHaze;
-    for (var i = 0; i < 16; i += 1) {
-      var x = Math.round(i * W / 15 + rand() * 10);
-      var w = Math.round(10 + rand() * 26);
-      var h = Math.round(5 + rand() * 14);
+    // 远层剪影：双曲冷却塔 / 细烟囱 / 输电铁塔，压进低空雾带
+    ctx.globalAlpha = S.night ? 0.56 : 0.44;
+    ctx.fillStyle = pal.bgSteelDark;
+    for (var i = 0; i < 18; i += 1) {
+      var x = Math.round(i * W / 17 + rand() * 8);
+      var w = Math.round(8 + rand() * 19);
+      var h = Math.round(5 + rand() * 11);
       var shape = rand();
-      if (shape > 0.8) {
+      if (shape > 0.78) {
         fillPoly(ctx, [
           { x: x, y: skyH }, { x: x + Math.round(w * 0.28), y: skyH - h },
           { x: x + Math.round(w * 0.72), y: skyH - h }, { x: x + w, y: skyH },
-        ], pal.bgHaze);
-      } else if (shape > 0.62) {
+        ], pal.bgSteelDark);
+      } else if (shape > 0.58) {
         fillPoly(ctx, [
-          { x: x, y: skyH - h }, { x: x + Math.round(w / 2), y: skyH - h - 5 },
+          { x: x, y: skyH - h }, { x: x + Math.round(w / 2), y: skyH - h - 4 },
           { x: x + w, y: skyH - h },
-        ], pal.bgHaze);
+        ], pal.bgSteelDark);
         ctx.fillRect(x, skyH - h, w, h);
       } else {
         ctx.fillRect(x, skyH - h, w, h);
       }
-      if (rand() > 0.55) ctx.fillRect(x + Math.round(w * 0.3), skyH - h - 7, 1, 7);
+      if (rand() > 0.48) {
+        ctx.fillRect(x + Math.round(w * 0.3), skyH - h - 7, 1, 7);
+        if (S.night && i % 4 === 0) {
+          ctx.fillStyle = pal.bad;
+          ctx.fillRect(x + Math.round(w * 0.3), skyH - h - 8, 1, 1);
+          ctx.fillStyle = pal.bgSteelDark;
+        }
+      }
     }
-    ctx.globalAlpha = S.night ? 0.6 : 0.5;
+    // 近层工业剪影：锯齿厂房 / 球罐 / 吊机斜臂 + 管桥 + 夜灯窗格
+    ctx.globalAlpha = S.night ? 0.72 : 0.56;
     ctx.fillStyle = pal.bgSteel;
-    for (var j = 0; j < 10; j += 1) {
-      var x2 = Math.round(j * W / 9 + rand() * 16);
-      var w2 = Math.round(14 + rand() * 34);
-      var h2 = Math.round(8 + rand() * 20);
+    for (var j = 0; j < 11; j += 1) {
+      var x2 = Math.round(j * W / 10 + rand() * 14);
+      var w2 = Math.round(13 + rand() * 26);
+      var h2 = Math.round(6 + rand() * 14);
       ctx.fillRect(x2, skyH - h2, w2, h2);
-      if (rand() > 0.55) {
-        fillOval(ctx, x2 + Math.round(w2 * 0.68), skyH - h2 - 3,
-                 Math.round(w2 * 0.16), 3, pal.bgRust);
+      ctx.fillStyle = pal.bgSteelDark;
+      ctx.fillRect(x2 + Math.round(w2 * 0.62), skyH - h2, Math.max(1, Math.round(w2 * 0.38)), h2);
+      ctx.fillStyle = pal.bgSteel;
+      var kind2 = j % 4;
+      if (kind2 === 0) {
+        linePath(ctx, [{ x: x2 + 2, y: skyH - h2 }, { x: x2 + 2, y: skyH - h2 - 8 }], 1, pal.bgSteelDark);
+        linePath(ctx, [{ x: x2 - 4, y: skyH - h2 - 7 }, { x: x2 + 10, y: skyH - h2 - 10 }], 1, pal.bgSteelDark);
+      } else if (kind2 === 2) {
+        fillOval(ctx, x2 + Math.round(w2 * 0.7), skyH - h2 - 3,
+                 Math.max(3, Math.round(w2 * 0.16)), 3, pal.bgRust);
+      } else if (kind2 === 3) {
+        fillPoly(ctx, [
+          { x: x2, y: skyH - h2 }, { x: x2 + Math.round(w2 * 0.5), y: skyH - h2 - 3 },
+          { x: x2 + w2, y: skyH - h2 },
+        ], pal.bgSteelDark);
       }
       if (S.night) {
         ctx.fillStyle = pal.window;
-        for (var k = 0; k < 3; k += 1) ctx.fillRect(x2 + 4 + k * 6, skyH - h2 + 4, 1, 1);
+        for (var k = 0; k < 4; k += 1) {
+          if (k * 6 + 6 >= w2) break;
+          ctx.fillRect(x2 + 3 + k * 6, skyH - h2 + 4, 2, 1);
+        }
         ctx.fillStyle = pal.bgSteel;
       }
     }
@@ -2689,6 +2844,319 @@
     }
     linePath(ctx, [{ x: p.x - hw, y: baseY }, { x: p.x, y: baseY + hh }], 1, pal.steelLight);
     linePath(ctx, [{ x: p.x, y: baseY + hh }, { x: p.x + hw, y: baseY }], 1, pal.steelLight);
+  }
+
+  function drawArchHangarModel(ctx, pal, m) {
+    var z = S.cam.zoom;
+    var p = viewPoint(m.x, m.y);
+    var baseY = p.y - Math.round((m.z0 || 0) * z);
+    var hw = Math.max(8, Math.round((m.hw || 34) * z));
+    var hh = Math.max(4, Math.round((m.hh || 16) * z));
+    var h = Math.max(5, Math.round((m.h || 14) * z));
+    var wallH = Math.max(3, Math.round(h * 0.55));
+    var rise = Math.max(5, Math.round((m.rise || 11) * z));
+    var cols = roleCols(pal, m.role || "steel", m.bg);
+    var frame = m.bg ? pal.bgSteelDark : pal.panelLine;
+    // 矮侧墙基础
+    drawIsoBoxAt(ctx, p.x, baseY, hw, hh, wallH, cols.top, cols.left, cols.right);
+    linePath(ctx, [{ x: p.x - hw, y: baseY - 1 }, { x: p.x, y: baseY + hh - 1 },
+                  { x: p.x + hw, y: baseY - 1 }], 1, m.bg ? pal.bgSteelDark : pal.stoneDark);
+    // 真正贴合等距双轴的筒形拱顶：从西角→南角画拱弧，沿西角→北角脊轴拉伸
+    var ty = baseY - wallH;
+    var segs = 8;
+    function frontPt(a, lift) {
+      return { x: Math.round(p.x - hw + hw * a), y: Math.round(ty + hh * a - lift) };
+    }
+    function backPt(a, lift) {
+      return { x: Math.round(p.x + hw * a), y: Math.round(ty - hh + hh * a - lift) };
+    }
+    var archFront = [];
+    for (var i = 0; i <= segs; i += 1) {
+      var a = i / segs;
+      archFront.push(frontPt(a, Math.round(rise * Math.sin(a * Math.PI))));
+    }
+    // 先铺拱顶筒面各弧段（由暗到亮平滑着面，无直角突角）
+    for (var s = 0; s < segs; s += 1) {
+      var a0 = s / segs, a1 = (s + 1) / segs;
+      var l0 = Math.round(rise * Math.sin(a0 * Math.PI));
+      var l1 = Math.round(rise * Math.sin(a1 * Math.PI));
+      var midA = (a0 + a1) * 0.5;
+      var stripCol = midA < 0.45 ? cols.top : (midA < 0.72 ? cols.left : cols.right);
+      if (Math.abs(midA - 0.5) < 0.14) stripCol = m.bg ? pal.bgSteelLight : pal.glassGlow;
+      fillPoly(ctx, [frontPt(a0, l0), frontPt(a1, l1), backPt(a1, l1), backPt(a0, l0)], stripCol);
+    }
+    // 筒顶加强肋线
+    for (var rb = 1; rb < 4; rb += 1) {
+      var u = rb / 4;
+      var ribPts = [];
+      for (var rs = 0; rs <= segs; rs += 2) {
+        var ra = rs / segs;
+        var rl = Math.round(rise * Math.sin(ra * Math.PI));
+        var fp = frontPt(ra, rl), bp = backPt(ra, rl);
+        ribPts.push({ x: Math.round(fp.x + (bp.x - fp.x) * u), y: Math.round(fp.y + (bp.y - fp.y) * u) });
+      }
+      linePath(ctx, ribPts, 1, frame);
+    }
+    // 左前山墙拱面（把拱端封闭并与墙面统一）+ 外轮廓压边
+    fillPoly(ctx, archFront, cols.left);
+    linePath(ctx, archFront, 1, frame);
+    linePath(ctx, [frontPt(0.5, rise), backPt(0.5, rise)], 1,
+             m.bg ? pal.bgSteelLight : pal.glassGlow);
+    if (S.night) {
+      ctx.globalAlpha = 0.25;
+      linePath(ctx, [frontPt(0.45, Math.round(rise * 0.99)),
+                    backPt(0.45, Math.round(rise * 0.99))], 1, pal.window);
+      ctx.globalAlpha = 1;
+    }
+    // 机库卷帘大门（开在左前山墙底端中心）
+    if (m.door !== false && wallH >= 3) {
+      var dw = Math.max(3, Math.round(hw * 0.24));
+      var dh = Math.max(3, Math.round((wallH + rise * 0.42) * 0.72));
+      var dx = p.x - Math.round(hw * 0.46);
+      var dy = baseY + Math.round(hh * 0.44);
+      ctx.fillStyle = frame;
+      ctx.fillRect(dx - dw, dy - dh, dw * 2, dh);
+      ctx.fillStyle = m.bg ? pal.bgSteelDark : pal.steelDark;
+      ctx.fillRect(dx - dw + 1, dy - dh + 1, Math.max(1, dw * 2 - 2), Math.max(1, dh - 2));
+      ctx.fillStyle = pal.paint;
+      ctx.fillRect(dx - dw, dy - dh, dw * 2, 1);
+      if (S.night) {
+        ctx.fillStyle = pal.window;
+        ctx.fillRect(dx - 1, dy - dh - 1, 2, 1);
+      }
+    }
+  }
+
+  function drawSphereTankModel(ctx, pal, m) {
+    var z = S.cam.zoom;
+    var p = viewPoint(m.x, m.y);
+    var baseY = p.y - Math.round((m.z0 || 0) * z);
+    var r = Math.max(5, Math.round((m.r || 12) * z));
+    var legs = Math.max(4, Math.round((m.h || 10) * z * 0.45));
+    var cols = roleCols(pal, m.role || "steel", m.bg);
+    var cy = baseY - legs - Math.round(r * 0.88);
+    // 混凝土台基 + 支撑管柱（4 根斜柱 + 水平拉环）
+    fillDiamond(ctx, p.x, baseY - 1, Math.round(r * 1.1), Math.max(2, Math.round(r * 0.55)),
+                m.bg ? pal.bgSteelDark : pal.stone);
+    var legCol = m.bg ? pal.panelLine : pal.metalDark;
+    [-0.78, -0.30, 0.30, 0.78].forEach(function (lx) {
+      linePath(ctx, [{ x: p.x + Math.round(r * lx), y: baseY },
+                    { x: p.x + Math.round(r * lx * 0.75), y: cy + Math.round(r * 0.55) }],
+               Math.max(1, Math.round(1.4 * z)), legCol);
+    });
+    linePath(ctx, [{ x: p.x - Math.round(r * 0.70), y: baseY - Math.round(legs * 0.5) },
+                  { x: p.x + Math.round(r * 0.70), y: baseY - Math.round(legs * 0.5) }], 1, legCol);
+    // 外轮廓描边（保证白天高沙背景下球形轮廓仍然利落）
+    ctx.globalAlpha = m.bg ? 0.55 : 0.82;
+    fillOval(ctx, p.x, cy, r + 1, Math.round(r * 0.96) + 1, m.bg ? pal.bgSteelDark : pal.panelLine);
+    ctx.globalAlpha = 1;
+    // 球体：底阴影 + 主球 + 左上高光区 + 赤道焊缝带
+    fillOval(ctx, p.x, cy, r, Math.round(r * 0.96), cols.right);
+    fillOval(ctx, p.x - Math.max(1, Math.round(r * 0.14)), cy - Math.max(1, Math.round(r * 0.14)),
+             Math.max(2, Math.round(r * 0.84)), Math.max(2, Math.round(r * 0.80)), cols.left);
+    fillOval(ctx, p.x - Math.max(1, Math.round(r * 0.28)), cy - Math.max(1, Math.round(r * 0.28)),
+             Math.max(1, Math.round(r * 0.45)), Math.max(1, Math.round(r * 0.40)), cols.top);
+    linePath(ctx, [{ x: p.x - r + 1, y: cy }, { x: p.x, y: cy + Math.max(2, Math.round(r * 0.34)) },
+                  { x: p.x + r - 1, y: cy }], 1, m.bg ? pal.bgSteelLight : pal.metalLight);
+    // 顶部操作平台 + 障碍红灯 + 底部出料短管
+    var topY = cy - Math.round(r * 0.96);
+    ctx.fillStyle = m.bg ? pal.bgSteelLight : pal.metalLight;
+    ctx.fillRect(p.x - Math.max(2, Math.round(r * 0.35)), topY - 2,
+                 Math.max(4, Math.round(r * 0.7)), 2);
+    if (S.night) {
+      ctx.fillStyle = pal.bad;
+      ctx.fillRect(p.x, topY - 3, 2, 1);
+    }
+    linePath(ctx, [{ x: p.x, y: cy + Math.round(r * 0.82) }, { x: p.x, y: baseY }],
+             Math.max(1, Math.round(1.5 * z)), cols.right);
+  }
+
+  function drawBridgeCraneModel(ctx, pal, m) {
+    var z = S.cam.zoom;
+    var p = viewPoint(m.x, m.y);
+    var baseY = p.y - Math.round((m.z0 || 0) * z);
+    var hw = Math.max(12, Math.round((m.hw || 28) * z));
+    var hh = Math.max(3, Math.round((m.hh || 8) * z));
+    var h = Math.max(12, Math.round((m.h || 24) * z));
+    var legCol = m.bg ? pal.steelDark : pal.metalDark;
+    var beamCol = m.bg ? pal.rust : pal.paint;
+    var beamTop = m.bg ? pal.rustLight : pal.paintLight;
+    // A 字支撑腿（左 / 右两对）
+    [-1, 1].forEach(function (side) {
+      var lx = p.x + side * Math.round(hw * 0.78);
+      linePath(ctx, [{ x: lx - Math.max(2, Math.round(4 * z)), y: baseY + hh },
+                    { x: lx, y: baseY - h }], Math.max(1, Math.round(1.8 * z)), legCol);
+      linePath(ctx, [{ x: lx + Math.max(2, Math.round(4 * z)), y: baseY - hh },
+                    { x: lx, y: baseY - h }], Math.max(1, Math.round(1.8 * z)), legCol);
+    });
+    // 主横梁（工程橘/黄大梁 + 桁架斜撑 + 端梁压块）
+    var girderY = baseY - h;
+    var girderH = Math.max(3, Math.round(4 * z));
+    ctx.fillStyle = beamCol;
+    ctx.fillRect(p.x - hw, girderY - girderH + 1, hw * 2, girderH);
+    ctx.fillStyle = beamTop;
+    ctx.fillRect(p.x - hw, girderY - girderH, hw * 2, 1);
+    ctx.fillStyle = pal.panelLine;
+    for (var tr = -hw + 4; tr < hw - 2; tr += Math.max(4, Math.round(6 * z))) {
+      ctx.fillRect(p.x + tr, girderY - girderH + 2, 1, Math.max(1, girderH - 2));
+    }
+    ctx.fillStyle = pal.ink;
+    ctx.fillRect(p.x - hw, girderY - 1, Math.max(2, Math.round(4 * z)), 2);
+    ctx.fillRect(p.x + hw - Math.max(2, Math.round(4 * z)), girderY - 1,
+                 Math.max(2, Math.round(4 * z)), 2);
+    // 滑行小车与悬吊集装箱
+    var sway = S.reduced ? 0 : Math.round(Math.sin(S.ticks * 0.03) * hw * 0.25);
+    var tx = p.x + sway;
+    ctx.fillStyle = m.bg ? pal.steelDark : pal.glassDark;
+    ctx.fillRect(tx - Math.max(2, Math.round(4 * z)), girderY + 1,
+                 Math.max(4, Math.round(8 * z)), Math.max(2, Math.round(3 * z)));
+    var hookY = baseY - Math.round(h * 0.42);
+    linePath(ctx, [{ x: tx, y: girderY + 3 }, { x: tx, y: hookY }], 1, legCol);
+    drawIsoBoxAt(ctx, tx, hookY + Math.max(3, Math.round(5 * z)),
+                 Math.max(2, Math.round(5 * z)), Math.max(1, Math.round(2.5 * z)),
+                 Math.max(2, Math.round(4 * z)),
+                 m.bg ? pal.rustLight : pal.rustLight,
+                 m.bg ? pal.rust : pal.rust, m.bg ? pal.rustDark : pal.rustDark);
+    if (S.night) {
+      ctx.fillStyle = pal.window;
+      ctx.fillRect(tx - 1, girderY + 2, 2, 1);
+    }
+  }
+
+  function drawSolarArrayModel(ctx, pal, m) {
+    var z = S.cam.zoom;
+    var p = viewPoint(m.x, m.y);
+    var baseY = p.y - Math.round((m.z0 || 0) * z);
+    var hw = Math.max(8, Math.round((m.hw || 18) * z));
+    var hh = Math.max(4, Math.round((m.hh || 9) * z));
+    var rows = Math.max(2, Math.min(4, m.rows || 3));
+    var rackCol = m.bg ? pal.bgSteelDark : pal.metalDark;
+    var cellCol = pal.glassDark;
+    var busCol = pal.glass;
+    var sheen = m.bg ? pal.glassLight : pal.glassGlow;
+    for (var ri = 0; ri < rows; ri += 1) {
+      var ry = baseY - hh + Math.round((ri / Math.max(1, rows - 1)) * hh * 1.6);
+      var rx = p.x + (ri % 2 ? 1 : -1) * Math.round(hw * 0.08);
+      var pw = Math.max(6, Math.round(hw * 0.78));
+      var ph = Math.max(2, Math.round(3.5 * z));
+      ctx.fillStyle = rackCol;
+      ctx.fillRect(rx - Math.round(pw * 0.6), ry - ph, 1, ph);
+      ctx.fillRect(rx + Math.round(pw * 0.6), ry - ph, 1, ph);
+      var quad = [
+        { x: rx - pw, y: ry - ph },
+        { x: rx + Math.round(pw * 0.75), y: ry - ph - Math.max(1, Math.round(hh * 0.36)) },
+        { x: rx + pw, y: ry - Math.max(1, Math.round(ph * 0.4)) },
+        { x: rx - Math.round(pw * 0.75), y: ry + Math.max(1, Math.round(hh * 0.20)) },
+      ];
+      fillPoly(ctx, quad, cellCol);
+      // 晶体硅分格线 + 金属上框反光
+      linePath(ctx, [{ x: rx - Math.round(pw * 0.2), y: ry - Math.round(ph * 0.65) },
+                    { x: rx + Math.round(pw * 0.2), y: ry - Math.round(ph * 0.25) }], 1, busCol);
+      linePath(ctx, [quad[0], quad[1]], 1, sheen);
+    }
+    // 逆变器小柜 + 夜里绿状态灯
+    var invX = p.x + hw - Math.max(2, Math.round(3 * z));
+    drawIsoBoxAt(ctx, invX, baseY + 1, Math.max(2, Math.round(3 * z)),
+                 Math.max(1, Math.round(1.5 * z)), Math.max(2, Math.round(4 * z)),
+                 pal.concreteLight, pal.concrete, pal.concreteDark);
+    if (S.night) {
+      ctx.fillStyle = pal.ok;
+      ctx.fillRect(invX, baseY - Math.max(1, Math.round(2 * z)), 1, 1);
+    }
+  }
+
+  function drawCommTowerModel(ctx, pal, m) {
+    var z = S.cam.zoom;
+    var p = viewPoint(m.x, m.y);
+    var baseY = p.y - Math.round((m.z0 || 0) * z);
+    var r = Math.max(4, Math.round((m.r || 7) * z));
+    var h = Math.max(16, Math.round((m.h || 38) * z));
+    var steelD = m.bg ? pal.steelDark : pal.metalDark;
+    var steelL = m.bg ? pal.bgSteelLight : pal.steelLight;
+    // 机房小箱底座
+    drawIsoBoxAt(ctx, p.x - Math.round(r * 0.7), baseY, Math.max(3, Math.round(5 * z)),
+                 Math.max(2, Math.round(2.5 * z)), Math.max(3, Math.round(5 * z)),
+                 pal.concreteLight, pal.concrete, pal.concreteDark);
+    // 收拢四柱铁塔 + X 交叉腹杆
+    var topY = baseY - h;
+    var topR = Math.max(1, Math.round(r * 0.25));
+    linePath(ctx, [{ x: p.x - r, y: baseY }, { x: p.x - topR, y: topY }], 1, steelD);
+    linePath(ctx, [{ x: p.x + r, y: baseY }, { x: p.x + topR, y: topY }], 1, steelL);
+    for (var b = 0; b < 4; b += 1) {
+      var t0 = b / 4, t1 = (b + 1) / 4;
+      var y0 = baseY - Math.round(h * t0), y1 = baseY - Math.round(h * t1);
+      var w0 = r - (r - topR) * t0, w1 = r - (r - topR) * t1;
+      linePath(ctx, [{ x: p.x - w0, y: y0 }, { x: p.x + w1, y: y1 }], 1, steelD);
+      linePath(ctx, [{ x: p.x + w0, y: y0 }, { x: p.x - w1, y: y1 }], 1, steelL);
+      linePath(ctx, [{ x: p.x - w1, y: y1 }, { x: p.x + w1, y: y1 }], 1, steelL);
+    }
+    // 抛物面微波锅 + 塔尖避雷针与夜航灯
+    var dishY = baseY - Math.round(h * 0.74);
+    fillOval(ctx, p.x + topR + Math.max(2, Math.round(2.5 * z)), dishY,
+             Math.max(2, Math.round(3.5 * z)), Math.max(2, Math.round(3.5 * z)), steelL);
+    fillOval(ctx, p.x + topR + Math.max(2, Math.round(3 * z)), dishY,
+             Math.max(1, Math.round(2 * z)), Math.max(1, Math.round(2 * z)), pal.glassGlow);
+    linePath(ctx, [{ x: p.x, y: topY }, { x: p.x, y: topY - Math.max(4, Math.round(7 * z)) }], 1, steelL);
+    var tipY = topY - Math.max(4, Math.round(7 * z));
+    var blink = S.reduced || ((S.ticks >> 4) % 2 === 0);
+    if (S.night || blink) {
+      ctx.fillStyle = pal.bad;
+      ctx.fillRect(p.x - 1, tipY - 1, 2, 2);
+      if (S.night) {
+        ctx.globalAlpha = blink ? 0.35 : 0.14;
+        fillOval(ctx, p.x, tipY, Math.max(3, Math.round(5 * z)), Math.max(2, Math.round(3 * z)), pal.bad);
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+
+  function drawWindTurbineModel(ctx, pal, m) {
+    var z = S.cam.zoom;
+    var p = viewPoint(m.x, m.y);
+    var baseY = p.y - Math.round((m.z0 || 0) * z);
+    var h = Math.max(18, Math.round((m.h || 42) * z));
+    var r = Math.max(2, Math.round((m.r || 4) * z));
+    var colL = m.bg ? pal.bgSteelLight : pal.steelLight;
+    var colM = m.bg ? pal.bgSteel : pal.steel;
+    var colD = m.bg ? pal.steelDark : pal.steelDark;
+    fillDiamond(ctx, p.x, baseY, Math.max(3, Math.round(r * 1.4)),
+                Math.max(2, Math.round(r * 0.7)), m.bg ? pal.bgSteelDark : pal.concrete);
+    // 锥形风电塔筒
+    var topY = baseY - h;
+    var topR = Math.max(1, Math.round(r * 0.45));
+    fillPoly(ctx, [
+      { x: p.x - r, y: baseY }, { x: p.x - topR, y: topY },
+      { x: p.x, y: topY }, { x: p.x, y: baseY },
+    ], colL);
+    fillPoly(ctx, [
+      { x: p.x, y: baseY }, { x: p.x, y: topY },
+      { x: p.x + topR, y: topY }, { x: p.x + r, y: baseY },
+    ], colD);
+    // 机舱与轮毂
+    var nw = Math.max(3, Math.round(5 * z));
+    var nh = Math.max(2, Math.round(3 * z));
+    ctx.fillStyle = colM;
+    ctx.fillRect(p.x - Math.round(nw * 0.3), topY - nh, nw, nh);
+    ctx.fillStyle = colL;
+    ctx.fillRect(p.x - Math.round(nw * 0.3), topY - nh, nw, 1);
+    var hubX = p.x - Math.round(nw * 0.3);
+    var hubY = topY - Math.round(nh * 0.5);
+    // 三片缓缓转动的风叶（暗缘描脊确保昼间远沙前景仍清晰）
+    var bladeLen = Math.max(8, Math.round(h * 0.44));
+    var baseAng = (m.phase || 0) + (S.reduced ? 0.35 : S.ticks * 0.045);
+    for (var bi = 0; bi < 3; bi += 1) {
+      var ang = baseAng + (bi * Math.PI * 2) / 3;
+      var tipX = Math.round(hubX + Math.cos(ang) * bladeLen * 0.78);
+      var tipY = Math.round(hubY + Math.sin(ang) * bladeLen);
+      linePath(ctx, [{ x: hubX, y: hubY }, { x: tipX, y: tipY }],
+               Math.max(1, Math.round(z)), bi === 0 ? colL : colD);
+    }
+    ctx.fillStyle = colL;
+    ctx.fillRect(hubX - 1, hubY - 1, 2, 2);
+    if (S.night) {
+      ctx.fillStyle = pal.bad;
+      ctx.fillRect(p.x + Math.round(nw * 0.5), topY - nh - 1, 1, 1);
+    }
   }
 
   function drawCoolingTowerModel(ctx, pal, m) {
@@ -3719,8 +4187,9 @@
     if (kind === "clear" || kind === "unknown") return;
     var W = S.bufW, H = S.bufH;
     if (kind !== "fog") {
-      ctx.globalAlpha = kind === "thunder" ? 0.20 : (kind === "snow" ? 0.07 : 0.13);
-      ctx.fillStyle = S.night ? "rgba(8, 16, 24, 1)" : "rgba(56, 64, 74, 1)";
+      ctx.globalAlpha = kind === "thunder" ? 0.22 : (kind === "snow" ? 0.10 : 0.15);
+      ctx.fillStyle = S.night ? "rgba(8, 16, 24, 1)"
+        : (kind === "snow" ? "rgba(218, 228, 242, 1)" : "rgba(56, 64, 74, 1)");
       ctx.fillRect(0, 0, W, H);
       ctx.globalAlpha = 1;
     }
@@ -3745,16 +4214,29 @@
     if (S.reduced) return;
     var W = S.bufW, H = S.bufH;
     var drizzle = kind === "drizzle";
-    var count = drizzle ? 70 : 132;
+    var count = drizzle ? 85 : 150;
     ctx.fillStyle = S.night ? pal.glassLight : pal.glassGlow;
     for (var i = 0; i < count; i += 1) {
       var seed = i * 97 + 13;
-      var x = (seed * 7 + S.ticks * (drizzle ? 1.1 : 2.4)) % W;
-      var y = (seed * 31 + S.ticks * (drizzle ? 3 : 7) + (i % 5) * 17) % H;
-      ctx.globalAlpha = 0.14 + (i % 4) * 0.055;
-      ctx.fillRect(Math.round(x), Math.round(y), 1, drizzle ? 2 : 4);
+      var x = (seed * 7 + S.ticks * (drizzle ? 1.2 : 2.6)) % W;
+      var y = (seed * 31 + S.ticks * (drizzle ? 3.2 : 7.5) + (i % 5) * 17) % H;
+      ctx.globalAlpha = 0.20 + (i % 4) * 0.07;
+      var rx = Math.round(x), ry = Math.round(y);
+      ctx.fillRect(rx, ry, 1, drizzle ? 3 : 4);
       if (!drizzle) {
-        ctx.fillRect(Math.round(x) + 1, Math.round(y) + 4, 1, 1);
+        ctx.fillRect(rx + 1, ry + 4, 1, 3);
+      }
+    }
+    // 地面水花涟漪（中大雨与雷雨）
+    if (!drizzle) {
+      var skyH = sceneHorizon();
+      for (var sp = 0; sp < 14; sp += 1) {
+        var age = (S.ticks + sp * 9) % 18;
+        if (age > 9) continue;
+        var sx = ((sp * 173 + Math.floor((S.ticks + sp * 9) / 18) * 61) % Math.max(1, W - 20)) + 10;
+        var sy = skyH + 14 + ((sp * 89 + Math.floor((S.ticks + sp * 9) / 18) * 37) % Math.max(1, H - skyH - 22));
+        ctx.globalAlpha = Math.max(0.05, 0.28 - age * 0.025);
+        fillOval(ctx, sx, sy, Math.max(1, Math.round(age * 0.45)), 1, pal.glassLight);
       }
     }
     ctx.globalAlpha = 1;
@@ -3763,14 +4245,20 @@
   function drawSnow(ctx, pal) {
     if (S.reduced) return;
     var W = S.bufW, H = S.bufH;
-    ctx.fillStyle = S.night ? pal.glassLight : "#f4f7fb";
-    for (var i = 0; i < 84; i += 1) {
-      var drift = Math.sin(S.ticks * 0.045 + i * 0.7) * 9;
-      var x = (i * 113 + drift + 23) % W;
-      var y = (i * 47 + S.ticks * 1.7) % H;
-      ctx.globalAlpha = 0.30 + (i % 3) * 0.16;
-      var size = (i % 2) + 1;
-      ctx.fillRect(Math.round(x), Math.round(y), size, size);
+    ctx.fillStyle = S.night ? pal.glassLight : "#ffffff";
+    for (var i = 0; i < 110; i += 1) {
+      var drift = Math.sin(S.ticks * 0.045 + i * 0.7) * 11;
+      var x = (i * 113 + drift + 23 + W) % W;
+      var y = (i * 47 + S.ticks * (1.4 + (i % 3) * 0.3)) % H;
+      ctx.globalAlpha = 0.45 + (i % 3) * 0.16;
+      var sx = Math.round(x), sy = Math.round(y);
+      var size = (i % 3 === 0) ? 2 : 1;
+      ctx.fillRect(sx, sy, size, size);
+      if (i % 7 === 0) {
+        ctx.globalAlpha *= 0.6;
+        ctx.fillRect(sx - 1, sy, 1, 1);
+        ctx.fillRect(sx + size, sy, 1, 1);
+      }
     }
     ctx.globalAlpha = 1;
   }
@@ -3814,5 +4302,8 @@
   FX.drawCoalShedModel = drawCoalShedModel; FX.drawSiloBatteryModel = drawSiloBatteryModel;
   FX.drawGasholderModel = drawGasholderModel; FX.drawBasinModel = drawBasinModel;
   FX.drawLoadingRackModel = drawLoadingRackModel; FX.drawFlareModel = drawFlareModel;
+  FX.drawArchHangarModel = drawArchHangarModel; FX.drawSphereTankModel = drawSphereTankModel;
+  FX.drawBridgeCraneModel = drawBridgeCraneModel; FX.drawSolarArrayModel = drawSolarArrayModel;
+  FX.drawCommTowerModel = drawCommTowerModel; FX.drawWindTurbineModel = drawWindTurbineModel;
   FX.daylightFactor = daylightFactor;   // 昼光系数（panel 探针行为断言用）
 })();

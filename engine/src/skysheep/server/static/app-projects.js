@@ -172,6 +172,7 @@ function resetProjectPanels() {
   if (memText) memText.value = "";
   const memStatus = document.getElementById("memory-status");
   if (memStatus) memStatus.textContent = "";
+  if (typeof resetMemoryMapForProject === "function") resetMemoryMapForProject();
   loadTasks._snap = null; // 切项目后强制任务面板下一轮重绘一次
   const reviewDiff = document.getElementById("review-diff");
   if (reviewDiff) reviewDiff.classList.add("hidden");

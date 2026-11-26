@@ -23,17 +23,36 @@
       renderAll = FX.renderAll, renderAttentionNotice = FX.renderAttentionNotice,
       renderPanel = FX.renderPanel, renderWeatherChip = FX.renderWeatherChip,
       runElapsed = FX.runElapsed, scheduleResync = FX.scheduleResync,
-      lineKeyFor = FX.lineKeyFor,
+      lineKeyFor = FX.lineKeyFor, startDemoRun = FX.startDemoRun,
       fmtCountdown = FX.fmtCountdown, refreshUpcoming = FX.refreshUpcoming;
 
-  // ---------- 抽屉 ----------
-  /** 被拦工具的快照（后端存 JSON；旧行 / 坏数据回落原文），给抽屉一句人话。 */
+  /** 本地自然日判定（与 draw 层解耦，避免加载顺序依赖）。 */
+  function isTodayTs(ts) {
+    if (!ts) return false;
+    var d = new Date(Number(ts) * 1000);
+    var n = new Date();
+    return d.getFullYear() === n.getFullYear() &&
+      d.getMonth() === n.getMonth() && d.getDate() === n.getDate();
+  }
+
+  /** 被拦工具的快照（支持对象 {tool:N} 与数组 [{tool,count}]/["tool"]；坏数据回落原文）。 */
   function deniedToolsText(run) {
     var raw = String((run && run.denied_tools) || "");
     if (!raw) return "";
     try {
       var obj = JSON.parse(raw);
-      if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+      if (Array.isArray(obj)) {
+        var listParts = obj.map(function (item) {
+          if (typeof item === "string" && item) return item;
+          if (item && typeof item === "object" && item.tool) {
+            var cnt = Number(item.count || 0);
+            return cnt > 0 ? (item.tool + " ×" + cnt) : String(item.tool);
+          }
+          return "";
+        }).filter(Boolean);
+        return listParts.join(" / ");
+      }
+      if (obj && typeof obj === "object") {
         return Object.keys(obj).map(function (name) {
           return name + " ×" + Number(obj[name] || 0);
         }).join(" / ");
@@ -299,6 +318,10 @@
 
   /** 点「去补预授权」：先算一遍（dry_run），结果回来再重画抽屉。 */
   function startGrant(line) {
+    if (S.demo) {
+      addNotice("样板厂为演示数据，切回真实厂区后可调整预授权");
+      return;
+    }
     var h = line.health || {};
     // 只补「还没在名单里」的那些：已授权的不必再提交一遍
     var names = Object.keys(h.pending_tools || h.denied_tools || {});
@@ -435,6 +458,10 @@
    *  不是起点，和文章里「批红」的位置一样。
    */
   async function delegateToAgent(line, rec, btn) {
+    if (S.demo) {
+      addNotice("样板厂为演示数据，切回真实厂区后可交给 Agent 诊断");
+      return;
+    }
     if (btn) { btn.disabled = true; btn.textContent = "准备中…"; }
     var params = { limit: 5 };
     if (line.kind === "pipeline") params.pipeline_id = line.id;
@@ -586,6 +613,10 @@
     if (!dom.drawer) return;
     var pipeBtn = dom.drawer.querySelector("[data-view-pipeline]");
     if (pipeBtn) pipeBtn.onclick = function () {
+      if (S.demo) {
+        addNotice("样板厂为演示数据，切回真实厂区后可查看编排");
+        return;
+      }
       closeDrawer();
       openPipelineFor(run.project_id, run.pipeline_id, run.task_id);
     };
@@ -602,6 +633,10 @@
     var editBtn = dom.drawer.querySelector("[data-edit-task]");
     if (editBtn) {
       editBtn.onclick = function () {
+        if (S.demo) {
+          addNotice("样板厂为演示数据，切回真实厂区后可编辑任务");
+          return;
+        }
         closeDrawer();
         if (typeof openAutomationFor === "function") {
           openAutomationFor(Number(editBtn.dataset.editProject),
@@ -762,12 +797,20 @@
       cancelBtn.onclick = function () { cancelRun(line.id, line.name, cancelBtn); };
     }
     var goEdit = function () {
+      if (S.demo) {
+        addNotice("样板厂为演示数据，切回真实厂区后可编辑产线");
+        return;
+      }
       closeDrawer();
       if (typeof openAutomationFor === "function") {
         openAutomationFor(rec.project.id, line.id);
       }
     };
     var goPipeline = function () {
+      if (S.demo) {
+        addNotice("样板厂为演示数据，切回真实厂区后可查看编排");
+        return;
+      }
       closeDrawer();
       openPipelineFor(rec.project.id, line.id);
     };
@@ -804,48 +847,60 @@
   function nodeStatusText(s) {
     return {
       blocked: "等待依赖", ready: "待运行", running: "运行中",
-      done: "已完成", error: "失败", cancelled: "已取消", skipped: "已跳过",
+      done: "已完成", failed: "失败", error: "失败", cancelled: "已取消", skipped: "已跳过",
     }[s] || s || "—";
   }
 
   function loadLineRuns(line) {
     var box = dom.drawer && dom.drawer.querySelector("#fx-line-runs");
     if (!box) return;
+    if (S.demo) {
+      var demoRows = ((S.demo && S.demo.runs) || []).filter(function (x) {
+        return line.kind === "pipeline"
+          ? Number(x.pipeline_id) === Number(line.id)
+          : (x.kind === "cron" && Number(x.task_id) === Number(line.id));
+      }).slice(0, 20);
+      renderLineRunsList(box, demoRows);
+      return;
+    }
     var params = { limit: 20 };
     if (line.kind === "pipeline") params.pipeline_id = line.id;
     else { params.task_id = line.id; params.kind = "cron"; }
     request("factory.runs", params).then(function (r) {
       var host = dom.drawer && dom.drawer.querySelector("#fx-line-runs");
       if (!host || host !== box) return;
-      var rows = (r && r.runs) || [];
-      rows.forEach(function (x) { S.runCache.set(x.id, x); });
-      if (!rows.length) {
-        host.innerHTML = '<div class="fx-run-empty">还没有运行记录</div>';
-        return;
-      }
-      host.innerHTML = rows.map(function (x) {
-        // 状态与「做成」是两件事：跑完但被门控拦过（partial）在列表里不能写成
-        // 「已完成」，否则处置条说「缺预授权」、下面六行全说「已完成」，自相矛盾
-        var stText = RUN_STATUS[x.status] || x.status;
-        var warn = "";
-        if (x.status === "done" && x.outcome === "partial") {
-          stText = "跑完  被拦";
-          warn = " warn";
-        } else if (x.status === "done" && x.outcome === "failed") {
-          stText = "跑完  不算";
-          warn = " bad";
-        }
-        return '<button class="fx-run-row" data-run-id="' + escapeHtml(String(x.id)) + '">' +
-          '<span class="fx-run-name">#' + escapeHtml(String(x.id)) + "  " + escapeHtml(x.name || "") + "</span>" +
-          '<span class="fx-run-meta' + warn + '">' + escapeHtml(stText) + "  " +
-          escapeHtml(fmtDurationShort(x)) + "</span></button>";
-      }).join("");
-      host.querySelectorAll("[data-run-id]").forEach(function (b) {
-        b.onclick = function () { openRunDrawer(Number(b.dataset.runId)); };
-      });
+      renderLineRunsList(host, (r && r.runs) || []);
     }).catch(function (e) {
       var host = dom.drawer && dom.drawer.querySelector("#fx-line-runs");
       if (host && host === box) host.innerHTML = '<div class="fx-run-empty">读取失败：' + escapeHtml(e.message || "") + "</div>";
+    });
+  }
+
+  function renderLineRunsList(host, rows) {
+    rows.forEach(function (x) { S.runCache.set(x.id, x); });
+    if (!rows.length) {
+      host.innerHTML = '<div class="fx-run-empty">还没有运行记录</div>';
+      return;
+    }
+    host.innerHTML = rows.map(function (x) {
+      // 状态与「做成」是两件事：跑完但被门控拦过（partial）在列表里不能写成
+      // 「已完成」，否则处置条说「缺预授权」、下面六行全说「已完成」，自相矛盾
+      var stText = RUN_STATUS[x.status] || x.status;
+      var warn = "";
+      if (x.status === "done" && x.outcome === "partial") {
+        stText = "跑完  被拦";
+        warn = " warn";
+      } else if (x.status === "done" && x.outcome === "failed") {
+        stText = "跑完  不算";
+        warn = " bad";
+      }
+      return '<button class="fx-run-row" data-run-id="' + escapeHtml(String(x.id)) + '">' +
+        '<span class="fx-run-name">#' + escapeHtml(String(x.id)) + "  " + escapeHtml(x.name || "") + "</span>" +
+        '<span class="fx-run-meta' + warn + '">' + escapeHtml(stText) + "  " +
+        escapeHtml(fmtDurationShort(x)) + "</span></button>";
+    }).join("");
+    host.querySelectorAll("[data-run-id]").forEach(function (b) {
+      b.onclick = function () { openRunDrawer(Number(b.dataset.runId)); };
     });
   }
 
@@ -930,10 +985,88 @@
 
   var runsRequestId = 0;
 
+  function renderAllRunsResult(host, rows, f) {
+    rows.forEach(function (x) { S.runCache.set(x.id, x); });
+    if (!rows.length) {
+      host.innerHTML = '<div class="fx-run-empty">' +
+        (f.offset ? "这一页没有更多了。" : "没有符合条件的运行记录。") + "</div>";
+    } else {
+      host.innerHTML = rows.map(function (x) {
+        var path = x.result_path || "";
+        return '<div class="fx-run-row" data-run-id="' + escapeHtml(String(x.id)) + '">' +
+          '<span class="fx-run-name">#' + escapeHtml(String(x.id)) + "  " +
+          escapeHtml(x.project_name || "—") + " / " + escapeHtml(runTitle(x)) + "</span>" +
+          outcomeChip(x) +
+          '<span class="fx-run-meta">' + escapeHtml(RUN_STATUS[x.status] || x.status) +
+          "  " + escapeHtml(fmtDurationShort(x)) +
+          (f.view === "tokens_today" ? "  " + (Number(x.in_tokens || 0) + Number(x.out_tokens || 0)).toLocaleString() + " token" : "") + "</span>" +
+          (path
+            ? '<button class="fx-ack" data-open-result="' + escapeHtml(path) + '"' +
+              ' title="打开这个工位的产出全文">产出</button>'
+            : "") +
+          "</div>";
+      }).join("");
+      host.querySelectorAll("[data-run-id]").forEach(function (el) {
+        var open = function (ev) {
+          if (ev && ev.target.closest("[data-open-result]")) return;
+          openRunDrawer(Number(el.dataset.runId));
+        };
+        el.setAttribute("role", "button");
+        el.setAttribute("tabindex", "0");
+        el.onclick = open;
+        el.onkeydown = function (ev) {
+          if (ev.key === "Enter" || ev.key === " ") {
+            ev.preventDefault();
+            open(ev);
+          }
+        };
+      });
+      host.querySelectorAll("[data-open-result]").forEach(function (b) {
+        b.onclick = function (ev) {
+          ev.stopPropagation();
+          openFactoryResult(b.dataset.openResult);
+        };
+      });
+    }
+    var pager = dom.drawer && dom.drawer.querySelector("#fx-runs-pager");
+    if (!pager) return;
+    var off = f.offset || 0;
+    pager.innerHTML =
+      '<button class="btn-ghost" data-page="prev"' + (off > 0 ? "" : " disabled") + ">上一页</button>" +
+      '<span class="fx-run-meta">第 ' + (Math.floor(off / RUN_PAGE) + 1) + " 页  "
+      + rows.length + " 条</span>" +
+      '<button class="btn-ghost" data-page="next"' + (rows.length >= RUN_PAGE ? "" : " disabled") + ">下一页</button>";
+    pager.querySelectorAll("[data-page]").forEach(function (b) {
+      b.onclick = function () {
+        if (b.disabled) return;
+        S.runsFilter.offset = b.dataset.page === "next"
+          ? off + RUN_PAGE : Math.max(0, off - RUN_PAGE);
+        loadAllRuns();
+      };
+    });
+  }
+
   function loadAllRuns() {
     var f = Object.assign({}, S.runsFilter);
     var requestId = ++runsRequestId;
     var drawer = dom.drawer && dom.drawer.querySelector("#fx-all-runs");
+    if (!drawer) return;
+    if (S.demo) {
+      var list = ((S.demo && S.demo.runs) || []).filter(function (x) {
+        if (f.status && x.status !== f.status) return false;
+        if (f.project_id && Number(x.project_id) !== Number(f.project_id)) return false;
+        if (f.view === "done_today") {
+          var oc = x.outcome || "";
+          if (!(isTodayTs(x.finished_at) && (x.status === "done" || oc === "ok") && oc !== "partial" && oc !== "failed")) return false;
+        } else if (f.view === "tokens_today") {
+          if (!isTodayTs(x.started_at)) return false;
+        }
+        return true;
+      });
+      var off = f.offset || 0;
+      renderAllRunsResult(drawer, list.slice(off, off + RUN_PAGE), f);
+      return;
+    }
     var params = { limit: RUN_PAGE, offset: f.offset || 0 };
     params.view = f.view || "all";
     if (f.status) params.status = f.status;
@@ -941,65 +1074,7 @@
     request("factory.runs", params).then(function (r) {
       var host = dom.drawer && dom.drawer.querySelector("#fx-all-runs");
       if (!host || host !== drawer || requestId !== runsRequestId) return;
-      var rows = (r && r.runs) || [];
-      rows.forEach(function (x) { S.runCache.set(x.id, x); });
-      if (!rows.length) {
-        host.innerHTML = '<div class="fx-run-empty">' +
-          (f.offset ? "这一页没有更多了。" : "没有符合条件的运行记录。") + "</div>";
-      } else {
-        host.innerHTML = rows.map(function (x) {
-          var path = x.result_path || "";
-          return '<div class="fx-run-row" data-run-id="' + escapeHtml(String(x.id)) + '">' +
-            '<span class="fx-run-name">#' + escapeHtml(String(x.id)) + "  " +
-            escapeHtml(x.project_name || "—") + " / " + escapeHtml(runTitle(x)) + "</span>" +
-            outcomeChip(x) +
-            '<span class="fx-run-meta">' + escapeHtml(RUN_STATUS[x.status] || x.status) +
-            "  " + escapeHtml(fmtDurationShort(x)) +
-            (f.view === "tokens_today" ? "  " + (Number(x.in_tokens || 0) + Number(x.out_tokens || 0)).toLocaleString() + " token" : "") + "</span>" +
-            (path
-              ? '<button class="fx-ack" data-open-result="' + escapeHtml(path) + '"' +
-                ' title="打开这个工位的产出全文">产出</button>'
-              : "") +
-            "</div>";
-        }).join("");
-        host.querySelectorAll("[data-run-id]").forEach(function (el) {
-          var open = function (ev) {
-            if (ev && ev.target.closest("[data-open-result]")) return;
-            openRunDrawer(Number(el.dataset.runId));
-          };
-          el.setAttribute("role", "button");
-          el.setAttribute("tabindex", "0");
-          el.onclick = open;
-          el.onkeydown = function (ev) {
-            if (ev.key === "Enter" || ev.key === " ") {
-              ev.preventDefault();
-              open(ev);
-            }
-          };
-        });
-        host.querySelectorAll("[data-open-result]").forEach(function (b) {
-          b.onclick = function (ev) {
-            ev.stopPropagation();
-            openFactoryResult(b.dataset.openResult);
-          };
-        });
-      }
-      var pager = dom.drawer && dom.drawer.querySelector("#fx-runs-pager");
-      if (!pager) return;
-      var off = f.offset || 0;
-      pager.innerHTML =
-        '<button class="btn-ghost" data-page="prev"' + (off > 0 ? "" : " disabled") + ">上一页</button>" +
-        '<span class="fx-run-meta">第 ' + (Math.floor(off / RUN_PAGE) + 1) + " 页  "
-        + rows.length + " 条</span>" +
-        '<button class="btn-ghost" data-page="next"' + (rows.length >= RUN_PAGE ? "" : " disabled") + ">下一页</button>";
-      pager.querySelectorAll("[data-page]").forEach(function (b) {
-        b.onclick = function () {
-          if (b.disabled) return;
-          S.runsFilter.offset = b.dataset.page === "next"
-            ? off + RUN_PAGE : Math.max(0, off - RUN_PAGE);
-          loadAllRuns();
-        };
-      });
+      renderAllRunsResult(host, (r && r.runs) || [], f);
     }).catch(function (e) {
       var host = dom.drawer && dom.drawer.querySelector("#fx-all-runs");
       if (host && host === drawer && requestId === runsRequestId) host.innerHTML = '<div class="fx-run-empty">读取失败：' + escapeHtml(e.message || "") + "</div>";
@@ -1077,6 +1152,18 @@
   }
 
   function runLine(line, btn) {
+    if (S.demo) {
+      if (line.status === "running") {
+        addNotice("该工位正在演示运行中");
+        return;
+      }
+      if (typeof startDemoRun === "function") startDemoRun(S.demo, line, nowMs() / 1000);
+      else line.status = "running";
+      addNotice("样板厂演示：已触发「" + (line.name || line.key) + "」");
+      renderAll();
+      if (S.drawer && S.drawer.type === "line") openLineDrawer(line.key, { focus: false });
+      return;
+    }
     if (btn) btn.disabled = true;
     request("factory.run_now", { task_id: line.id }).then(function (r) {
       // 后台派工：回执只表示「已起跑」，包裹稍后由 started 事件送进场景
@@ -1091,6 +1178,14 @@
 
   function toggleLine(line, btn) {
     var enabled = line.status === "paused" || line.status === "stopped";
+    if (S.demo) {
+      line.status = enabled ? "idle" : "paused";
+      addNotice(enabled ? "样板厂演示：产线已启用" : "样板厂演示：产线已暂停");
+      renderPanel();
+      FX.render();
+      if (S.drawer && S.drawer.type === "line") openLineDrawer(line.key, { focus: false });
+      return;
+    }
     if (btn) btn.disabled = true;
     request("factory.toggle", { task_id: line.id, enabled: enabled }).then(function (r) {
       line.status = enabled ? "idle" : "paused";
@@ -1376,8 +1471,20 @@
   }
 
   // ---------- 工厂设置 ----------
+  function parseIntField(el, min, max, fallback) {
+    if (!el) return fallback;
+    var raw = String(el.value == null ? "" : el.value).trim();
+    if (!raw) return fallback;
+    var v = Number(raw);
+    if (!Number.isFinite(v)) return fallback;
+    v = Math.round(v);
+    if (v < min) return min;
+    if (v > max) return max;
+    return v;
+  }
+
   function openSettingsDrawer() {
-    var st = S.state || activeState();
+    var st = activeState();
     var cfg = (st && st.config) || {};
     S.drawer = { type: "settings" };
     // 「对话在跑」原来占顶栏一格；计数条撤掉后入口挪到这里——它属于「看现场，
@@ -1400,6 +1507,7 @@
       'title="' + escapeHtml(liveTitle) + '">' +
       escapeHtml(liveText) + "</button></div>" +
       '<form class="fx-form" id="fx-settings">' +
+      '<div class="fx-form-sec">外观与天气</div>' +
       '<label class="fx-check"><input id="fx-cfg-enabled" type="checkbox"' +
       (cfg.enabled !== false ? " checked" : "") + ">显示工厂看板入口（左侧导航）</label>" +
       '<label class="fx-check"><input id="fx-cfg-demo" type="checkbox"' +
@@ -1412,6 +1520,20 @@
       '<input id="fx-cfg-weather-location" type="text" maxlength="80" value="' +
       escapeHtml(String(cfg.weather_location || "")) + '" placeholder="留空则只用本机时间判断昼夜">' +
       '<p class="fx-hint">只把城市名交给 Open-Meteo 解析坐标，再按坐标取当前天气；不做 IP 定位、不需要 API Key，结果缓存 30 分钟。关闭时一次网络请求都不发。</p>' +
+      '<div class="fx-form-sec">调度与保护</div>' +
+      "<label>单次运行超时（分钟，0 = 不限）</label>" +
+      '<input id="fx-cfg-timeout" type="number" min="0" max="1440" value="' +
+      Number(cfg.run_timeout_minutes != null ? cfg.run_timeout_minutes : 60) + '">' +
+      '<p class="fx-hint">超时按失败收尾并释放占用位——没有它，一条挂在模型流式 / 网络上的运行会永远显示「运行中」。</p>' +
+      "<label>同时运行的产线上限（1–20）</label>" +
+      '<input id="fx-cfg-parallel" type="number" min="1" max="20" value="' +
+      Number(cfg.max_parallel_runs || 3) + '">' +
+      '<p class="fx-hint">到点的产线超过这个数会排队，等下一轮扫描（20 秒）再接；计数条里的「排队」按这个口径算。</p>' +
+      "<label>连续失败告警阈值（0 = 不告警）</label>" +
+      '<input id="fx-cfg-alert" type="number" min="0" max="50" value="' +
+      Number(cfg.alert_after_failures != null ? cfg.alert_after_failures : 3) + '">' +
+      '<p class="fx-hint">同一条产线连续失败达到这个次数推一条通知，每天最多一条（防打扰）。</p>' +
+      '<div class="fx-form-sec">场景性能与历史保留</div>' +
       "<label>运行历史保留条数（100–100000）</label>" +
       '<input id="fx-cfg-keep" type="number" min="100" max="100000" value="' +
       Number(cfg.history_keep || 2000) + '">' +
@@ -1428,21 +1550,10 @@
       '<input id="fx-cfg-labels" type="number" min="10" max="80" value="' +
       Number(cfg.label_limit || 40) + '">' +
       '<p class="fx-hint">机台 / 标签超限的部分不受影响，仍会列在左面板与抽屉里；调大只影响场景里画多少。</p>' +
-      "<label>单次运行超时（分钟，0 = 不限）</label>" +
-      '<input id="fx-cfg-timeout" type="number" min="0" max="1440" value="' +
-      Number(cfg.run_timeout_minutes != null ? cfg.run_timeout_minutes : 60) + '">' +
-      '<p class="fx-hint">超时按失败收尾并释放占用位——没有它，一条挂在模型流式 / 网络上的运行会永远显示「运行中」。</p>' +
-      "<label>同时运行的产线上限（1–20）</label>" +
-      '<input id="fx-cfg-parallel" type="number" min="1" max="20" value="' +
-      Number(cfg.max_parallel_runs || 3) + '">' +
-      '<p class="fx-hint">到点的产线超过这个数会排队，等下一轮扫描（20 秒）再接；计数条里的「排队」按这个口径算。</p>' +
-      "<label>连续失败告警阈值（0 = 不告警）</label>" +
-      '<input id="fx-cfg-alert" type="number" min="0" max="50" value="' +
-      Number(cfg.alert_after_failures != null ? cfg.alert_after_failures : 3) + '">' +
-      '<p class="fx-hint">同一条产线连续失败达到这个次数推一条通知，每天最多一条（防打扰）。</p>' +
+      '<div class="fx-form-foot">' +
       '<div class="fx-form-msg" id="fx-cfg-msg"></div>' +
       '<div class="fx-drawer-ops"><button type="submit" class="btn-primary">保存</button>' +
-      '<button type="button" class="btn-ghost" data-close-drawer="1">取消</button></div></form>';
+      '<button type="button" class="btn-ghost" data-close-drawer="1">取消</button></div></div></form>';
     openDrawer(drawerShell("工厂设置", html));
     if (!dom.drawer) return;
     var form = dom.drawer.querySelector("#fx-settings");
@@ -1470,14 +1581,14 @@
         ambient: dom.drawer.querySelector("#fx-cfg-ambient").checked,
         weather: weatherOn,
         weather_location: weatherCity,
-        history_keep: Number(dom.drawer.querySelector("#fx-cfg-keep").value) || 2000,
-        history_days: Number(dom.drawer.querySelector("#fx-cfg-days").value) || 30,
-        max_packages: Number(dom.drawer.querySelector("#fx-cfg-max").value) || 60,
-        machine_limit: Number(dom.drawer.querySelector("#fx-cfg-machines").value) || 6,
-        label_limit: Number(dom.drawer.querySelector("#fx-cfg-labels").value) || 40,
-        run_timeout_minutes: Number(dom.drawer.querySelector("#fx-cfg-timeout").value) || 0,
-        max_parallel_runs: Number(dom.drawer.querySelector("#fx-cfg-parallel").value) || 3,
-        alert_after_failures: Number(dom.drawer.querySelector("#fx-cfg-alert").value) || 0,
+        history_keep: parseIntField(dom.drawer.querySelector("#fx-cfg-keep"), 100, 100000, 2000),
+        history_days: parseIntField(dom.drawer.querySelector("#fx-cfg-days"), 1, 3650, 30),
+        max_packages: parseIntField(dom.drawer.querySelector("#fx-cfg-max"), 10, 300, 60),
+        machine_limit: parseIntField(dom.drawer.querySelector("#fx-cfg-machines"), 1, 12, 6),
+        label_limit: parseIntField(dom.drawer.querySelector("#fx-cfg-labels"), 10, 80, 40),
+        run_timeout_minutes: parseIntField(dom.drawer.querySelector("#fx-cfg-timeout"), 0, 1440, 60),
+        max_parallel_runs: parseIntField(dom.drawer.querySelector("#fx-cfg-parallel"), 1, 20, 3),
+        alert_after_failures: parseIntField(dom.drawer.querySelector("#fx-cfg-alert"), 0, 50, 3),
       }, null, msg);
     };
   }
@@ -1578,6 +1689,29 @@
       { title: "叫停正在跑的运行", okLabel: "叫停", danger: true },
     ).then(function (ok) {
       if (!ok) return;
+      if (S.demo) {
+        var nowS = nowMs() / 1000;
+        var key = lineKeyFor("cron", taskId);
+        var rec = findLine(key);
+        if (rec && rec.line) {
+          rec.line.status = "idle";
+          rec.line.running_run_id = null;
+          rec.line.last_status = "cancelled";
+          rec.line.last_run_at = nowS;
+        }
+        ((S.demo && S.demo.runs) || []).forEach(function (r) {
+          if (r.kind === "cron" && Number(r.task_id) === Number(taskId) && r.status === "running") {
+            r.status = "cancelled";
+            r.finished_at = nowS;
+            r.duration_s = Math.max(1, Math.round(nowS - (r.started_at || nowS)));
+          }
+        });
+        if (S.demo.counters) S.demo.counters.running = Math.max(0, (S.demo.counters.running || 1) - 1);
+        addNotice("样板厂演示：已叫停「" + (name || ("任务 " + taskId)) + "」");
+        renderAll();
+        if (S.drawer && S.drawer.type === "line") openLineDrawer(key, { focus: false });
+        return;
+      }
       if (btn) btn.disabled = true;
       request("factory.cancel", { task_id: taskId }).then(function (r) {
         if (r && r.cancelled) addNotice("已叫停：" + (name || ("任务 " + taskId)));
@@ -1595,6 +1729,20 @@
       自动判定（跑完且有产出 / 有没有被门控拦过）回答不了「产出对不对」，
       而成功率要能当决策依据就必须允许人推翻它。 */
   function markRunOutcome(run, outcome, btn) {
+    if (S.demo) {
+      run.outcome = outcome || "";
+      run.outcome_source = outcome ? "user" : "";
+      var cachedDemo = findRun(run.id);
+      if (cachedDemo && cachedDemo !== run) {
+        cachedDemo.outcome = run.outcome;
+        cachedDemo.outcome_source = run.outcome_source;
+      }
+      addNotice(outcome === "ok" ? "样板厂演示：已标记这轮算过"
+        : outcome === "failed" ? "样板厂演示：已标记这轮不算" : "样板厂演示：已撤销人工判定");
+      if (S.drawer && S.drawer.type === "run") openRunDrawer(run.id);
+      renderAll();
+      return;
+    }
     if (btn) btn.disabled = true;
     request("factory.run_mark", { run_id: run.id, outcome: outcome }).then(function (r) {
       var row = (r && r.run) || {};
@@ -1619,6 +1767,21 @@
   function ackAttention(keys) {
     keys = (keys || []).filter(function (k) { return !!k; });
     if (!keys.length) return;
+    if (S.demo) {
+      // 样板厂只改内存演示数据，绝不把假 key（cron:-22 等）写入真实数据库表
+      var keySet = new Set(keys);
+      if (S.demo) {
+        S.demo.attention = (S.demo.attention || []).filter(function (a) {
+          return !keySet.has(a.line_key);
+        });
+        S.demo.attention_total = S.demo.attention.length;
+        if (S.demo.counters) S.demo.counters.attention = S.demo.attention.length;
+      }
+      addNotice("样板厂演示：已标记为知道了");
+      closeDrawer();
+      renderAll();
+      return;
+    }
     request("factory.ack", { line_keys: keys }).then(function () {
       addNotice("已标记为知道了（同一问题再发生会重新提示）");
       closeDrawer();

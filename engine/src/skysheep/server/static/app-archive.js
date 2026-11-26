@@ -48,13 +48,16 @@ async function saveArchiveAuto(what) {
 }
 
 function archiveMgrStatus(box, text) {
-  box.innerHTML = `<p class="dim small">${text}</p>`;
+  const p = document.createElement("p");
+  p.className = "dim small";
+  p.textContent = text;
+  box.replaceChildren(p);
 }
 
 async function loadArchiveMgr() {
   const box = document.getElementById("archive-mgr-list");
   try { _archiveMgr = await request("archive.list"); }
-  catch (e) { archiveMgrStatus(box, `加载失败：${escapeHtml(e.message)}`); return; }
+  catch (e) { archiveMgrStatus(box, `加载失败：${e.message}`); return; }
   // 项目筛选下拉：所有项目 + 各项目（快聊的归档会话在「快聊」组里）
   const ps = _archiveMgr.projects || [];
   const sel = document.getElementById("archive-mgr-project");
@@ -101,7 +104,7 @@ function renderArchiveMgr() {
     return;
   }
   if (!list.length) {
-    archiveMgrStatus(box, q ? `没有标题包含「${escapeHtml(q)}」的已归档会话。` : "这个项目没有已归档的会话。");
+    archiveMgrStatus(box, q ? `没有标题包含「${q}」的已归档会话。` : "这个项目没有已归档的会话。");
     return;
   }
 

@@ -1075,3 +1075,272 @@ def test_factory_frontend_does_not_grow_a_second_automation_page():
                 'request("cron.delete"', 'request("pipeline.save"',
                 'request("pipeline.delete"', 'request("schedule.add"'):
         assert bad not in js, f"工厂前端不应直接调用 {bad}（配置写回自动化页）"
+
+
+def test_factory_narrow_screen_keeps_runs_entry_and_desktop_drawer_reflow():
+    """窄屏隐藏画布时仍可进入「运行记录」；宽屏开抽屉占用流内列位不遮画布；浮标不挡顶栏。"""
+    html = read_static("index.html")
+    css = read_static("app.css")
+    assert 'id="factory-panel-runs"' in html
+    assert ".fx-narrow-only { display: none; }" in css
+    assert "@media (min-width: 861px)" in css and "#factory-drawer { position: relative;" in css
+    assert "body:has(#view-factory:not(.hidden)) .agenda-reminder.notice-toast" in css
+    i = css.index("@media (max-width: 860px)", css.index("工厂（第三顶层视图）"))
+    seg = css[i:i + 1000]
+    assert ".fx-narrow-only { display: inline-flex; }" in seg
+
+
+def test_factory_runtime_behavior_improvements_node():
+    """Node 沙盒实跑工厂 JS：验证被拦格式化、0 值保留、Demo 隔离、事件重算与空托盘建模。"""
+    import json
+    import shutil
+    import subprocess
+
+    import pytest
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+
+    probe = r"""
+const vm = require("vm");
+const fs = require("fs");
+const path = require("path");
+const dir = process.argv[1];
+
+const calls = [];
+const notices = [];
+const els = new Map();
+function ensureEl(id) {
+  if (!els.has(id)) els.set(id, makeEl(id));
+  return els.get(id);
+}
+function makeBtn(ackKey) {
+  return {
+    dataset: { ack: ackKey || "" }, style: {}, classList: { toggle() {}, add() {}, remove() {} },
+    onclick: null, addEventListener() {}, setAttribute() {},
+  };
+}
+const ackBtn = makeBtn("cron:-22");
+function makeEl(id) {
+  return {
+    id, style: {}, dataset: {}, value: "", checked: false,
+    innerHTML: "", textContent: "",
+    classList: {
+      _s: new Set(["hidden"]),
+      toggle(c, on) { on ? this._s.add(c) : this._s.delete(c); },
+      add(c) { this._s.add(c); },
+      remove(c) { this._s.delete(c); },
+      contains(c) { return this._s.has(c); },
+    },
+    setAttribute() {}, getAttribute() { return ""; },
+    addEventListener() {}, removeEventListener() {},
+    querySelectorAll(sel) {
+      if (sel === "[data-ack]") return [ackBtn];
+      return [];
+    },
+    querySelector(sel) {
+      if (sel === ".fx-drawer-close") return makeEl("drawer-close");
+      if (sel === "#fx-settings") return ensureEl("fx-settings");
+      if (sel === "#fx-cfg-msg") return ensureEl("fx-cfg-msg");
+      if (sel === "#fx-all-runs") return ensureEl("fx-all-runs");
+      if (sel === "#fx-runs-pager") return ensureEl("fx-runs-pager");
+      if (sel === "#fx-cfg-weather") return { checked: false };
+      if (sel === "#fx-cfg-weather-location") return { value: "" };
+      if (sel === "#fx-cfg-enabled" || sel === "#fx-cfg-demo"
+          || sel === "#fx-cfg-ambient") return { checked: true };
+      if (sel === "#fx-cfg-timeout" || sel === "#fx-cfg-alert") return { value: "0" };
+      if (sel === "#fx-cfg-keep") return { value: "2000" };
+      if (sel === "#fx-cfg-days") return { value: "30" };
+      if (sel === "#fx-cfg-max") return { value: "60" };
+      if (sel === "#fx-cfg-machines") return { value: "6" };
+      if (sel === "#fx-cfg-labels") return { value: "40" };
+      if (sel === "#fx-cfg-parallel") return { value: "3" };
+      return null;
+    },
+    appendChild() {}, remove() {}, focus() {},
+    getContext() { return null; },
+    clientWidth: 800, clientHeight: 600, width: 400, height: 300,
+    getBoundingClientRect() { return { left: 0, top: 0, width: 800, height: 600 }; },
+  };
+}
+
+const sandbox = {
+  window: null,
+  document: {
+    hidden: false,
+    getElementById: ensureEl,
+    querySelectorAll() { return []; },
+    createElement(tag) { return makeEl(tag); },
+    addEventListener() {}, removeEventListener() {},
+  },
+  navigator: { reducedMotion: false },
+  performance: { now: () => 1000 },
+  matchMedia: () => ({ matches: false, addEventListener() {} }),
+  ResizeObserver: function () { this.observe = () => {}; this.disconnect = () => {}; },
+  setTimeout, clearTimeout, setInterval, clearInterval,
+  requestAnimationFrame: () => 1, cancelAnimationFrame() {},
+  Promise, Map, Set, Number, String, Object, Array, Math, JSON, Date, Error,
+  escapeHtml(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, c => c); },
+  addNotice(m) { notices.push(String(m)); },
+  request(method, params) {
+    calls.push({ method, params });
+    if (method === "factory.state") {
+      return Promise.resolve({
+        projects: [], counters: {}, attention: [], runs: [], config: {}, waiting: [],
+      });
+    }
+    if (method === "project.list") return Promise.resolve({ projects: [] });
+    return Promise.resolve({ ok: true, config: params });
+  },
+  confirmModal() { return Promise.resolve(true); },
+};
+sandbox.window = sandbox;
+vm.createContext(sandbox);
+const mods = [
+  "app-factory.js", "app-factory-scene.js",
+  "app-factory-drawer.js", "app-factory-draw.js",
+];
+for (const f of mods) {
+  vm.runInContext(fs.readFileSync(path.join(dir, f), "utf8"), sandbox, { filename: f });
+}
+const FX = sandbox.FX;
+FX.dom.drawer = ensureEl("factory-drawer");
+FX.dom.panelBody = ensureEl("factory-panel-body");
+FX.dom.stage = ensureEl("factory-stage");
+FX.dom.canvas = ensureEl("factory-canvas");
+FX.dom.labels = ensureEl("factory-labels");
+FX.S.cssW = 800; FX.S.cssH = 600; FX.S.bufW = 400; FX.S.bufH = 300; FX.S.cam.zoom = 1;
+
+const nowSec = Date.now() / 1000;
+FX.S.demo = {
+  projects: [{
+    id: -1, name: "样板厂", root_ok: true,
+    lines: [{
+      key: "cron:-11", kind: "cron", id: -11, project_id: -1,
+      name: "巡检", status: "idle", health: {},
+    }],
+  }],
+  runs: [{
+    id: -99, kind: "cron", task_id: -11, project_id: -1,
+    name: "巡检", project_name: "样板厂", trigger: "schedule",
+    status: "done", outcome: "partial", denied_count: 2,
+    denied_tools: '[{"tool":"run_command","count":2}]',
+    started_at: nowSec, finished_at: nowSec, duration_s: 12,
+  }],
+  attention: [{ line_key: "cron:-22", kind: "error", text: "demo fail" }],
+  counters: { attention: 1, running: 0, done_today: 0, queued: 0, tokens_today: 0 },
+  config: { enabled: true, demo: true, run_timeout_minutes: 0, alert_after_failures: 0 },
+};
+FX.S.runsFilter = { status: "", project_id: 0, offset: 0, view: "all" };
+FX.S.runCache.set(-99, FX.S.demo.runs[0]);
+FX.openRunDrawer(-99);
+const runDrawerHtml = FX.dom.drawer.innerHTML;
+const rawArrayPresent = runDrawerHtml.includes('[{"tool"');
+const formattedPresent = runDrawerHtml.includes("run_command ×2");
+
+calls.length = 0;
+FX.openAttentionDrawer();
+if (ackBtn.onclick) ackBtn.onclick({ stopPropagation() {} });
+const ackDemoRemaining = FX.S.demo.attention.length;
+FX.openAllRunsDrawer();
+const demoAllRunsHtml = ensureEl("fx-all-runs").innerHTML;
+const demoCalls = calls.map(c => c.method);
+
+FX.openSettingsDrawer();
+ensureEl("fx-settings").onsubmit({ preventDefault() {} });
+const savedCall = calls.find(c => c.method === "factory.save");
+
+function makeCtx(fills) {
+  return {
+    _fs: "", globalAlpha: 1, strokeStyle: "", lineWidth: 1,
+    set fillStyle(v) { this._fs = v; }, get fillStyle() { return this._fs; },
+    fillRect() { fills.push(this._fs); },
+    beginPath() {}, moveTo() {}, lineTo() {}, closePath() {}, stroke() {},
+    fill() { fills.push(this._fs); }, ellipse() {},
+  };
+}
+const fillsZero = [];
+FX.S.stats = { "-1": { done: 0, rework: 0, busy: 0, lines: 1 } };
+FX.drawModel(makeCtx(fillsZero), FX.PAL_DAY, {
+  kind: "pallet", projectId: -1, x: 0, y: 0, z0: 0,
+});
+const zeroHasOkFlag = fillsZero.includes(FX.PAL_DAY.ok);
+
+const fillsTwo = [];
+FX.S.stats = { "-1": { done: 2, rework: 0, busy: 0, lines: 1 } };
+FX.drawModel(makeCtx(fillsTwo), FX.PAL_DAY, {
+  kind: "pallet", projectId: -1, x: 0, y: 0, z0: 0,
+});
+const twoHasOkFlag = fillsTwo.includes(FX.PAL_DAY.ok);
+
+FX.S.demo = null;
+FX.S.state = {
+  projects: [{
+    id: 1, name: "核心", root_ok: true,
+    lines: [{
+      key: "pipe:5", kind: "pipeline", id: 5, project_id: 1,
+      name: "流水线", status: "running", nodes: [{ id: 51, title: "n1", status: "running" }],
+    }],
+  }],
+  runs: [{
+    id: 88, kind: "cron", task_id: 9, project_id: 1,
+    status: "empty", outcome: "ok", finished_at: nowSec,
+  }],
+  counters: { running: 1, done_today: 0, tokens_today: 0, attention: 0, queued: 0 },
+  attention: [],
+  config: { enabled: true },
+};
+FX.refreshProjectStats(true);
+const overrideDoneCount = FX.statFor(1).done;
+const pipeLine = FX.S.state.projects[0].lines[0];
+const pipeRec = {
+  kind: "pipeline", id: 5, project: { id: 1 },
+  factory: { tray: { x: 0, y: 0 } }, line: pipeLine,
+};
+FX.S.world = {
+  factories: [{
+    id: 1,
+    belt: [{ x: 0, y: 0 }, { x: 10, y: 0 }],
+    dock: { x: 20, y: 0 },
+    tray: { x: 0, y: 0 },
+  }],
+  lines: new Map([["pipe:5", pipeRec]]),
+};
+sandbox.factoryOnEvent({
+  kind: "factory_run", phase: "finished",
+  run: {
+    id: 90, kind: "pipeline_node", task_id: 51, pipeline_id: 5, project_id: 1,
+    name: "流水线", status: "done", outcome: "ok", finished_at: nowSec,
+    in_tokens: 120, out_tokens: 30, review_note: "looks good",
+  },
+});
+const nodeAfter = FX.S.state.projects[0].lines[0].nodes[0].status;
+const tokensAfter = FX.S.state.counters.tokens_today;
+
+console.log(JSON.stringify({
+  rawArrayPresent, formattedPresent, ackDemoRemaining,
+  demoHasRun: demoAllRunsHtml.includes("#-99"),
+  demoCalls,
+  savedTimeout: savedCall && savedCall.params.run_timeout_minutes,
+  savedAlert: savedCall && savedCall.params.alert_after_failures,
+  zeroHasOkFlag, twoHasOkFlag, overrideDoneCount, nodeAfter, tokensAfter,
+}));
+"""
+    proc = subprocess.run(
+        [node, "-e", probe, str(STATIC_DIR)],
+        capture_output=True, text=True, encoding="utf-8", check=False, timeout=20,
+    )
+    assert proc.returncode == 0, f"node probe failed: {proc.stderr}"
+    res = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert res["rawArrayPresent"] is False, "run drawer must not leak raw denied_tools JSON"
+    assert res["formattedPresent"] is True
+    assert res["ackDemoRemaining"] == 0
+    assert res["demoHasRun"] is True
+    assert "factory.ack" not in res["demoCalls"] and "factory.runs" not in res["demoCalls"]
+    assert res["savedTimeout"] == 0 and res["savedAlert"] == 0, "Settings must preserve explicit 0"
+    assert res["zeroHasOkFlag"] is False, "Empty pallet (done=0) must not hoist a green done flag"
+    assert res["twoHasOkFlag"] is True
+    assert res["overrideDoneCount"] == 1
+    assert res["nodeAfter"] == "done" and res["tokensAfter"] == 150
+

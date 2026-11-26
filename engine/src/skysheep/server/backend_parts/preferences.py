@@ -101,6 +101,7 @@ class PreferencesMixin:
         "todo", "ptasks", "cron", "pipeline", "relay", "terminal",
         "teamroom",  # 团队室（团队模式设计 §15）：入口跟团队走，但打开过的偏好要存得下
         "mcp", "skills",  # ext（MCP / Skills）的分段 id：right_active 存的就是它
+        "map",  # memory（项目记忆）的分段 id（演化地图），同时兼容旧版独立 map 标签恢复
     )
 
     @classmethod

@@ -115,3 +115,53 @@ async def test_i3_narrow_viewport_no_horizontal_overflow(home):
             overflow = await page.evaluate(
                 "document.documentElement.scrollWidth - document.documentElement.clientWidth")
             assert overflow <= 40, f"窄屏横向溢出 {overflow}px"
+
+
+async def test_i4_right_panel_tab_bar_aligns_with_topbar(home):
+    """I4 右面板标签条与顶栏同高：并排两列的顶部横线落在同一条水平线上。
+
+    标签条高度由标签内容撑出（约 41px），比顶栏实高矮一截；app.js 的
+    syncRpTabsHeight 按 topbar.offsetHeight 实测同步。这里量两条线的实际
+    bottom，防止后续改标签栏样式或删掉同步后两条线又错开。
+    """
+    async with live_server(home, []) as base:
+        async with browser_page(base) as page:
+            await _open_main_view(page)
+            await page.wait_for_selector("#input", timeout=10000)
+            await page.click("#btn-tabs")
+            await page.wait_for_selector("#rp-tabs .rp-tab", timeout=10000)
+            bottoms = await page.evaluate(
+                "() => [document.querySelector('#topbar').getBoundingClientRect().bottom,"
+                " document.querySelector('#rp-tabs').getBoundingClientRect().bottom]"
+            )
+            assert abs(bottoms[0] - bottoms[1]) < 1.5, bottoms
+
+
+async def test_i5_split_composer_aligns_with_main(home):
+    """I5 副屏首次出现：主栏与分屏列输入区的顶线对齐，分屏顶部对到顶栏下沿。
+
+    分屏列输入区此前按自己的默认高度铺（比主栏输入区矮十几像素），分屏
+    顶部也停在 CSS 的 44px 兜底上；openSplitPane 现在在列入册后同步顶部，
+    并在未拖过分屏输入区时按主栏输入区高度起步。
+    """
+    async with live_server(home, []) as base:
+        async with browser_page(base) as page:
+            await _open_main_view(page)
+            await page.wait_for_selector("#input", timeout=10000)
+            await page.evaluate(
+                "async () => { const r = await request('session.new');"
+                " await openSplitPane(r.id, r.title); }"
+            )
+            await page.wait_for_selector(".split-composer", timeout=10000)
+            boxes = await page.evaluate(
+                "() => {"
+                " const c = document.querySelector('#composer').getBoundingClientRect();"
+                " const s = document.querySelector('.split-composer').getBoundingClientRect();"
+                " const t = document.querySelector('#topbar').getBoundingClientRect();"
+                " const p = document.querySelector('#split-pane').getBoundingClientRect();"
+                " return {mainTop: c.top, splitTop: s.top,"
+                "         topbarBottom: t.bottom, splitPaneTop: p.top};"
+                " }"
+            )
+            assert abs(boxes["mainTop"] - boxes["splitTop"]) < 1.5, boxes
+            assert abs(boxes["topbarBottom"] - boxes["splitPaneTop"]) < 1.5, boxes

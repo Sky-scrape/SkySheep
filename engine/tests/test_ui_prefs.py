@@ -1607,10 +1607,11 @@ def test_right_tab_restore_loads_data_on_startup(home):
 
 
 def test_right_panel_merged_tabs_keep_every_view_reachable(home):
-    """合并标签（任务 / 自动化）之后，每一个分段都还得点得到。
+    """合并标签（任务 / 自动化 / 项目记忆 / MCP·Skills）之后，每一个分段都还得点得到。
 
-    12 个平铺标签收成 9 个：任务 = 子代理任务/任务清单/项目任务，自动化 =
-    定时任务/任务编排。合并最容易埋的坑是「分段加了、某一头没跟上」——
+    原先平铺的标签收成容器分段：任务 = 子代理任务/任务清单/项目任务，自动化 =
+    定时任务/任务编排，项目记忆 = 约定(AGENTS.md)/演化地图(memory/map)，
+    MCP·Skills = MCP/Skills。合并最容易埋的坑是「分段加了、某一头没跟上」——
     按钮少一个、分段视图 div 没写、加载函数漏注册、后端偏好白名单漏收 id，
     都表现为同一类故障：某一页从界面上消失，或者升级后标签静默丢失。
     这份用例把五处对齐：TAB_META 容器 ↔ TAB_VIEWS 分段 ↔ TAB_OF 映射 ↔
@@ -1622,14 +1623,14 @@ def test_right_panel_merged_tabs_keep_every_view_reachable(home):
     js = read_app_bundle()
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
 
-    # ① 菜单里包含接力工作台；任务/自动化内部段仍不单独占菜单格
+    # ① 菜单里包含接力工作台；任务/自动化/演化地图等内部段不单独占菜单格
     meta = js[js.index("const TAB_META = {"):]
     meta = meta[:meta.index("\n};")]
     tab_ids = re.findall(r"^  (\w+): \{", meta, re.M)
     assert tab_ids == ["aux", "review", "files", "browser", "tasks", "agenda",
-                       "auto", "relay", "memory", "map", "ext", "teamroom"], \
+                       "auto", "relay", "memory", "ext", "teamroom"], \
         f"标签集合变了：{tab_ids}"
-    for old in ("todo", "ptasks", "cron", "pipeline"):
+    for old in ("todo", "ptasks", "cron", "pipeline", "map"):
         assert f"\n  {old}: {{" not in meta, f"{old} 已并入容器标签，不该再单独占一格菜单"
 
     # ② 分段表：TAB_VIEWS 的每个分段都映射回所属容器，TAB_OF 不多不少
@@ -1639,7 +1640,7 @@ def test_right_panel_merged_tabs_keep_every_view_reachable(home):
     merged = dict(re.findall(r'(\w+): \[([^\]]*)\]', views))
     merged = {k: re.findall(r'"(\w+)"', v) for k, v in merged.items()}
     assert merged == {"tasks": ["tasks", "todo", "ptasks"], "auto": ["cron", "pipeline"],
-                      "ext": ["mcp", "skills"]}, merged
+                      "memory": ["memory", "map"], "ext": ["mcp", "skills"]}, merged
     tab_of = js[js.index("const TAB_OF = {"):]
     tab_of = tab_of[:tab_of.index("};")]
     tab_of = dict(re.findall(r'(\w+): "(\w+)"', tab_of))

@@ -101,8 +101,7 @@
              角标计活动团队数（常驻登记 + 当前会话进行中的团队，app-teamroom.js 维护） -->
         <button class="nav-item" data-act="teamroom" id="nav-team" title="协作：频道、工单板与成员分区；角标是进行中的团队数">协作<span id="nav-team-badge" class="nav-badge hidden"></span></button>
         <button class="nav-item" data-act="auto" title="自动化：定时（到点自己干活）与编排（按依赖顺序自动跑），无人值守">自动化</button>
-        <button class="nav-item" data-act="memory" title="AGENTS.md 项目约定，每轮对话自动生效">项目记忆</button>
-        <button class="nav-item" data-act="map" title="项目演化的可视化：时间线 + 主题图谱 + 演化摘要">记忆地图</button>
+        <button class="nav-item" data-act="memory" title="项目记忆：AGENTS.md 项目约定（每轮生效）与项目演化记忆地图（时间线 / 图谱）">项目记忆</button>
         <button class="nav-item" data-act="ext" title="技能包与 MCP 服务管理">MCP / Skills</button>
       </nav>
 
@@ -199,14 +198,14 @@
   <!-- 拖动调整侧栏宽度（双击恢复默认） -->
   <div id="sb-resizer" class="ui-resizer ui-resizer-v" title="拖动调整侧栏宽度&nbsp;&nbsp;双击恢复默认"></div>
 
-  <!-- 侧栏收起后的窄栏（mini rail）：顶部展开钮 + 功能导航八件套（团队室常驻入口随 §15.3.5 增设）+ 主操作（新建会话 /
+  <!-- 侧栏收起后的窄栏（mini rail）：顶部展开钮 + 功能导航七件套（项目记忆与记忆地图合为一入口）+ 主操作（新建会话 /
        工厂看板）与搜索 + 最近会话的首字快捷列（点击直接切换会话，当前项高亮）。
        显隐完全交给 CSS 的 body.left-collapsed（宽度 / 负 margin 滑动过渡，非硬切）——
        不要给 rail 及其按钮加 .hidden 类：它是 display:none !important，会把
        展开态的显示规则一起压掉（此前「折叠后再也打不开侧栏」正是它造成的）。 -->
   <aside id="sb-rail" aria-label="侧栏已折叠">
     <button id="rail-expand" class="rail-btn" title="展开侧栏（Ctrl+B）">»</button>
-    <!-- 功能导航八件套：与侧栏 .side-menu 同一套动作、同一顺序（openRightTab / 接力走工作台）；图标为本项目手绘线稿 -->
+    <!-- 功能导航七件套：与侧栏 .side-menu 同一套动作、同一顺序（openRightTab / 接力走工作台）；图标为本项目手绘线稿 -->
     <button class="rail-btn" data-rail-act="todo" title="任务：Agent 拆解的执行步骤、派出的子代理与本项目事项都在这里" aria-label="任务">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V3.5A1.5 1.5 0 0 1 10.5 2h3A1.5 1.5 0 0 1 15 3.5V4"/><path d="m9 13.5 2.2 2.2 4-4.5"/></svg>
     </button>
@@ -224,11 +223,8 @@
     <button class="rail-btn" data-rail-act="auto" title="自动化：定时（到点自己干活）与编排（按依赖顺序自动跑），无人值守" aria-label="自动化">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="13" r="7.5"/><path d="M12 9.5V13l2.5 2"/><path d="M5 3 2.5 5.5M19 3l2.5 2.5"/></svg>
     </button>
-    <button class="rail-btn" data-rail-act="memory" title="项目记忆：AGENTS.md 项目约定，每轮对话自动生效" aria-label="项目记忆">
+    <button class="rail-btn" data-rail-act="memory" title="项目记忆：AGENTS.md 项目约定与项目演化记忆地图" aria-label="项目记忆">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h5.5A3.5 3.5 0 0 1 12 7.5V21a2.5 2.5 0 0 0-2.5-2.5H3Z"/><path d="M21 4h-5.5A3.5 3.5 0 0 0 12 7.5V21a2.5 2.5 0 0 1 2.5-2.5H21Z"/></svg>
-    </button>
-    <button class="rail-btn" data-rail-act="map" title="记忆地图：项目演化的可视化（时间线 + 主题图谱）" aria-label="记忆地图">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="17" r="1.7"/><circle cx="12" cy="6" r="1.7"/><circle cx="18.5" cy="13.5" r="1.7"/><path d="m7.2 15.4 3.9-7.9M13.6 7l3.9 5.2M7.7 17.1l9.1-3"/></svg>
     </button>
     <button class="rail-btn" data-rail-act="ext" title="MCP / Skills：技能包与 MCP 服务管理" aria-label="MCP / Skills">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3v5M15 3v5"/><path d="M6.5 8h11v3.5a5.5 5.5 0 0 1-11 0Z"/><path d="M12 17v4"/></svg>
@@ -702,58 +698,66 @@
             </div>
           </section>
 
+          <!-- 项目记忆：原「项目记忆（AGENTS.md）」与「记忆地图（项目演化）」合成一个容器，
+               前者写给 Agent 的生效规则，后者让人回顾演化历史并可将阶段经验沉淀进 AGENTS.md -->
           <section id="rp-page-memory" class="rp-page hidden">
-            <div class="rp-toolbar">
-              <span class="dim small">项目记忆（AGENTS.md）&nbsp;&nbsp;每轮对话自动生效</span>
-              <span class="spacer"></span>
-              <button id="memory-reload" class="rp-mini" title="放弃修改，重新从磁盘读取">重读</button>
-              <button id="memory-save" class="rp-mini primary">保存</button>
+            <div class="rp-segs seg-row seg-mini" id="rp-segs-memory" data-tab="memory">
+              <button data-view="memory" class="active" title="AGENTS.md 项目约定，每轮对话自动生效">约定</button>
+              <button data-view="map" title="项目演化地图（时间线 / 图谱 / 摘要）与记忆沉淀">演化地图</button>
             </div>
-            <label class="toggle-row check-row rp-maintain-row"
-                   title="按全局设置的周期，用当前模型通读本项目的 AGENTS.md：合并重复、清理过时、精简表述；整理前自动备份原件为 .bak。不足 600 字时自动跳过、不花模型调用">
-              <input type="checkbox" id="rp-memory-maintain">
-              <span>定期整理项目记忆（按全局设置的周期）</span>
-            </label>
-            <textarea id="rp-memory-text" class="rp-memory-text" spellcheck="false"
-                      placeholder="写给 Agent 看的项目约定，例如：&#10;- 提交信息用中文&#10;- 改完代码必须跑一遍测试&#10;- 所有新接口都要带错误处理"></textarea>
-            <div id="memory-status" class="rp-memory-status"></div>
-          </section>
 
-          <!-- 记忆地图：项目演化的可视化。时间线（会话/事件/里程碑按月铺开）与
-               主题图谱（阶段-主题-文件-记忆 关联网络）双视图；热力图与文件足迹
-               常驻底部。数据来自 map.get，摘要生成走 map.generate（后台任务）。 -->
-          <section id="rp-page-map" class="rp-page hidden">
-            <div class="rp-toolbar map-toolbar">
-              <select id="map-project" class="map-select" title="选择要查看的项目"></select>
-              <select id="map-range" class="map-select" title="时间范围">
-                <option value="30">近 30 天</option>
-                <option value="90" selected>近 90 天</option>
-                <option value="0">全部</option>
-              </select>
-              <span class="spacer"></span>
-              <button id="map-feedback" class="rp-mini" title="地图或摘要不对劲？生成诊断包并打开 GitHub 反馈页（诊断包已自动打码）">反馈</button>
-              <button id="map-auto" class="rp-mini" title="自动生成演化摘要：开启后项目累计足量新会话时，后台自动总结（每次都是一次真实模型调用）">自动</button>
-              <button id="map-gen" class="rp-mini primary" title="用当前模型通读项目会话史，总结演化阶段与主题">✦ 生成演化摘要</button>
+            <div class="rp-seg-view" id="rp-view-memory">
+              <div class="rp-toolbar">
+                <span class="dim small">项目约定（AGENTS.md）&nbsp;&nbsp;每轮对话自动生效</span>
+                <span class="spacer"></span>
+                <button id="memory-reload" class="rp-mini" title="放弃修改，重新从磁盘读取">重读</button>
+                <button id="memory-save" class="rp-mini primary">保存</button>
+              </div>
+              <label class="toggle-row check-row rp-maintain-row"
+                     title="按全局设置的周期，用当前模型通读本项目的 AGENTS.md：合并重复、清理过时、精简表述；整理前自动备份原件为 .bak。不足 600 字时自动跳过、不花模型调用">
+                <input type="checkbox" id="rp-memory-maintain">
+                <span>定期整理项目约定（按全局设置的周期）</span>
+              </label>
+              <textarea id="rp-memory-text" class="rp-memory-text" spellcheck="false"
+                        placeholder="写给 Agent 看的项目约定，例如：&#10;- 提交信息用中文&#10;- 改完代码必须跑一遍测试&#10;- 所有新接口都要带错误处理"></textarea>
+              <div id="memory-status" class="rp-memory-status"></div>
             </div>
-            <div class="seg-row seg-mini map-segbar" id="map-segbar">
-              <button data-view="timeline" class="active">时间线</button>
-              <button data-view="graph">图谱</button>
-            </div>
-            <!-- 轮次记忆沉淀的待审候选（memory.candidates）：有候选才展开成显眼入口，
-                 空列表且未开沉淀时整块隐藏（app-memmap.js 的 loadMemoryCandidates 渲染） -->
-            <details id="map-distill" class="map-distill hidden">
-              <summary title="每轮对话收尾后，当前模型挑出的「值得长期记住」信息；采纳后写入全局记忆，忽略不再提出">
-                <span id="map-distill-title">记忆候选</span>
-              </summary>
-              <div id="map-distill-body" class="map-distill-body"></div>
-            </details>
-            <div id="map-body" class="map-body">
-              <div id="map-timeline" class="map-timeline"></div>
-              <div id="map-graph" class="map-graph hidden"></div>
-            </div>
-            <div id="map-aside" class="map-aside">
-              <div id="map-files" class="map-files" title="改动最多的文件（来自检查点记录），点击只看涉及它的会话"></div>
-              <div id="map-heat" class="map-heat"></div>
+
+            <!-- 演化地图分段：时间线（会话/事件/里程碑按月铺开）与主题图谱（阶段-主题-文件-记忆
+                 关联网络）双视图；热力图与文件足迹常驻底部。数据来自 map.get，摘要生成走 map.generate。 -->
+            <div class="rp-seg-view hidden" id="rp-view-map">
+              <div class="rp-toolbar map-toolbar">
+                <select id="map-project" class="map-select" title="选择要查看的项目"></select>
+                <select id="map-range" class="map-select" title="时间范围">
+                  <option value="30">近 30 天</option>
+                  <option value="90" selected>近 90 天</option>
+                  <option value="0">全部</option>
+                </select>
+                <span class="spacer"></span>
+                <button id="map-feedback" class="rp-mini" title="地图或摘要不对劲？生成诊断包并打开 GitHub 反馈页（诊断包已自动打码）">反馈</button>
+                <button id="map-auto" class="rp-mini" title="自动生成演化摘要：开启后项目累计足量新会话时，后台自动总结（每次都是一次真实模型调用）">自动</button>
+                <button id="map-gen" class="rp-mini primary" title="用当前模型通读项目会话史，总结演化阶段与主题">✦ 生成演化摘要</button>
+              </div>
+              <div class="seg-row seg-mini map-segbar" id="map-segbar">
+                <button data-view="timeline" class="active">时间线</button>
+                <button data-view="graph">图谱</button>
+              </div>
+              <!-- 轮次记忆沉淀的待审候选（memory.candidates，作用域为跨项目全局记忆 ~/.skysheep/memory.md；
+                   亦支持一键记入当前项目 AGENTS.md）：有候选才展开成显眼入口，空列表且未开沉淀时隐藏 -->
+              <details id="map-distill" class="map-distill hidden">
+                <summary title="每轮对话收尾后，当前模型挑出的「值得长期记住」候选；可写入跨项目全局记忆，或记入当前项目 AGENTS.md">
+                  <span id="map-distill-title">跨项目全局记忆候选</span>
+                </summary>
+                <div id="map-distill-body" class="map-distill-body"></div>
+              </details>
+              <div id="map-body" class="map-body">
+                <div id="map-timeline" class="map-timeline"></div>
+                <div id="map-graph" class="map-graph hidden"></div>
+              </div>
+              <div id="map-aside" class="map-aside">
+                <div id="map-files" class="map-files" title="改动最多的文件（来自检查点记录），点击只看涉及它的会话"></div>
+                <div id="map-heat" class="map-heat"></div>
+              </div>
             </div>
           </section>
 
@@ -2812,6 +2816,7 @@
           <div id="factory-panel-head">
             <span class="fp-title">厂区</span>
             <span class="fp-ops">
+              <button id="factory-panel-runs" class="sec-ops fx-narrow-only" title="运行记录：按状态 / 厂区筛选、翻页，行内可直接打开产出">运行记录</button>
               <button id="factory-panel-fold" class="sec-ops" title="折叠 / 展开厂区目录">‹</button>
             </span>
           </div>

@@ -683,6 +683,44 @@ if (typeof ResizeObserver === "function") {
 }
 window.addEventListener("resize", syncSplitTop);
 
+// 元素高度换算回未缩放的布局像素：getBoundingClientRect 是 zoom 之后的视口
+// 像素，写 style.height/min-height 要的是布局像素；offsetHeight 取整会在
+// 120% 缩放时留下半像素错位。读不到 zoom（旧内核）时退回 offsetHeight。
+function cssLayoutHeight(el) {
+  if (!el) return 0;
+  const app = document.getElementById("app");
+  const zoom = app ? parseFloat(getComputedStyle(app).zoom) : NaN;
+  return Number.isFinite(zoom) && zoom > 0
+    ? el.getBoundingClientRect().height / zoom
+    : el.offsetHeight;
+}
+
+// 右面板标签头与顶栏同高：右面板与 #chat-main 是并排两列，顶部两道横向
+// 墨线必须落在同一条水平线上。标签内容撑出的高度（#rp-tabs 约 41px）比
+// 顶栏实高矮一截，CSS 只给 min-height 兜底；这里按 topbar 实测同步，
+// 与 syncSplitTop 的「分屏顶部对齐顶栏下沿」是同一件事的横向版本。
+// ResizeObserver 盯顶栏：界面缩放 / 窗口变化 / 标签行高度变化都会触发。
+function syncRpTabsHeight() {
+  const tabs = document.getElementById("rp-tabs");
+  if (!tabs) return;
+  const h = cssLayoutHeight(document.getElementById("topbar"));
+  if (h > 0) tabs.style.height = h + "px";
+}
+if (typeof ResizeObserver === "function") {
+  new ResizeObserver(syncRpTabsHeight).observe(document.getElementById("topbar"));
+}
+window.addEventListener("resize", syncRpTabsHeight);
+syncRpTabsHeight();
+
+// 分屏列输入区首次出现时的目标高度：与主栏输入区同高（返回值为未缩放的
+// 布局像素）。量不到主栏（非对话视图 / 尚未布局）返回 0，调用方跳过。
+function splitComposerAlignHeight() {
+  const mainH = cssLayoutHeight(document.getElementById("composer"));
+  if (!(mainH > 0)) return 0;
+  const lim = UI_LIMITS.split_composer_h;
+  return Math.min(lim.max, Math.max(lim.min, mainH));
+}
+
 async function openSplitPane(sid, title) {
   // 会话分屏与预览分栏互斥：同一块右侧空间只放一层。预览就地收起（页面留在
   // 分栏容器里，地址不丢），不弹右面板——否则分屏还没开、对话先被面板挤窄。
@@ -776,9 +814,14 @@ async function openSplitPane(sid, title) {
   splitPaneEl.appendChild(col);
   splitPaneEl.classList.remove("hidden");
   chatMainEl.classList.add("has-split"); // composer 等底部件让出右侧宽度（CSS）
+  // 第一列出现时两栏输入区顶线对齐：以主栏输入区当前高度起步。已有列时
+  // 保持当前高度（可能是用户拖出来的），新增列沿用同一高度，不回头覆盖。
+  if (!splitPanes.length) {
+    const alignH = splitComposerAlignHeight();
+    if (alignH > 0) setUiVar("split_composer_h", alignH);
+  }
   lastSplitSids = [...new Set([sid, ...lastSplitSids])].slice(0, SPLIT_MAX);
   syncPaneSwitchBtn();
-  syncSplitTop();
   // 列对象同时是渲染伪 tab：补齐流式渲染需要的字段（appendStream/工具卡等
   // 都经 curTab() 路由，事件带 sid 时 handleEvent 会把 routeTab 指到列上）。
   // 字段口径对齐 newTabObj：缺 lastAssistantText 的话，无流式正文的轮在
@@ -805,6 +848,9 @@ async function openSplitPane(sid, title) {
     pane.logEl._followBottom = logNearBottom(pane.logEl);
   }, { passive: true });
   splitPanes.push(pane);
+  // 首次打开也要把列顶部对到顶栏下沿：syncSplitTop 只认已经在册的列，
+  // 调用点必须放在 push 之后，否则第一次出现时还停在 CSS 的 44px 兜底上。
+  syncSplitTop();
   // 本列自己的消息导航条（与主栏同一套圆点/高亮/跳转；CSS 按列宽缩小一点）
   pane.minimap = createChatMinimap(col, { log: pane.logEl });
   const reload = () => renderHistory(pane, info.messages || [], info.messages_offset);
@@ -933,6 +979,15 @@ async function openSplitPane(sid, title) {
     }, (v) => {
       if (v == null) autoGrowInput(input);
       else input.style.height = "";
+    }, {
+      dblclick: () => {
+        // 双击恢复默认 = 回到与主栏输入区对齐的高度（不是 74px 的裸兜底）；
+        // 清掉已存偏好，下次开列仍按主栏高度自动对齐
+        saveUiPrefs({ split_composer_h: null });
+        const h = splitComposerAlignHeight();
+        if (h > 0) setUiVar("split_composer_h", h);
+        autoGrowInput(input);
+      },
     });
     autoGrowInput(input);
     // 列 composer 宽度观察器：与主栏同款（boot 期错误折行的高度在这里纠正）。
@@ -1600,7 +1655,7 @@ async function loadMsgImage(img) {
       seq: Number(img.dataset.imgSeq || 0),
       index: Number(img.dataset.imgIndex || 0),
     });
-    img.src = `data:${r.media_type};base64,${r.data}`;
+    img.src = `data:${safeImageMediaType(r.media_type)};base64,${r.data}`;
     img.classList.remove("img-pending");
   } catch (e) {
     img.classList.remove("img-pending");
@@ -1765,7 +1820,7 @@ function finishToolCard(data) {
       const el = document.createElement("img");
       el.className = "tool-image";
       el.alt = "工具截图";
-      el.src = `data:${img.media_type || "image/png"};base64,${img.data}`;
+      el.src = `data:${safeImageMediaType(img.media_type)};base64,${img.data}`;
       el.onclick = () => el.classList.toggle("zoom");
       card.querySelector(".t-body").appendChild(el);
     }
@@ -6591,6 +6646,10 @@ async function send() {
 
 // ---------- 图片附件：粘贴 / 拖拽 / 托盘预览，随下一条消息发送 ----------
 const IMAGE_TYPES = { "image/png": 1, "image/jpeg": 1, "image/webp": 1, "image/gif": 1 };
+function safeImageMediaType(mt) {
+  const k = String(mt || "").toLowerCase();
+  return IMAGE_TYPES[k] ? k : "image/png";
+}
 const IMAGE_MAX_BYTES = 4 * 1024 * 1024;
 const IMAGE_MAX_COUNT = 4;
 let pendingImages = []; // [{ media_type, data(base64) }]
@@ -6614,12 +6673,18 @@ function renderImageTray(pane) {
       const cell = document.createElement("div");
       cell.className = "image-thumb";
       cell.style.viewTransitionName = im._vtId;
-      cell.innerHTML = `<img src="data:${im.media_type};base64,${im.data}" alt="附件${i + 1}">` +
-        `<button class="thumb-del" title="移除">✕</button>`;
-      cell.querySelector(".thumb-del").onclick = () => {
+      const thumbImg = document.createElement("img");
+      thumbImg.src = `data:${safeImageMediaType(im.media_type)};base64,${im.data}`;
+      thumbImg.alt = `附件${i + 1}`;
+      const thumbDel = document.createElement("button");
+      thumbDel.className = "thumb-del";
+      thumbDel.title = "移除";
+      thumbDel.textContent = "✕";
+      thumbDel.onclick = () => {
         list.splice(i, 1);
         renderImageTray(pane);
       };
+      cell.append(thumbImg, thumbDel);
       tray.appendChild(cell);
     });
   };
@@ -8449,7 +8514,7 @@ function showHelp() {
 
 document.getElementById("btn-help").onclick = () => showHelp();
 
-// ---------- 左栏功能导航（工厂看板 / 任务 / 日程 / 接力 / 团队室 / 自动化 / 项目记忆 / 记忆地图 / MCP·Skills） ----------
+// ---------- 左栏功能导航（工厂看板 / 任务 / 日程 / 接力 / 团队室 / 自动化 / 项目记忆 / MCP·Skills） ----------
 // 顺序按使用频次排，与 index.html 的 .side-menu、.rail-btn 图标条两处保持一致（改一处必须同步改另外两处）
 // 工厂看板是与「新建会话」并列的主操作（#btn-factory，同一身 .nav-new 皮），已不在 .side-menu 里，
 // 但动作分发仍只在这一处：选择器把两个都收进来，别在别处再挂一遍 onclick
@@ -8558,25 +8623,72 @@ async function loadMemoryPanel(force = false) {
   } catch (e) { /* 拉不到就保持默认勾选，失败在切换时才暴露 */ }
 }
 
+function applySavedMemoryState(res, fullText) {
+  rpMemoryText.value = fullText;
+  rpMemoryMtime = res.mtime || 0;
+  rpMemoryOrig = rpMemoryText.value; // 已落盘：重读不再视为「有未保存修改」
+  memoryLoaded = true;
+  if (res.truncated) {
+    // 截断不再静默：明说超了多少、文件里留了多少
+    memoryStatus(
+      `⚠ 已保存，但超出 ${res.limit} 字上限：只保留前 ${res.chars} 字，` +
+      `后 ${res.original_chars - res.chars} 字没有写入 → ${res.path}`, false);
+    addNotice(`项目记忆超出 ${res.limit} 字上限，超出部分未保存`);
+  } else {
+    memoryStatus("");
+  }
+}
+
 async function saveMemoryPanel() {
   try {
+    const raw = rpMemoryText.value;
     const res = await request("project.save_instructions", {
-      text: rpMemoryText.value, base_mtime: rpMemoryMtime,
+      text: raw, base_mtime: rpMemoryMtime,
     });
-    rpMemoryMtime = res.mtime || 0;
-    rpMemoryOrig = rpMemoryText.value; // 已落盘：重读不再视为「有未保存修改」
-    if (res.truncated) {
-      // 截断不再静默：明说超了多少、文件里留了多少
-      memoryStatus(
-        `⚠ 已保存，但超出 ${res.limit} 字上限：只保留前 ${res.chars} 字，` +
-        `后 ${res.original_chars - res.chars} 字没有写入 → ${res.path}`, false);
-      addNotice(`项目记忆超出 ${res.limit} 字上限，超出部分未保存`);
-    } else {
-      memoryStatus("");
-    }
+    applySavedMemoryState(res, raw.slice(0, res.chars || raw.length));
   } catch (e) {
     memoryStatus("✗ 保存失败：" + e.message, false);
   }
+}
+
+/** 演化地图 → 项目约定沉淀入口：把演化摘要要点或记忆候选确认后追加进当前项目 AGENTS.md。 */
+function promoteToProjectInstructions(draftText, sourceLabel = "") {
+  const initial = String(draftText || "").trim();
+  if (!initial) return;
+  const mapProj = (typeof mapState === "object" && mapState.data && mapState.data.project)
+    ? mapState.data.project : null;
+  const curPid = typeof bootSnap === "object" && bootSnap && bootSnap.project_id != null
+    ? String(bootSnap.project_id) : "";
+  const curPname = (typeof bootSnap === "object" && bootSnap && bootSnap.project) || "当前项目";
+  const otherProj = mapProj && curPid && String(mapProj.id) !== curPid;
+
+  const box = document.createElement("div");
+  box.className = "modal-promote-box";
+  box.innerHTML =
+    (sourceLabel ? `<p class="dim small" style="margin:0 0 6px">${escapeHtml(sourceLabel)} —— 追加到当前项目的 <code>AGENTS.md</code>，每轮对话自动生效。</p>` : "") +
+    (otherProj
+      ? `<p class="modal-promote-warn small">⚠ 当前预览的是「${escapeHtml(mapProj.name || "其他项目")}」的地图；项目约定只会写入当前打开的工作区项目「${escapeHtml(curPname)}」。</p>`
+      : "") +
+    '<label class="dim small" for="promote-rules-text">可先编辑调整再写入：</label>' +
+    '<textarea id="promote-rules-text" class="modal-input" rows="6" spellcheck="false"></textarea>';
+  const ta = box.querySelector("#promote-rules-text");
+  ta.value = initial;
+
+  showModal("沉淀为项目约定（AGENTS.md）", box, async () => {
+    const addition = ta.value.trim();
+    if (!addition) throw new Error("约定内容不能为空");
+    const cur = await request("project.instructions");
+    const existing = String(cur.text || "").trimEnd();
+    const nextText = existing ? `${existing}\n\n${addition}\n` : `${addition}\n`;
+    const res = await request("project.save_instructions", {
+      text: nextText, base_mtime: cur.mtime || 0,
+    });
+    const written = nextText.slice(0, res.chars || nextText.length);
+    applySavedMemoryState(res, written);
+    if (!res.truncated) {
+      addNotice("已追加到项目约定（AGENTS.md），每轮对话立即生效");
+    }
+  }, "写入 AGENTS.md");
 }
 document.getElementById("memory-save").onclick = () => { saveMemoryPanel(); };
 // 项目记忆定期整理开关（设置页移入）：切换即保存；全局开关与周期仍归设置页管，
@@ -9222,8 +9334,6 @@ const RP_ICONS = {
   auto: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 2.5 5.5 13h5L10 21.5 18.5 11h-5.2z"/></svg>',
   pipeline: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5.5" cy="6" r="2.1"/><circle cx="5.5" cy="18" r="2.1"/><circle cx="18.5" cy="12" r="2.1"/><path d="M7.4 6.9 16.6 11.1M7.4 17.1 16.6 12.9"/></svg>',
   memory: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3.5" width="14" height="17" rx="2"/><path d="M9 3.5v17"/><path d="M12.5 8h4M12.5 12h4"/></svg>',
-  // 记忆地图：三颗星连成星座——项目演化「星轨图」的意象
-  map: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="17" r="1.7"/><circle cx="12" cy="6" r="1.7"/><circle cx="18.5" cy="13.5" r="1.7"/><path d="m7.2 15.4 3.9-7.9M13.6 7l3.9 5.2M7.7 17.1l9.1-3"/></svg>',
   ext: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3.5V8M15 3.5V8"/><path d="M6.5 8h11v2.5a5.5 5.5 0 0 1-5.5 5.5 5.5 5.5 0 0 1-5.5-5.5z"/><path d="M12 16v4.5"/></svg>',
   relay: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.3"/><circle cx="18" cy="18" r="2.3"/><path d="M8 6h5a4 4 0 0 1 4 4v2M16 18h-5a4 4 0 0 1-4-4v-2"/><path d="m13 9 4 3 3-4M11 15l-4-3-3 4"/></svg>',
   // 团队室：左侧横线＝频道消息流，右侧方格＝工单看板（页签三分区的意象）
@@ -9233,12 +9343,12 @@ const RP_ICONS = {
   panelClosed: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M14.5 4.5v15"/><path d="m8.5 9.5 2.5 2.5-2.5 2.5"/></svg>',
   panelOpen: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M14.5 4.5v15"/><path d="M15.5 6h3a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1h-3z" fill="currentColor" stroke="none" opacity=".3"/><path d="m11.5 9.5-2.5 2.5 2.5 2.5"/></svg>',
 };
-// 面板标签：原先 12 个平铺在「＋」菜单里，其中三个「任务…」和两个自动化页
-// 挤在一起看着像同一件事的多个入口。现在合并成两个带分段的标签：
-//   任务   = 子代理 / 步骤 / 事项（分段短名；完整语义见 docs/界面术语表.md）
-//   自动化 = 定时 / 编排
+// 面板标签：原先平铺在「＋」菜单里，其中关联视图已收成带分段的容器标签：
+//   任务     = 子代理 / 步骤 / 事项（分段短名；完整语义见 docs/界面术语表.md）
+//   自动化   = 定时 / 编排
+//   项目记忆 = 约定（AGENTS.md）/ 演化地图（时间线与图谱）
 // 合并的只是「菜单里占几格」：各分段仍是原来的 DOM、原来的渲染与加载函数，
-// 侧栏与窄栏的入口（步骤 / 事项 / 定时 / 编排）点进去直接
+// 侧栏与窄栏的入口（步骤 / 事项 / 定时 / 编排 / 演化地图）点进去直接
 // 落在对应分段，不因为合并就多一步点击。
 const TAB_META = {
   aux: { title: "辅助对话" },
@@ -9249,22 +9359,21 @@ const TAB_META = {
   agenda: { title: "日程" },
   auto: { title: "自动化", sub: "定时  编排" },
   relay: { title: "接力" },
-  memory: { title: "项目记忆" },
-  map: { title: "记忆地图", sub: "项目演化  时间线  图谱" },
+  memory: { title: "项目记忆", sub: "约定  演化地图" },
   ext: { title: "MCP / Skills" },
   // 协作（团队模式设计 §15）：入口跟团队走（团队卡 / 协作菜单），不进「＋」菜单
   teamroom: { title: "协作", sub: "频道  工单  成员" },
 };
 // 分段 id → 所属标签。合并前的 ui.json 里存的就是分段 id（todo / ptasks /
-// cron / pipeline），靠这张表映射回所属标签并把分段一并还原。
-const TAB_OF = { tasks: "tasks", todo: "tasks", ptasks: "tasks", cron: "auto", pipeline: "auto", mcp: "ext", skills: "ext" };
+// cron / pipeline / map），靠这张表映射回所属标签并把分段一并还原。
+const TAB_OF = { tasks: "tasks", todo: "tasks", ptasks: "tasks", cron: "auto", pipeline: "auto", memory: "memory", map: "memory", mcp: "ext", skills: "ext" };
 // 标签 id → 分段顺序（第一个是打开时的默认段）；不在表里的标签没有分段
-const TAB_VIEWS = { tasks: ["tasks", "todo", "ptasks"], auto: ["cron", "pipeline"], ext: ["mcp", "skills"] };
+const TAB_VIEWS = { tasks: ["tasks", "todo", "ptasks"], auto: ["cron", "pipeline"], memory: ["memory", "map"], ext: ["mcp", "skills"] };
 let rightTabs = [];    // 打开的标签 id（有序；只存容器标签，不存分段）
 let rightActive = null;
 // 每个合并标签当前显示哪一段（内存态：落盘时把分段 id 写进 right_active，
 // 重启后还原——见 rightActiveView / initUiPrefs）
-const rightView = { tasks: "tasks", auto: "cron", ext: "mcp" };
+const rightView = { tasks: "tasks", auto: "cron", memory: "memory", ext: "mcp" };
 
 /** 分段 id（或普通标签 id）→ 面板标签 id。 */
 function rightTabFor(id) {
@@ -9338,8 +9447,8 @@ const RIGHT_TAB_LOADERS = {
   cron: () => loadCron(),
   pipeline: () => loadPipelines(),
   review: () => refreshReview(),
-  memory: () => loadMemoryPanel(),
-  map: () => loadMemoryMap(),
+  memory: (force) => loadMemoryPanel(force),
+  map: (force) => loadMemoryMap(force),
   ext: () => openExtPanel(), // 容器 id 直接传进来时（恢复偏好等）也接得住
   mcp: () => openExtPanel(),
   skills: () => openExtPanel(),
@@ -9933,7 +10042,7 @@ document.getElementById("rail-search").onclick = () => {
     if (el) { el.focus(); el.select(); }
   });
 };
-// 窄栏功能导航八件套（含主操作组的工厂看板）：与侧栏导航项同一套动作
+// 窄栏功能导航七件套（含主操作组的工厂看板）：与侧栏导航项同一套动作
 // （openRightTab 打开右侧面板标签）；停在设置页时先回对话，别让面板开在看不见的地方。
 document.querySelectorAll("#sb-rail [data-rail-act]").forEach((btn) => {
   btn.onclick = () => {
@@ -12176,6 +12285,9 @@ function applyUiScale(pct) {
   document.getElementById("btn-zoom-in").disabled = pct >= UI_SCALE_MAX;
   // 浏览器面板的自适应缩放按「视口布局像素」算，zoom 变了布局像素就变，跟着重算
   layoutBrowserFrame();
+  // 顶栏高度随 zoom 有零点几像素变化：右面板标签条按新高度再同步一次，
+  // 两条横向墨线在任意界面缩放下都对齐（见 syncRpTabsHeight）
+  syncRpTabsHeight();
 }
 
 // 缩放偏好防抖落盘：Ctrl+滚轮一格接一格地滚，不能每格都写一次 ui.json
@@ -15527,8 +15639,8 @@ function paletteBaseItems() {
     ["todo", "任务", "todo 子代理 步骤 事项"],
     ["agenda", "日程", "agenda 提醒 日历"],
     ["auto", "自动化", "cron 定时 编排 无人值守"],
-    ["memory", "项目记忆", "agents.md 约定 记忆"],
-    ["map", "记忆地图", "memmap 图谱 时间线 演化"],
+    ["memory", "项目记忆 · 约定", "agents.md 约定 项目记忆"],
+    ["map", "项目记忆 · 演化地图", "记忆地图 memmap 图谱 时间线 演化"],
     ["ext", "MCP / Skills", "mcp skills 技能 工具 管理"],
   ].forEach(([id, label, kwd]) => {
     items.push({

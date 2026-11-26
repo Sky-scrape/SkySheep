@@ -55,6 +55,12 @@ function mapBasename(p) {
 
 let mapLoadSeq = 0; // 连点项目/时间范围时只认最后一次请求，迟到的旧结果直接丢掉
 
+function resetMemoryMapForProject() {
+  mapProjects = [];
+  mapState.fileFilter = null;
+  if (!mapState.projectId) mapState.data = null;
+}
+
 // 请求期间先把旧数据从屏上撤掉：切项目/改时间范围时不能先亮着上一个项目的地图
 function mapShowLoading() {
   const graph = mapState.view === "graph";
@@ -160,21 +166,22 @@ function renderMemoryCandidates() {
   // 不强收——开关行在里面，收起来会藏掉用户刚点过的开关）
   if (n) box.open = wasHidden || box.open;
   const title = document.getElementById("map-distill-title");
-  if (title) title.textContent = n ? `记忆候选  ${n} 条待审` : "记忆候选  暂无待审";
+  if (title) title.textContent = n ? `跨项目全局记忆候选  ${n} 条待审` : "跨项目全局记忆候选  暂无待审";
   const tgl = `<label class="toggle-row check-row map-distill-toggle"
-    title="开启后每轮对话收尾，用当前模型挑出「值得长期记住」的候选（每轮至多 3 条，失败不提示），采纳后才写入全局记忆。额外消耗一次模型调用；寒暄、过短的轮次不会触发。">
+    title="开启后每轮对话收尾，用当前模型挑出「值得长期记住」的候选（每轮至多 3 条，失败不提示），采纳后默认写入跨项目全局记忆。额外消耗一次模型调用；寒暄、过短的轮次不会触发。">
     <input type="checkbox" id="map-distill-toggle"${distillState.enabled ? " checked" : ""}>
-    <span>轮次自动沉淀</span></label>`;
+    <span>轮次自动沉淀（全局记忆）</span></label>`;
   const rows = distillState.pending.map((c) =>
     `<div class="map-distill-item" data-cid="${escapeHtml(c.id)}">
        <span class="map-distill-text" title="${escapeHtml(c.context || "（没有原文摘录）")}">${escapeHtml(c.text)}</span>
        <span class="map-distill-ops">
-         <button class="rp-mini" data-op="adopt" title="写入全局记忆（与既有记忆重复会自动跳过）">采纳</button>
+         <button class="rp-mini" data-op="adopt" title="写入跨项目全局记忆（~/.skysheep/memory.md），与既有记忆重复会自动跳过">采纳→全局</button>
+         <button class="rp-mini" data-op="to-project" title="写入当前项目的 AGENTS.md（每轮仅对本项目生效）">记入项目</button>
          <button class="rp-mini" data-op="ignore" title="丢弃这条，同类信息之后不再被提出">忽略</button>
        </span>
      </div>`).join("");
   body.innerHTML = tgl + (rows ||
-    '<div class="dim small map-distill-empty">没有待审候选。开启沉淀后，对话里值得长期记住的信息会出现在这里，由你决定记不记。</div>');
+    '<div class="dim small map-distill-empty">没有待审候选。开启沉淀后，对话里值得长期记住的信息会出现在这里，可按需写入全局记忆或当前项目 AGENTS.md。</div>');
   const t = document.getElementById("map-distill-toggle");
   if (t) t.onchange = async (e) => {
     const el = e.target;
@@ -191,6 +198,7 @@ function renderMemoryCandidates() {
   };
   body.querySelectorAll(".map-distill-item").forEach((el) => {
     const cid = el.dataset.cid;
+    const cand = distillState.pending.find((x) => String(x.id) === String(cid));
     el.querySelector('[data-op="adopt"]').onclick = async () => {
       try {
         const r = await request("memory.candidate_adopt", { candidate_id: cid });
@@ -198,6 +206,12 @@ function renderMemoryCandidates() {
           : (r.reason || "没有采纳：记忆里已有相同内容"));
       } catch (err) { addNotice("采纳失败: " + err.message); }
       loadMemoryCandidates();
+    };
+    el.querySelector('[data-op="to-project"]').onclick = () => {
+      if (!cand || !cand.text) return;
+      if (typeof promoteToProjectInstructions === "function") {
+        promoteToProjectInstructions("- " + cand.text, "来自轮次记忆候选");
+      }
     };
     el.querySelector('[data-op="ignore"]').onclick = async () => {
       // 忽略是一去不回的黑名单（同类信息之后不再提出）：先问一次，手滑不至于永久拉黑
@@ -249,6 +263,16 @@ function renderMapView() {
   return renderMapTimeline();
 }
 
+function formatDigestAsRules(dg) {
+  const lines = [];
+  if (dg.title) lines.push(`## ${dg.title}`);
+  if (dg.summary) lines.push(`- ${dg.summary}`);
+  (dg.highlights || []).forEach((h) => {
+    if (h) lines.push(`- ${h}`);
+  });
+  return lines.join("\n");
+}
+
 function renderMapTimeline() {
   const d = mapState.data;
   const box = document.getElementById("map-timeline");
@@ -278,7 +302,9 @@ function renderMapTimeline() {
       .map((h) => `<li>${escapeHtml(h)}</li>`).join("");
     html += `<details class="map-overview"><summary>✦ ${escapeHtml(overview.title || "项目总览")}` +
       `<span class="map-dim">${escapeHtml((d.project || {}).name || "")}</span></summary>` +
-      `<div class="map-phase-body"><p>${escapeHtml(overview.summary)}</p>${highs ? `<ul>${highs}</ul>` : ""}</div></details>`;
+      `<div class="map-phase-body"><p>${escapeHtml(overview.summary)}</p>${highs ? `<ul>${highs}</ul>` : ""}` +
+      `<div class="map-phase-actions"><button type="button" class="rp-mini" data-op="promote" data-kind="overview" title="整理为项目约定，确认后追加到当前项目 AGENTS.md">✦ 沉淀为项目约定</button></div>` +
+      `</div></details>`;
   }
   if (!items.length) {
     html += `<div class="map-empty dim">${fileOk ? "这个文件的时间窗内没有会话"
@@ -336,7 +362,9 @@ function mapItemHtml(it) {
     `<span class="map-item-title">${escapeHtml(dg.title)}</span>` +
     `<span class="map-item-meta">阶段  起于 ${mapPad(dd.getMonth() + 1)}-${mapPad(dd.getDate())}  ${ (dg.session_ids || []).length } 个会话</span>` +
     `</span></summary><div class="map-phase-body"><p>${escapeHtml(dg.summary || "")}</p>` +
-    `${highs ? `<ul>${highs}</ul>` : ""}${topics ? `<div class="map-topics">${topics}</div>` : ""}</div></details>`;
+    `${highs ? `<ul>${highs}</ul>` : ""}${topics ? `<div class="map-topics">${topics}</div>` : ""}` +
+    `<div class="map-phase-actions"><button type="button" class="rp-mini" data-op="promote" data-kind="phase" data-did="${dg.id}" title="整理为项目约定，确认后追加到当前项目 AGENTS.md">✦ 沉淀为项目约定</button></div>` +
+    `</div></details>`;
 }
 
 function bindMapTimeline(box) {
@@ -353,6 +381,21 @@ function bindMapTimeline(box) {
       const me = el.parentElement;
       if (me.open) return;
       box.querySelectorAll("details.map-phase[open]").forEach((d) => { if (d !== me) d.open = false; });
+    };
+  });
+  box.querySelectorAll('[data-op="promote"]').forEach((btn) => {
+    btn.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const digests = (mapState.data && mapState.data.digests) || [];
+      const dg = btn.dataset.kind === "overview"
+        ? digests.find((x) => x.kind === "overview")
+        : digests.find((x) => String(x.id) === String(btn.dataset.did));
+      if (!dg || typeof promoteToProjectInstructions !== "function") return;
+      const src = dg.kind === "overview"
+        ? "来自项目演化总览"
+        : `来自演化阶段「${dg.title || "阶段摘要"}」`;
+      promoteToProjectInstructions(formatDigestAsRules(dg), src);
     };
   });
 }

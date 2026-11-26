@@ -536,7 +536,9 @@
     // 远景工业带：独立物件不参与建筑组的零件位移。
 
     models.push({ kind: "cyl", x: 470, y: -100, r: 12, h: 26, role: "steel", bands: 3, bg: true, roadsideTank: 1 });
-    models.push({ kind: "box", x: -480, y: -200, hw: 50, hh: 26, h: 22, role: "steel", windows: 3, roof: "flat", bg: true });
+    models.push({ kind: "archHangar", x: -480, y: -200, hw: 44, hh: 21, h: 15, rise: 11, role: "steel", door: true, bg: true });
+    models.push({ kind: "bridgeCrane", x: -472, y: -158, hw: 30, hh: 7, h: 20, role: "paint", bg: true });
+    models.push({ kind: "rail", path: [{ x: -512, y: -158 }, { x: -432, y: -158 }], bg: true });
     models.push({ kind: "cyl", x: -460, y: -60, r: 24, h: 40, role: "rust", bands: 4, bg: true, roadsideTank: -1 });
     models.push({ kind: "pylon", x: -380, y: -160, bg: true });
     models.push({ kind: "pylon", x: 400, y: -150, bg: true });
@@ -650,6 +652,29 @@
       models.push({ kind: "gantry", x: x + 49, y: y + 30, w: 7, h: 18, hw: 8, hh: 3 });
       models.push({ kind: "crate", x: x + 49, y: y + 34, s: 1.2 });
     }, { near: true });
+    // 外围新增建筑群（拱形机库 / 球罐站 / 光伏阵列 / 风机 / 遥测铁塔）：按环数整体外移，避开相邻设施与干道走廊
+    utilityGroup("commHill", 52, -192, function (x, y) {
+      models.push({ kind: "commTower", x: x, y: y, r: 6.5, h: 32 });
+      models.push({ kind: "solarArray", x: x + 26, y: y + 8, hw: 14, hh: 7, rows: 3 });
+      addBox(x - 16, y + 6, 8, 4, 7, "concrete", { roof: "flat", windows: 2, door: true });
+    });
+    utilityGroup("windSolarField", -468, 4, function (x, y) {
+      models.push({ kind: "windTurbine", x: x - 18, y: y - 10, r: 3.5, h: 36, phase: 0.2 });
+      models.push({ kind: "windTurbine", x: x + 16, y: y + 8, r: 3.2, h: 32, phase: 2.3 });
+      models.push({ kind: "solarArray", x: x - 2, y: y + 24, hw: 18, hh: 8, rows: 3 });
+    });
+    utilityGroup("sphereTerminal", 356, 12, function (x, y) {
+      models.push({ kind: "sphereTank", x: x - 16, y: y - 4, r: 13, h: 14, role: "steel" });
+      models.push({ kind: "sphereTank", x: x + 16, y: y + 8, r: 11, h: 12, role: "rust" });
+      models.push({ kind: "pipeRack", path: [{ x: x - 12, y: y - 2 }, { x: x + 12, y: y + 8 }],
+                    h0: 7, h1: 7, width: 2.5 });
+      models.push({ kind: "archHangar", x: x + 28, y: y - 22, hw: 16, hh: 8, h: 8, rise: 6, role: "rust", door: true });
+    });
+    utilityGroup("eastWindRidge", 455, -118, function (x, y) {
+      models.push({ kind: "windTurbine", x: x - 14, y: y - 4, r: 3.4, h: 34, phase: 1.1 });
+      models.push({ kind: "windTurbine", x: x + 22, y: y + 14, r: 3.0, h: 30, phase: 3.5 });
+      models.push({ kind: "commTower", x: x - 34, y: y + 18, r: 5.5, h: 28 });
+    });
     // 前场两组近景：贴着前缘公路外侧布置（左西料场、右东罐区）。
     // 位置按当前台地算——公路走向就是台地前缘那两条边，台地变大两组跟着挪，
     // 所以它们标 plateauAligned，不再参与 perimeterOffset 的按环位移（见下）。

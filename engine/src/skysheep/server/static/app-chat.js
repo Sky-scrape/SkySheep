@@ -549,7 +549,7 @@ function addUser(text, images, refs) {
     img.className = "user-image";
     img.alt = "图片附件";
     if (im.data) {
-      img.src = `data:${im.media_type};base64,${im.data}`;
+      img.src = `data:${safeImageMediaType(im.media_type)};base64,${im.data}`;
     } else {
       // 历史图片是占位（boot/切会话不再整包 base64，见 session.image）：
       // 进入视口前后再按需拉取真身

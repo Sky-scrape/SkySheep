@@ -210,8 +210,8 @@ class RelaySettingsMixin:
             }
         return st
 
-    async def _relay_dual_emit(self, frame: dict) -> None:
-        """把接力轮的对话事件广播给本机在线连接（与 _relay_broadcast 同口径）。"""
+    async def _emit_local_frame(self, frame: dict) -> None:
+        """把接力事件广播给本机在线连接（过滤掉只允许聊天的远端连接）。"""
         emitters = list(getattr(self, "ws_emitters", []))
         connections = list(getattr(self, "ws_connections", []))
         if connections:
@@ -222,6 +222,20 @@ class RelaySettingsMixin:
                 await ws_emit(frame)
             except Exception:  # noqa: BLE001 - 单个连接失败不影响其余
                 pass
+
+    def _apply_next_note(self, pair_id: str, raw_note: object) -> str:
+        """写入或清空双屏接力下一轮附言（A4）。"""
+        note = str(raw_note or "").strip()[:2000]
+        notes = self._relay_dual_state()["next_notes"]
+        if note:
+            notes[pair_id] = note
+        else:
+            notes.pop(pair_id, None)
+        return note
+
+    async def _relay_dual_emit(self, frame: dict) -> None:
+        """把接力轮的对话事件广播给本机在线连接（与 _relay_broadcast 同口径）。"""
+        await self._emit_local_frame(frame)
 
     async def _relay_dual_broadcast(self, snapshot: dict) -> None:
         await self._relay_dual_emit({"kind": "relay_pair_state", "relay": snapshot})
@@ -361,24 +375,29 @@ class RelaySettingsMixin:
         await self._relay_session_project(session)
         pair = await self.store.relay_pair_latest(session_id)
         if pair is not None:
-            # 旧版留下的超长自动名（【接力 · 主屏】总任务…）在这里顺手收短
+            # 旧版留下的超长自动名（【接力 · 主屏】总任务…）在这里顺手收短；
+            # 必须在 create_lock 之外调用（relay_sync_peer_title 自己要拿锁）。
             await self._relay_normalize_main_title(session, pair["goal"])
         peer = None
-        if pair is not None:
-            peer = await self.store.get_session(pair["peer_session_id"])
-        if peer is None:
-            # 副屏必须和主屏同项目：快聊主屏的副屏也留在快聊（fast-talk 工作
-            # 目录），不能因为「快聊按当前项目收编」就落进另一个项目里跑
-            peer = await self.store.relay_peer_session(
-                session.project_id, _relay_peer_title_for(session.title),
-                create=bool(params.get("create_peer")),
-                exclude_pair_id=pair["id"] if pair else None,
-            )
-            if peer is not None and pair is not None:
-                await self.store.relay_pair_update(
-                    pair["id"], {"peer_session_id": peer.id}, bump=False
+        snapshot = None
+        async with self._relay_dual_create_lock():
+            pair = await self.store.relay_pair_latest(session_id)
+            if pair is not None:
+                peer = await self.store.get_session(pair["peer_session_id"])
+            if peer is None:
+                # 副屏必须和主屏同项目：快聊主屏的副屏也留在快聊（fast-talk 工作
+                # 目录），不能因为「快聊按当前项目收编」就落进另一个项目里跑
+                peer = await self.store.relay_peer_session(
+                    session.project_id, _relay_peer_title_for(session.title),
+                    create=bool(params.get("create_peer")),
+                    exclude_pair_id=pair["id"] if pair else None,
                 )
-        snapshot = await self.store.relay_pair_snapshot(pair["id"]) if pair else None
+                if peer is not None and pair is not None:
+                    await self.store.relay_pair_update(
+                        pair["id"], {"peer_session_id": peer.id}, bump=False
+                    )
+            if pair is not None:
+                snapshot = await self.store.relay_pair_snapshot(pair["id"])
         payload = (
             await self._relay_dual_payload(snapshot) if snapshot else
             {
@@ -417,12 +436,7 @@ class RelaySettingsMixin:
             fields["verify_handoff"] = bool(params.get("verify_handoff"))
         note = None
         if "next_note" in params:
-            note = str(params.get("next_note") or "").strip()[:2000]
-            notes = self._relay_dual_state()["next_notes"]
-            if note:
-                notes[pair_id] = note
-            else:
-                notes.pop(pair_id, None)
+            note = self._apply_next_note(pair_id, params.get("next_note"))
         if not fields and note is None:
             raise ValueError("relay_invalid：没有可保存的字段")
         if fields:
@@ -523,8 +537,14 @@ class RelaySettingsMixin:
     async def _relay_dual_run_locked(
         self, params: dict, pair: dict, request_id: str, expected_revision: int,
     ) -> dict:
+        pair_id = pair["id"]
+        # 锁内复读最新快照：避免锁外读取在等锁期间被并发 run/stop 推旧导致误校验
+        fresh_pair = await self.store.relay_pair_get(pair_id)
+        if fresh_pair is None:
+            raise ValueError("relay_not_found：接力任务不存在")
+        pair = fresh_pair
         # 幂等：同一 request_id 重复执行返回同一份快照，不重复开轮
-        replay = await self.store.relay_action_get(f"dual:{pair['id']}", request_id)
+        replay = await self.store.relay_action_get(f"dual:{pair_id}", request_id)
         if replay is not None:
             return {**replay, "replayed": True}
         if pair["state"] == "running":
@@ -542,14 +562,6 @@ class RelaySettingsMixin:
             fields["auto_alternate"] = bool(params.get("auto_alternate"))
         if "verify_handoff" in params:
             fields["verify_handoff"] = bool(params.get("verify_handoff"))
-        # 下一轮附言（A4）：运行期一次性意图，进内存不进库；空串=清除
-        if "next_note" in params:
-            note = str(params.get("next_note") or "").strip()[:2000]
-            notes = self._relay_dual_state()["next_notes"]
-            if note:
-                notes[pair["id"]] = note
-            else:
-                notes.pop(pair["id"], None)
         goal = str(fields.get("goal", pair["goal"]) or "").strip()
         main_task = str(fields.get("main_task", pair["main_task"]) or "").strip()
         peer_task = str(fields.get("peer_task", pair["peer_task"]) or "").strip()
@@ -560,20 +572,21 @@ class RelaySettingsMixin:
         if not peer_task:
             raise ValueError("relay_invalid：请先填写副屏每一轮做什么")
         fields.update({"goal": goal, "main_task": main_task, "peer_task": peer_task})
-        # 复述核验失败后的暂停：用户点「执行」= 人工确认这次交接，下一道
-        # 交接门跳过复述协商（一次性，见 _relay_dual_handoff_gate）
-        if (pair.get("error") or {}).get("code") == "relay_verification_failed":
-            self._relay_dual_state()["manual_handoff"].add(pair["id"])
         fields["state"] = "running"
         fields["error"] = {}
         snapshot = await self.store.relay_pair_update(
-            pair["id"], fields, expect_states=("idle", "paused", "interrupted"),
+            pair_id, fields, expect_states=("idle", "paused", "interrupted"),
             expected_revision=pair["revision"],
         )
         if snapshot is None:
             raise ValueError("relay_conflict：接力状态已更新，请刷新后再执行")
-        self._relay_dual_spawn(pair["id"])
-        await self.store.relay_action_put(f"dual:{pair['id']}", request_id, "run", snapshot)
+        # 仅在 CAS 提交成功后才修改内存运行期标记，避免冲突失败污染状态
+        if "next_note" in params:
+            self._apply_next_note(pair_id, params.get("next_note"))
+        if (pair.get("error") or {}).get("code") == "relay_verification_failed":
+            self._relay_dual_state()["manual_handoff"].add(pair_id)
+        self._relay_dual_spawn(pair_id)
+        await self.store.relay_action_put(f"dual:{pair_id}", request_id, "run", snapshot)
         await self._relay_dual_broadcast(snapshot)
         return await self._relay_dual_payload(snapshot)
 
@@ -586,10 +599,9 @@ class RelaySettingsMixin:
         pair_id = self._relay_str(params, "pair_id", maxlen=64)
         request_id = self._relay_request_id(params)
         expected_revision = self._relay_revision(params)
-        pair = await self._relay_dual_owned(pair_id)
-        # 与 run 同一把按 pair 的锁：避免「stop 判定 worker 在跑 → run 恰好提交
-        # 新一轮 → stop 把新一轮也一并取消」这类交错。
+        # 与 run 同一把按 pair 的锁：校验归属、读最新 pair、停 worker 全程串行
         async with self._relay_dual_lock(pair_id):
+            pair = await self._relay_dual_owned(pair_id)
             return await self._relay_dual_stop_locked(
                 pair, request_id, expected_revision
             )
@@ -762,9 +774,19 @@ class RelaySettingsMixin:
                 note = self._relay_dual_state()["next_notes"].get(pair_id, "")
                 if note:
                     brief += f"\n\n【用户给这一轮的附言（必须照办）】\n{note}"
-                gate = await self._relay_dual_handoff_gate(pair, side, task_text, prev, brief)
+                neg_usage = {"in": 0, "out": 0}
+                gate = await self._relay_dual_handoff_gate(
+                    pair, side, task_text, prev, brief, neg_usage=neg_usage,
+                )
+                run_usage["in"] += neg_usage["in"]
+                run_usage["out"] += neg_usage["out"]
                 if gate is None:
                     return  # 交接门没过：pair 已落成暂停并写明原因，等人决策
+                if budget > 0 and run_usage["in"] + run_usage["out"] >= budget:
+                    await self._relay_dual_park(
+                        pair_id, "relay_token_budget",
+                        f"已达接力 token 预算（{budget}），已暂停")
+                    return
                 brief, verify = gate
                 started = await self.store.relay_pair_start_turn(
                     pair_id, side, brief, expected_revision=pair["revision"],
@@ -970,6 +992,7 @@ class RelaySettingsMixin:
 
     async def _relay_dual_handoff_gate(
         self, pair: dict, side: str, task_text: str, prev: str, brief: str,
+        *, neg_usage: dict[str, int] | None = None,
     ) -> tuple[str, dict] | None:
         """每一轮开跑前的交接门。
 
@@ -1008,7 +1031,9 @@ class RelaySettingsMixin:
                 and bool(pair.get("verify_handoff", True))):
             # 没有交接材料（首轮），或由人工逐轮批准，或 pair 关闭了核验
             return brief, {"state": "", "attempts": 0, "restatement": "", "note": ""}
-        verify = await self._relay_dual_negotiate(pair, side, task_text, prev)
+        verify = await self._relay_dual_negotiate(
+            pair, side, task_text, prev, neg_usage=neg_usage,
+        )
         if verify is None:
             return None
         brief = brief + "\n\n【交接复述（接收方提交，已通过移交方核验）】\n" + verify["restatement"]
@@ -1074,6 +1099,7 @@ class RelaySettingsMixin:
 
     async def _relay_dual_negotiate(
         self, pair: dict, side: str, task_text: str, prev: str,
+        *, neg_usage: dict[str, int] | None = None,
     ) -> dict | None:
         """复述/核验协商：接收方无工具复述 → 移交方核验 → 服务端结构校验。
 
@@ -1089,6 +1115,10 @@ class RelaySettingsMixin:
         built_r = self._relay_dual_side_provider(receiver_sid)
         built_h = self._relay_dual_side_provider(handover_sid)
         if built_r is None or built_h is None:
+            if built_r is not None and built_r[1]:
+                await _safe_aclose(built_r[0])
+            if built_h is not None and built_h[1]:
+                await _safe_aclose(built_h[0])
             await self._relay_dual_park(
                 pair_id, "relay_provider_error",
                 "复述核验需要的模型服务不可用（会话所选服务可能已被删除或停用）",
@@ -1098,6 +1128,21 @@ class RelaySettingsMixin:
         handover_prov, owned_h = built_h
         last_fail = ""
         rejects: list[str] = []
+        side_usage = {receiver_sid: [0, 0], handover_sid: [0, 0]}
+
+        def _acc_usage(u_sid: str, node_res: dict) -> None:
+            u = node_res.get("usage") or {}
+            in_t = int(u.get("input_tokens") or 0)
+            out_t = int(u.get("output_tokens") or 0)
+            if in_t <= 0 and out_t <= 0:
+                return
+            bucket = side_usage.setdefault(u_sid, [0, 0])
+            bucket[0] += in_t
+            bucket[1] += out_t
+            if neg_usage is not None:
+                neg_usage["in"] += in_t
+                neg_usage["out"] += out_t
+
         # 接收方自己上一轮的输出：复述请求里会给它，核验方也必须看到同一份，
         # 否则复述里提到「我上一轮做过什么」会被当成凭空添加。
         own_prev = await self._relay_dual_prev_output(
@@ -1126,6 +1171,7 @@ class RelaySettingsMixin:
                 except (RelayLimitError, RelayProtocolError, ProviderError) as exc:
                     last_fail = f"复述模型调用失败：{str(exc)[:200]}"
                     continue
+                _acc_usage(receiver_sid, result)
                 text = result["text"].strip()
                 if _parse_restatement(text) is None:
                     last_fail = "复述缺少必需小节、小节为空或超过长度上限"
@@ -1152,6 +1198,7 @@ class RelaySettingsMixin:
                 except (RelayLimitError, RelayProtocolError, ProviderError) as exc:
                     last_fail = f"核验模型调用失败：{str(exc)[:200]}"
                     continue
+                _acc_usage(handover_sid, vresult)
                 verdict = _parse_verdict(vresult["text"])
                 if verdict["verdict"] == "pass":
                     note = ("；".join(rejects)[:500]) if rejects else ""
@@ -1168,6 +1215,18 @@ class RelaySettingsMixin:
                 await _safe_aclose(receiver_prov)
             if owned_h:
                 await _safe_aclose(handover_prov)
+            if self.store is not None:
+                for u_sid, (in_t, out_t) in side_usage.items():
+                    if in_t + out_t <= 0:
+                        continue
+                    try:
+                        pname, pmodel = self._session_effective_model(u_sid)
+                        if pname:
+                            await self.store.add_usage(
+                                u_sid, pname, pmodel, in_t, out_t,
+                            )
+                    except Exception:  # noqa: BLE001 - 记账失败不影响交接结果
+                        pass
         await self._relay_dual_park(
             pair_id, "relay_verification_failed",
             f"交接复述核验未通过（{_RELAY_VERIFY_ATTEMPTS} 次）：{last_fail}。"
@@ -1177,32 +1236,21 @@ class RelaySettingsMixin:
 
     async def _relay_dual_prev_output(self, pair_id: str, side: str) -> str:
         """对方最近一次成功的输出（交接材料）；没有就返回空串。"""
-        snapshot = await self.store.relay_pair_snapshot(pair_id)
-        if not snapshot:
+        text = await self.store.relay_pair_last_done_output(
+            pair_id, exclude_side=side,
+        )
+        if not text:
             return ""
-        for turn in reversed(snapshot["turns"]):
-            if turn["side"] == side or turn["status"] != "done":
-                continue
-            text = (turn["output"] or "").strip()
-            if not text:
-                continue
-            if len(text) > _RELAY_DUAL_PREV_CHARS:
-                text = text[:_RELAY_DUAL_PREV_CHARS] + "\n……（后文已截断）"
-            return text
-        return ""
+        if len(text) > _RELAY_DUAL_PREV_CHARS:
+            return text[:_RELAY_DUAL_PREV_CHARS] + "\n……（后文已截断）"
+        return text
 
     async def _relay_dual_last_output(self, session_id: str) -> str:
         """刚跑完那一轮的助手回复（落库后的最后一条 assistant 文本）。"""
         try:
-            messages = await self.store.load_messages(session_id)
+            return await self.store.last_assistant_text(session_id)
         except Exception:  # noqa: BLE001 - 读不到就当空产出
             return ""
-        for message in reversed(messages):
-            if getattr(message, "role", "") == "assistant":
-                text = (getattr(message, "text", "") or "").strip()
-                if text:
-                    return text
-        return ""
 
     async def _relay_dual_shutdown(self) -> None:
         st = self._relay_dual_state()
@@ -1254,6 +1302,13 @@ class RelaySettingsMixin:
                 "closing": False,
             }
         return st
+
+    def _relay_task_lock(self, task_id: str) -> asyncio.Lock:
+        locks = self._relay_state()["locks"]
+        lock = locks.get(task_id)
+        if lock is None:
+            lock = locks[task_id] = asyncio.Lock()
+        return lock
 
     def _relay_lock_path(self):
         path = getattr(self.store, "path", None)
@@ -1503,9 +1558,10 @@ class RelaySettingsMixin:
         def _cleanup(_t, tid=task_id):
             if st["workers"].get(tid) is worker:
                 st["workers"].pop(tid, None)
-            # 必须用 create_task 把清理逻辑挂到事件循环，因为 add_done_callback
-            # 是同步的，而清理涉及 DB 读写。提前退出可能造成「stopping」死锁。
-            asyncio.create_task(self._relay_worker_cleanup(tid))
+            if not _t.cancelled():
+                exc = _t.exception()
+                if exc is not None:
+                    logger.warning("接力 worker 未捕获异常（%s）：%s", tid, exc)
 
         st["workers"][task_id] = worker
         worker.add_done_callback(_cleanup)
@@ -1536,17 +1592,7 @@ class RelaySettingsMixin:
         因为事件没有 session_id 就落到远端连接的通用广播里（远端只允许聊天，
         不允许看到本机接力内容）。
         """
-        emitters = list(getattr(self, "ws_emitters", []))
-        connections = list(getattr(self, "ws_connections", []))
-        if connections:
-            local_ids = {id(c.get("emit")) for c in connections if c.get("local")}
-            emitters = [w for w in emitters if id(w) in local_ids]
-        frame = {"kind": "relay_state", "relay": snapshot}
-        for ws_emit in emitters:
-            try:
-                await ws_emit(frame)
-            except Exception:  # noqa: BLE001 - 单个连接失败不影响其余
-                pass
+        await self._emit_local_frame({"kind": "relay_state", "relay": snapshot})
 
     # ---- 参数与归属校验 ----
 
@@ -1738,66 +1784,61 @@ class RelaySettingsMixin:
         report_id = self._relay_str(params, "report_id", required=False, maxlen=200)
         rhash = self._relay_str(params, "report_hash", required=False, maxlen=128)
 
-        # 幂等：重复 request_id 直接返回已存结果（不受当前状态影响，不重复推进）
-        replay = await self.store.relay_action_get(task_id, request_id)
-        if replay is not None:
-            return {**replay, "replayed": True}
-        task = await self._relay_owned_task(task_id)
-        if task["state"] != "waiting_confirmation":
-            raise ValueError("relay_conflict：任务当前不在等待确认状态")
-        snapshot = await self._relay_owned_snapshot(task_id)
-        node = _node_of(snapshot, task["current_node"])
-        if node is None:
-            raise ValueError("relay_internal：当前节点缺失")
+        # 同一任务的控制动作串行化，且归属校验必须在读取 relay_actions 缓存之前
+        async with self._relay_task_lock(task_id):
+            task = await self._relay_owned_task(task_id)
+            replay = await self.store.relay_action_get(task_id, request_id)
+            if replay is not None:
+                return {**replay, "replayed": True}
+            if task["state"] != "waiting_confirmation":
+                raise ValueError("relay_conflict：任务当前不在等待确认状态")
+            snapshot = await self._relay_owned_snapshot(task_id)
+            node = _node_of(snapshot, task["current_node"])
+            if node is None:
+                raise ValueError("relay_internal：当前节点缺失")
 
-        if node["status"] == "reported":
-            # 批准一个已产出报告的节点：必须绑定该报告的 id 与内容哈希
-            if not report_id or not rhash:
-                raise ValueError("relay_invalid：批准报告必须带 report_id 与 report_hash")
-            if report_id != node["report_id"] or rhash != node["report_hash"]:
-                raise ValueError("relay_conflict：报告已变化或哈希不符，请重新读取后确认")
-            nxt = _next_node(snapshot, node["node_id"])
-            if nxt is None:
+            if node["status"] == "reported":
+                # 批准一个已产出报告的节点：必须绑定该报告的 id 与内容哈希
+                if not report_id or not rhash:
+                    raise ValueError("relay_invalid：批准报告必须带 report_id 与 report_hash")
+                if report_id != node["report_id"] or rhash != node["report_hash"]:
+                    raise ValueError("relay_conflict：报告已变化或哈希不符，请重新读取后确认")
+                nxt = _next_node(snapshot, node["node_id"])
+                if nxt is None:
+                    result = await self.store.relay_mutate(
+                        task_id, request_id=request_id, action="approve",
+                        expect_states=("waiting_confirmation",), expected_revision=expected_revision,
+                        new_state="completed", node_id=node["node_id"], node_status="confirmed",
+                    )
+                else:
+                    # 单事务原子确认本节点并授权下一节点，避免半提交分裂态及陈旧幂等快照
+                    result = await self.store.relay_mutate(
+                        task_id, request_id=request_id, action="approve",
+                        expect_states=("waiting_confirmation",), expected_revision=expected_revision,
+                        new_state="running", current_node=nxt["node_id"], active_slot=nxt["slot"],
+                        node_id=node["node_id"], node_status="confirmed",
+                        next_node_id=nxt["node_id"], next_node_status="authorized",
+                    )
+            elif node["status"] in ("pending", "running", "failed"):
+                # 显式授权/重试一个未产出报告的节点：绑定为空（不冒充已确认的报告）
+                if report_id or rhash:
+                    raise ValueError("relay_invalid：该节点尚无报告，不应携带 report_id/report_hash")
+                if node["status"] == "running" and self._relay_worker_live(task_id):
+                    raise ValueError("relay_busy：当前节点正在执行，请先暂停后再显式重试")
                 result = await self.store.relay_mutate(
-                    task_id, request_id=request_id, action="approve",
+                    task_id, request_id=request_id, action="approve_retry",
                     expect_states=("waiting_confirmation",), expected_revision=expected_revision,
-                    new_state="completed", node_id=node["node_id"], node_status="confirmed",
+                    new_state="running", error={},
+                    node_id=node["node_id"], node_status="authorized",
                 )
             else:
-                result = await self.store.relay_mutate(
-                    task_id, request_id=request_id, action="approve",
-                    expect_states=("waiting_confirmation",), expected_revision=expected_revision,
-                    new_state="running", current_node=nxt["node_id"], active_slot=nxt["slot"],
-                    node_id=node["node_id"], node_status="confirmed",
-                )
-                # 目标节点先「授权」：提交成功后才由 worker 启动（事务先行）。
-                # 这里同样按上一笔提交后的 revision 做 CAS——并发 stop/approve
-                # 插进来时不能凭旧快照把节点授权进已变化的任务。
-                if result is not None:
-                    result = await self.store.relay_mutate(
-                        task_id, expected_revision=result["task"]["revision"],
-                        node_id=nxt["node_id"], node_status="authorized",
-                    )
-        elif node["status"] in ("pending", "running", "failed"):
-            # 显式授权/重试一个未产出报告的节点：绑定为空（不冒充已确认的报告）
-            if report_id or rhash:
-                raise ValueError("relay_invalid：该节点尚无报告，不应携带 report_id/report_hash")
-            if node["status"] == "running" and self._relay_worker_live(task_id):
-                raise ValueError("relay_busy：当前节点正在执行，请先暂停后再显式重试")
-            result = await self.store.relay_mutate(
-                task_id, request_id=request_id, action="approve_retry",
-                expect_states=("waiting_confirmation",), expected_revision=expected_revision,
-                new_state="running", error={},
-                node_id=node["node_id"], node_status="authorized",
-            )
-        else:
-            raise ValueError("relay_conflict：节点状态不允许批准")
+                raise ValueError("relay_conflict：节点状态不允许批准")
 
-        if result is None:
-            raise ValueError("relay_conflict：任务已变化，请重新读取后再确认")
-        self._relay_spawn(task_id)
-        await self._relay_broadcast(result)
-        return result
+            if result is None:
+                raise ValueError("relay_conflict：任务已变化，请重新读取后再确认")
+            self._relay_spawn(task_id)
+            await self._relay_broadcast(result)
+            return result
 
     async def relay_pause(self, params: dict) -> dict:
         self._relay_reject_unknown(params, ("task_id", "request_id", "expected_revision"))
@@ -1805,19 +1846,20 @@ class RelaySettingsMixin:
         task_id = self._relay_str(params, "task_id", maxlen=64)
         request_id = self._relay_request_id(params)
         expected_revision = self._relay_revision(params)
-        await self._relay_owned_task(task_id)
-        replay = await self.store.relay_action_get(task_id, request_id)
-        if replay is not None:
-            return {**replay, "replayed": True}
-        result = await self.store.relay_mutate(
-            task_id, request_id=request_id, action="pause",
-            expect_states=("running", "waiting_confirmation"), expected_revision=expected_revision,
-            new_state="paused", error={"code": "relay_paused", "message": "已手动暂停"},
-        )
-        if result is None:
-            raise ValueError("relay_conflict：任务已变化，请重新读取后再暂停")
-        await self._relay_broadcast(result)
-        return result
+        async with self._relay_task_lock(task_id):
+            await self._relay_owned_task(task_id)
+            replay = await self.store.relay_action_get(task_id, request_id)
+            if replay is not None:
+                return {**replay, "replayed": True}
+            result = await self.store.relay_mutate(
+                task_id, request_id=request_id, action="pause",
+                expect_states=("running", "waiting_confirmation"), expected_revision=expected_revision,
+                new_state="paused", error={"code": "relay_paused", "message": "已手动暂停"},
+            )
+            if result is None:
+                raise ValueError("relay_conflict：任务已变化，请重新读取后再暂停")
+            await self._relay_broadcast(result)
+            return result
 
     async def relay_resume(self, params: dict) -> dict:
         self._relay_reject_unknown(params, ("task_id", "request_id", "expected_revision"))
@@ -1825,20 +1867,21 @@ class RelaySettingsMixin:
         task_id = self._relay_str(params, "task_id", maxlen=64)
         request_id = self._relay_request_id(params)
         expected_revision = self._relay_revision(params)
-        await self._relay_owned_task(task_id)
-        replay = await self.store.relay_action_get(task_id, request_id)
-        if replay is not None:
-            return {**replay, "replayed": True}
-        result = await self.store.relay_mutate(
-            task_id, request_id=request_id, action="resume",
-            expect_states=("paused", "interrupted"), expected_revision=expected_revision,
-            new_state="running", bump_generation=True, error={},
-        )
-        if result is None:
-            raise ValueError("relay_conflict：任务状态不允许恢复，请重新读取")
-        self._relay_spawn(task_id)
-        await self._relay_broadcast(result)
-        return result
+        async with self._relay_task_lock(task_id):
+            await self._relay_owned_task(task_id)
+            replay = await self.store.relay_action_get(task_id, request_id)
+            if replay is not None:
+                return {**replay, "replayed": True}
+            result = await self.store.relay_mutate(
+                task_id, request_id=request_id, action="resume",
+                expect_states=("paused", "interrupted"), expected_revision=expected_revision,
+                new_state="running", bump_generation=True, error={},
+            )
+            if result is None:
+                raise ValueError("relay_conflict：任务状态不允许恢复，请重新读取")
+            self._relay_spawn(task_id)
+            await self._relay_broadcast(result)
+            return result
 
     async def relay_stop(self, params: dict) -> dict:
         self._relay_reject_unknown(params, ("task_id", "request_id", "expected_revision"))
@@ -1846,33 +1889,35 @@ class RelaySettingsMixin:
         task_id = self._relay_str(params, "task_id", maxlen=64)
         request_id = self._relay_request_id(params)
         expected_revision = self._relay_revision(params)
-        await self._relay_owned_task(task_id)
-        replay = await self.store.relay_action_get(task_id, request_id)
-        if replay is not None:
-            return {**replay, "replayed": True}
-        target = "stopping" if self._relay_worker_live(task_id) else "stopped"
-        result = await self.store.relay_mutate(
-            task_id, request_id=request_id, action="stop",
-            expect_states=("running", "waiting_confirmation", "paused", "interrupted", "stopping"),
-            expected_revision=expected_revision, new_state=target,
-        )
-        if result is None:
-            raise ValueError("relay_conflict：任务已变化，请重新读取后再停止")
-        # 判断 worker_live 与提交之间有窗口：判断时 worker 尚未 done（刚 park 到
-        # waiting_confirmation、还在 return 路上），落 stopping 后它才退出，而
-        # done 回调已按旧状态（非 stopping）跳过收尾——没人再把 stopping 推到
-        # stopped。这里复查一次，worker 已死就立刻兜底收尾（幂等，CAS 保护）。
-        if target == "stopping" and not self._relay_worker_live(task_id):
-            # finalize 内部已广播 stopped，直接返回读回的快照，避免重复广播。
-            await self._relay_finalize_stopping(task_id)
-            done = await self.store.relay_get(task_id)
-            return done if done is not None else result
-        await self._relay_broadcast(result)
-        return result
+        async with self._relay_task_lock(task_id):
+            await self._relay_owned_task(task_id)
+            replay = await self.store.relay_action_get(task_id, request_id)
+            if replay is not None:
+                return {**replay, "replayed": True}
+            target = "stopping" if self._relay_worker_live(task_id) else "stopped"
+            result = await self.store.relay_mutate(
+                task_id, request_id=request_id, action="stop",
+                expect_states=("running", "waiting_confirmation", "paused", "interrupted", "stopping"),
+                expected_revision=expected_revision, new_state=target,
+            )
+            if result is None:
+                raise ValueError("relay_conflict：任务已变化，请重新读取后再停止")
+            # 判断 worker_live 与提交之间有窗口：判断时 worker 尚未 done（刚 park 到
+            # waiting_confirmation、还在 return 路上），落 stopping 后它才退出，而
+            # done 回调已按旧状态（非 stopping）跳过收尾——没人再把 stopping 推到
+            # stopped。这里复查一次，worker 已死就立刻兜底收尾（幂等，CAS 保护）。
+            if target == "stopping" and not self._relay_worker_live(task_id):
+                # finalize 内部已广播 stopped，直接返回读回的快照，避免重复广播。
+                await self._relay_finalize_stopping(task_id)
+                done = await self.store.relay_get(task_id)
+                return done if done is not None else result
+            await self._relay_broadcast(result)
+            return result
 
     # ---- worker：无工具串行推进 ----
 
     async def _relay_worker(self, task_id: str) -> None:
+        cancelled = False
         try:
             while True:
                 snapshot = await self.store.relay_get(task_id)
@@ -1934,28 +1979,16 @@ class RelaySettingsMixin:
                 )
                 return
         except asyncio.CancelledError:
+            cancelled = True
             raise
         except Exception as exc:  # noqa: BLE001 - worker 崩了也要把任务落到可读状态
             logger.warning("接力 worker 异常（%s）：%s", task_id, exc)
             await self._relay_park(task_id, "relay_error", f"接力内部错误：{exc}")
-
-    async def _relay_worker_cleanup(self, task_id: str) -> None:
-        """worker 退出后的统一兜底（无论是正常 return、异常还是被取消）。
-
-        如果任务卡在 stopping 状态（例如正在跑 _relay_run_node 时收到 stop，
-        但在重新进入循环顶部处理 stopping 前抛错退出了），这里强制把它落定。
-        """
-        try:
-            current = await self.store.relay_get_task(task_id)
-            if current is None or current["state"] != "stopping":
-                return
-            result = await self.store.relay_mutate(
-                task_id, expect_states=("stopping",), new_state="stopped"
-            )
-            if result is not None:
-                await self._relay_broadcast(result)
-        except Exception as exc:  # noqa: BLE001 - 收尾失败只留日志，不打瘫后端
-            logger.warning("接力 worker 收尾异常（%s）：%s", task_id, exc)
+        finally:
+            # 在 worker 协程内直接收尾 stopping→stopped（关机取消或 store 关闭时不运行，
+            # 避免游离 create_task 在 shutdown 之后触碰已关闭数据库连接）
+            if not cancelled and not self._relay_state().get("closing") and self.store is not None:
+                await self._relay_finalize_stopping(task_id)
 
     async def _relay_run_node(self, task_id: str, task: dict, node: dict) -> bool:
         """运行一个已授权节点。返回 True 表示 worker 应就此退出（停止/让出）。"""

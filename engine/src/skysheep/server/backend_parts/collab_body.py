@@ -73,7 +73,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from ...bgtasks import spawn_bg
 from ...config import ConfigError, load_config, resolve_api_key, update_config_section
 from ...core import Agent
 from ...core.adversarial import (
@@ -316,6 +315,31 @@ def _room_stats(team: dict) -> dict:
         "tasks_by_status": counts,
         "member_usage": dict(usage) if isinstance(usage, dict) else {},
     }
+
+
+async def _resolve_adversarial_message(host, params: dict, local: bool) -> tuple:
+    """校验会话归属与 seq，读取库内持久化对抗审查消息（export/fix_prompt/compare 共用）。
+
+    设为模块级函数：部分单测会用最小 _Host stub（只挂 store，未继承完整
+    Mixin）经 ServerBackend.adversarial_compare(host, …) 直调方法。
+    """
+    sid = str(params.get("session_id", "") or "")
+    if local:
+        sess = await host.store.get_session(sid)
+        if sess is None:
+            raise RuntimeError("session not found: " + sid)
+    else:
+        sess = await host._get_owned_session(sid)
+    try:
+        seq = int(params.get("seq", 0))
+    except (TypeError, ValueError):
+        raise RuntimeError("无效的对抗消息序号") from None
+    if seq <= 0:
+        raise RuntimeError("缺少对抗消息序号")
+    message = await host.store.get_full_message_at(sid, seq)
+    if message is None or not message.adversarial:
+        raise RuntimeError("指定消息不是对抗审查结果")
+    return sess, seq, message
 
 
 class CollabBodyMixin:
@@ -697,101 +721,105 @@ class CollabBodyMixin:
             or not str((tpl_seat_roles[phase] or {}).get("provider") or "").strip()
             for phase in (PHASE_FINDER, PHASE_INVESTIGATOR, PHASE_ADVISOR)
         )
-        specs_auto = (
-            self._resolve_members(
-                auto_params, False, chair_key=(judge_name, judge_model),
-            )
-            if (members_params is None or auto_params) and need_auto_pool else []
-        )
-
-        # 未显式指定的角色按 固定角色顺序 从自动序列依次取（游标递进）：全不指定
-        # 时等价于旧的 0/1/2 取模复用（自动服务不足时同一模型身兼数角）；
-        # 部分指定时剩余角色也按序补位，不会跳号。
-        auto_cursor = 0
-
-        def _role_spec(role: str) -> MemberSpec:
-            nonlocal auto_cursor
-            if role in explicit:
-                return _explicit_spec(*explicit[role])
-            if not specs_auto:
-                return MemberSpec(
-                    provider_name="", model="",
-                    build_error="未指定模型且没有已配置 Key 的服务",
-                )
-            spec = specs_auto[auto_cursor % len(specs_auto)]
-            auto_cursor += 1
-            return spec
-
-        def _template_role_spec(role: dict) -> MemberSpec:
-            """模板角色 → MemberSpec：指定服务则新建，留空按自动池游标补位。"""
-            nonlocal auto_cursor
-            name = str(role.get("name") or "").strip()
-            provider_name = str(role.get("provider") or "").strip()
-            model = str(role.get("model") or "").strip()
-            if provider_name:
-                spec = _explicit_spec(provider_name, model)
-                spec.name = name
-                return spec
-            if not specs_auto:
-                return MemberSpec(
-                    name=name, provider_name="", model="",
-                    build_error="未指定模型且没有已配置 Key 的服务",
-                )
-            base = specs_auto[auto_cursor % len(specs_auto)]
-            auto_cursor += 1
-            return MemberSpec(
-                name=name, provider_name=base.provider_name, model=base.model,
-                provider=base.provider, build_error=base.build_error,
-            )
-
-        finder = (
-            _template_role_spec(tpl_seat_roles[PHASE_FINDER])
-            if PHASE_FINDER in tpl_seat_roles else _role_spec(PHASE_FINDER)
-        )
-        investigator = (
-            _template_role_spec(tpl_seat_roles[PHASE_INVESTIGATOR])
-            if PHASE_INVESTIGATOR in tpl_seat_roles else _role_spec(PHASE_INVESTIGATOR)
-        )
-        advisor = (
-            _template_role_spec(tpl_seat_roles[PHASE_ADVISOR])
-            if PHASE_ADVISOR in tpl_seat_roles else _role_spec(PHASE_ADVISOR)
-        )
-        # 角色人设：只放非空值（空串必须回落 adversarial.py 的内置默认提示词，
-        # 不能让「模板留空」把不对称激励整段抹掉）；收口 prompt 归裁判。
-        prompts: dict[str, str] = {}
-        for phase, role in tpl_seat_roles.items():
-            text = str((role or {}).get("prompt") or "").strip()
-            if text:
-                prompts[phase] = text
-        if tpl is not None:
-            agg_prompt = str(tpl_agg.get("prompt") or "").strip()
-            if agg_prompt:
-                prompts[PHASE_JUDGE] = agg_prompt
-        if all(s.provider is None for s in (finder, investigator, advisor)):
-            await emit_ev(TurnFinished(stop_reason="error", iterations=1, duration_ms=_adv_ms()))
-            raise RuntimeError(
-                "对抗没有可用角色：请先在「设置 · 模型服务」配置 API Key，"
-                "或在对抗面板为角色指定模型"
-            )
-
-        # 发现者替补（只给自动挑选路径）：发现阶段失败=整场 fail-fast，而
-        # 自动池可能正好挑到坏 Key 的服务。显式指定/模板指定服务的角色不给
-        # 替补——用户的选择不该被静默替换。具体换谁由 core 过滤同服务后决定。
-        finder_fallbacks: list[MemberSpec] = []
-        finder_is_auto = PHASE_FINDER not in explicit and (
-            PHASE_FINDER not in tpl_seat_roles
-            or not str((tpl_seat_roles.get(PHASE_FINDER) or {}).get("provider") or "").strip()
-        )
-        if finder_is_auto:
-            finder_fallbacks = [s for s in specs_auto if s.provider is not None]
-
-        # 角色都不看图片（纯文本协作），历史里的图片块单独剥离；
-        # history[:-1] 排除刚追加的本次提问（由 run_adversarial 自己拼在末尾）。
-        # 角色消息不接会话系统提示词：角色系统提示词自足（core/adversarial.py
-        # 的 _phase_messages），dialogue() 会把 history 里的 system 剥掉。
-        role_history = _strip_image_blocks(agent.history[:-1])
-
+        specs_auto: list[MemberSpec] = []
+        finder: MemberSpec | None = None
+        investigator: MemberSpec | None = None
+        advisor: MemberSpec | None = None
         try:
+            specs_auto = (
+                self._resolve_members(
+                    auto_params, False, chair_key=(judge_name, judge_model),
+                )
+                if (members_params is None or auto_params) and need_auto_pool else []
+            )
+
+            # 未显式指定的角色按 固定角色顺序 从自动序列依次取（游标递进）：全不指定
+            # 时等价于旧的 0/1/2 取模复用（自动服务不足时同一模型身兼数角）；
+            # 部分指定时剩余角色也按序补位，不会跳号。
+            auto_cursor = 0
+
+            def _role_spec(role: str) -> MemberSpec:
+                nonlocal auto_cursor
+                if role in explicit:
+                    return _explicit_spec(*explicit[role])
+                if not specs_auto:
+                    return MemberSpec(
+                        provider_name="", model="",
+                        build_error="未指定模型且没有已配置 Key 的服务",
+                    )
+                spec = specs_auto[auto_cursor % len(specs_auto)]
+                auto_cursor += 1
+                return spec
+
+            def _template_role_spec(role: dict) -> MemberSpec:
+                """模板角色 → MemberSpec：指定服务则新建，留空按自动池游标补位。"""
+                nonlocal auto_cursor
+                name = str(role.get("name") or "").strip()
+                provider_name = str(role.get("provider") or "").strip()
+                model = str(role.get("model") or "").strip()
+                if provider_name:
+                    spec = _explicit_spec(provider_name, model)
+                    spec.name = name
+                    return spec
+                if not specs_auto:
+                    return MemberSpec(
+                        name=name, provider_name="", model="",
+                        build_error="未指定模型且没有已配置 Key 的服务",
+                    )
+                base = specs_auto[auto_cursor % len(specs_auto)]
+                auto_cursor += 1
+                return MemberSpec(
+                    name=name, provider_name=base.provider_name, model=base.model,
+                    provider=base.provider, build_error=base.build_error,
+                )
+
+            finder = (
+                _template_role_spec(tpl_seat_roles[PHASE_FINDER])
+                if PHASE_FINDER in tpl_seat_roles else _role_spec(PHASE_FINDER)
+            )
+            investigator = (
+                _template_role_spec(tpl_seat_roles[PHASE_INVESTIGATOR])
+                if PHASE_INVESTIGATOR in tpl_seat_roles else _role_spec(PHASE_INVESTIGATOR)
+            )
+            advisor = (
+                _template_role_spec(tpl_seat_roles[PHASE_ADVISOR])
+                if PHASE_ADVISOR in tpl_seat_roles else _role_spec(PHASE_ADVISOR)
+            )
+            # 角色人设：只放非空值（空串必须回落 adversarial.py 的内置默认提示词，
+            # 不能让「模板留空」把不对称激励整段抹掉）；收口 prompt 归裁判。
+            prompts: dict[str, str] = {}
+            for phase, role in tpl_seat_roles.items():
+                text = str((role or {}).get("prompt") or "").strip()
+                if text:
+                    prompts[phase] = text
+            if tpl is not None:
+                agg_prompt = str(tpl_agg.get("prompt") or "").strip()
+                if agg_prompt:
+                    prompts[PHASE_JUDGE] = agg_prompt
+            if all(s.provider is None for s in (finder, investigator, advisor)):
+                await emit_ev(TurnFinished(stop_reason="error", iterations=1, duration_ms=_adv_ms()))
+                raise RuntimeError(
+                    "对抗没有可用角色：请先在「设置 · 模型服务」配置 API Key，"
+                    "或在对抗面板为角色指定模型"
+                )
+
+            # 发现者替补（只给自动挑选路径）：发现阶段失败=整场 fail-fast，而
+            # 自动池可能正好挑到坏 Key 的服务。显式指定/模板指定服务的角色不给
+            # 替补——用户的选择不该被静默替换。具体换谁由 core 过滤同服务后决定。
+            finder_fallbacks: list[MemberSpec] = []
+            finder_is_auto = PHASE_FINDER not in explicit and (
+                PHASE_FINDER not in tpl_seat_roles
+                or not str((tpl_seat_roles.get(PHASE_FINDER) or {}).get("provider") or "").strip()
+            )
+            if finder_is_auto:
+                finder_fallbacks = [s for s in specs_auto if s.provider is not None]
+
+            # 角色都不看图片（纯文本协作），历史里的图片块单独剥离；
+            # history[:-1] 排除刚追加的本次提问（由 run_adversarial 自己拼在末尾）。
+            # 角色消息不接会话系统提示词：角色系统提示词自足（core/adversarial.py
+            # 的 _phase_messages），dialogue() 会把 history 里的 system 剥掉。
+            role_history = _strip_image_blocks(agent.history[:-1])
+
             outcome: AdversarialOutcome = await run_adversarial(
                 finder=finder,
                 investigator=investigator,
@@ -809,12 +837,20 @@ class CollabBodyMixin:
                 finder_fallbacks=finder_fallbacks,
             )
         finally:
-            # 角色临时 provider 随轮释放（同圆桌：裁判是用主 Agent 的常驻实例；
-            # 模板收口裁判是本轮临时构建的，必须进释放清单）
-            release = [finder.provider, investigator.provider, advisor.provider]
-            if template_judge is not None:
-                release.append(template_judge)
-            self._release_turn_providers(release, keep=(resident_judge,))
+            # 角色与自动池未选中成员的临时 provider 随轮释放（包括提前报错路径）；
+            # 裁判若为模板临时构建也一并释放，主 Agent 常驻 resident_judge 保留。
+            seen_ids: set[int] = set()
+            release: list[Provider] = []
+            for p in (
+                *(s.provider for s in specs_auto),
+                *(s.provider for s in (finder, investigator, advisor) if s is not None),
+                template_judge,
+            ):
+                if p is not None and id(p) not in seen_ids:
+                    seen_ids.add(id(p))
+                    release.append(p)
+            if release:
+                self._release_turn_providers(release, keep=(resident_judge,))
 
         meta = {
             "mode": "adversarial",
@@ -964,22 +1000,7 @@ class CollabBodyMixin:
         远程只认自己名下/当前项目的会话）；报告内容一律从库内 meta 组装，
         不接受客户端提交的正文。
         """
-        sid = str(params.get("session_id", "") or "")
-        if local:
-            sess = await self.store.get_session(sid)
-            if sess is None:
-                raise RuntimeError("session not found: " + sid)
-        else:
-            sess = await self._get_owned_session(sid)
-        try:
-            seq = int(params.get("seq", 0))
-        except (TypeError, ValueError):
-            raise RuntimeError("无效的对抗消息序号") from None
-        if seq <= 0:
-            raise RuntimeError("缺少对抗消息序号")
-        message = await self.store.get_full_message_at(sid, seq)
-        if message is None or not message.adversarial:
-            raise RuntimeError("指定消息不是对抗审查结果")
+        sess, seq, message = await _resolve_adversarial_message(self, params, local)
         markdown, filename = _adversarial_report_markdown(sess.title, message.adversarial, seq)
         return {"filename": filename, "markdown": markdown}
 
@@ -991,22 +1012,7 @@ class CollabBodyMixin:
         事实源与导出同口径：只认库内 meta，不接受客户端提交的正文；seq 与
         会话归属校验也一致。
         """
-        sid = str(params.get("session_id", "") or "")
-        if local:
-            sess = await self.store.get_session(sid)
-            if sess is None:
-                raise RuntimeError("session not found: " + sid)
-        else:
-            sess = await self._get_owned_session(sid)
-        try:
-            seq = int(params.get("seq", 0))
-        except (TypeError, ValueError):
-            raise RuntimeError("无效的对抗消息序号") from None
-        if seq <= 0:
-            raise RuntimeError("缺少对抗消息序号")
-        message = await self.store.get_full_message_at(sid, seq)
-        if message is None or not message.adversarial:
-            raise RuntimeError("指定消息不是对抗审查结果")
+        _sess, seq, message = await _resolve_adversarial_message(self, params, local)
         wanted = {k for k in str(params.get("verdicts", "") or "").split(",") if k}
         if not wanted:
             wanted = {"confirmed", "partial"}
@@ -1048,22 +1054,8 @@ class CollabBodyMixin:
         找不到就返回 previous=None（首次审查，前端只说「这是第一次」）。
         来源校验与导出同口径：seq + 会话归属。
         """
-        sid = str(params.get("session_id", "") or "")
-        if local:
-            sess = await self.store.get_session(sid)
-            if sess is None:
-                raise RuntimeError("session not found: " + sid)
-        else:
-            sess = await self._get_owned_session(sid)
-        try:
-            seq = int(params.get("seq", 0))
-        except (TypeError, ValueError):
-            raise RuntimeError("无效的对抗消息序号") from None
-        if seq <= 0:
-            raise RuntimeError("缺少对抗消息序号")
-        message = await self.store.get_full_message_at(sid, seq)
-        if message is None or not message.adversarial:
-            raise RuntimeError("指定消息不是对抗审查结果")
+        sess, seq, message = await _resolve_adversarial_message(self, params, local)
+        sid = sess.id
 
         previous = None
         window, _first, _last = await self.store.load_messages_window(
@@ -1364,6 +1356,7 @@ class CollabBodyMixin:
         cursor = 0
         specs: list[TeamMemberSpec] = []
         seen: set[tuple[str, str]] = set()
+        skipped_providers: list[Provider] = []
         for role in roles:
             if not isinstance(role, dict):
                 continue
@@ -1410,9 +1403,20 @@ class CollabBodyMixin:
                     )
             key = (spec.provider_name, spec.model)
             if key in seen:
+                if spec.provider is not None:
+                    skipped_providers.append(spec.provider)
                 continue  # 与 team.py 的 (服务, 模型) 同键去重一致（含空键）
             seen.add(key)
             specs.append(spec)
+        kept_ids = {id(s.provider) for s in specs if s.provider is not None}
+        unused: list[Provider] = []
+        seen_unused: set[int] = set()
+        for p in [*(s.provider for s in (auto or [])), *skipped_providers]:
+            if p is not None and id(p) not in kept_ids and id(p) not in seen_unused:
+                seen_unused.add(id(p))
+                unused.append(p)
+        if unused:
+            self._release_turn_providers(unused)
         return specs
 
     @staticmethod
@@ -1572,6 +1576,7 @@ class CollabBodyMixin:
         # 仍然生效——此前无条件被覆盖成 "user"，显式参数静默吞掉、无任何提示。
         # 两者都没有才是用户总管（模板明确「没人替你验收」）。
         director: DirectorSpec | None = None
+        specs: list[TeamMemberSpec] = []
         effective_director_mode = director_mode
 
         def _build_director(d_provider: str, d_model: str) -> DirectorSpec:
@@ -1588,23 +1593,33 @@ class CollabBodyMixin:
                 spec.build_error = str(e)[:200]
             return spec
 
-        if tpl is not None:
-            d_provider = str(tpl_agg.get("provider") or "").strip()
-            d_model = str(tpl_agg.get("model") or "").strip()
-            if d_provider:
-                effective_director_mode = "ai"
-                director = DirectorSpec(
-                    provider_name=d_provider, model=d_model,
-                    context_limit_tokens=self._team_provider_context_limit(d_provider),
-                    system_prompt=str(tpl_agg.get("prompt") or "").strip(),
-                )
-                try:
-                    provider = self._build_member_provider(d_provider, d_model)
-                    director.provider = provider
-                    if not director.model:
-                        director.model = getattr(provider, "model", "")
-                except Exception as e:  # noqa: BLE001 - 构建失败降级，不阻断建队
-                    director.build_error = str(e)[:200]
+        try:
+            if tpl is not None:
+                d_provider = str(tpl_agg.get("provider") or "").strip()
+                d_model = str(tpl_agg.get("model") or "").strip()
+                if d_provider:
+                    effective_director_mode = "ai"
+                    director = DirectorSpec(
+                        provider_name=d_provider, model=d_model,
+                        context_limit_tokens=self._team_provider_context_limit(d_provider),
+                        system_prompt=str(tpl_agg.get("prompt") or "").strip(),
+                    )
+                    try:
+                        provider = self._build_member_provider(d_provider, d_model)
+                        director.provider = provider
+                        if not director.model:
+                            director.model = getattr(provider, "model", "")
+                    except Exception as e:  # noqa: BLE001 - 构建失败降级，不阻断建队
+                        director.build_error = str(e)[:200]
+                elif director_mode == "ai":
+                    d_provider = str((director_params or {}).get("provider", "") or "").strip()
+                    d_model = str((director_params or {}).get("model", "") or "").strip()
+                    if not d_provider:
+                        raise TeamError(
+                            'director_mode="ai" 需要指定担任总管的模型服务（director.provider）'
+                        )
+                    director = _build_director(d_provider, d_model)
+                    effective_director_mode = "ai"
             elif director_mode == "ai":
                 d_provider = str((director_params or {}).get("provider", "") or "").strip()
                 d_model = str((director_params or {}).get("model", "") or "").strip()
@@ -1613,131 +1628,131 @@ class CollabBodyMixin:
                         'director_mode="ai" 需要指定担任总管的模型服务（director.provider）'
                     )
                 director = _build_director(d_provider, d_model)
-                effective_director_mode = "ai"
-        elif director_mode == "ai":
-            d_provider = str((director_params or {}).get("provider", "") or "").strip()
-            d_model = str((director_params or {}).get("model", "") or "").strip()
-            if not d_provider:
-                raise TeamError(
-                    'director_mode="ai" 需要指定担任总管的模型服务（director.provider）'
-                )
-            director = _build_director(d_provider, d_model)
-        specs = (
-            self._template_team_specs(tpl)
-            if tpl is not None else self._resolve_team_members(members_params)
-        )
-        if tpl is not None:
-            declared = len([r for r in (tpl.get("roles") or []) if isinstance(r, dict)])
-            if len(specs) < declared:
+            specs = (
+                self._template_team_specs(tpl)
+                if tpl is not None else self._resolve_team_members(members_params)
+            )
+            if tpl is not None:
+                declared = len([r for r in (tpl.get("roles") or []) if isinstance(r, dict)])
+                if len(specs) < declared:
+                    await emit(NoticeEvent(
+                        message=f"模板的 {declared} 个角色去重后组成 "
+                                f"{len(specs)} 名队员：有的服务没配 Key，或角色重复"
+                    ))
+            # 模板 max_calls 是 provider 调用次数（含重试/格式纠错），不是轮次：
+            # 给每个成员与 AI 总管的 provider 套一层计数代理，团队链路（含小会）
+            # 的每次真实 stream 都会 spend()（审查 finding 15）。
+            if run_budget is not None:
+                for spec in specs:
+                    if spec.provider is not None:
+                        spec.provider = BudgetedProvider(spec.provider, run_budget)
+                if director is not None and director.provider is not None:
+                    director.provider = BudgetedProvider(director.provider, run_budget)
+            full_registry = self._build_full_registry(recorder)
+            registry = full_registry
+            if tpl is not None:
+                registry = self._team_registry_for_template(full_registry, tpl)
+                if read_only:
+                    # 「先只读跑一遍」：工具表只留 READONLY（不挂写/执行），且不授予
+                    # 任何具名写工具或命令前缀
+                    registry = ToolRegistry(
+                        [t for t in full_registry.all() if t.safety == Safety.READONLY]
+                    )
+            # 运行级授权（grant.scope=run）：只包一层 GrantedGate——写工具限工作
+            # 目录内、命令限模板声明的前缀；删除语义 / 引擎主目录 / 目录外写入 /
+            # DANGEROUS 一律回退会话门逐次确认。成员 Agent 在建队时缓存 gate，
+            # 授权范围因此按团队生命周期固定（不做逐轮变更）。
+            team_gate = gate
+            if gate is not None and (read_only or grant_scope == "run"):
+                if read_only:
+                    team_gate = GrantedGate(
+                        gate, allowed_tools=(), command_prefixes=(),
+                        run_id=uuid4().hex[:12],
+                        label=(
+                            f"模板「{tpl.get('name', '')}」只读运行"
+                            if tpl is not None else "团队只读运行"
+                        ),
+                    )
+                elif grant_scope == "run":
+                    if tpl is not None:
+                        team_gate = GrantedGate(
+                            gate,
+                            allowed_tools=self._template_allowed_tools(tpl),
+                            command_prefixes=collect_command_prefixes(tpl.get("roles") or []),
+                            run_id=uuid4().hex[:12],
+                            label=f"模板「{tpl.get('name', '')}」",
+                        )
+                    else:
+                        # team=true 直发（无模板声明）：按「本次运行免确认」的同一
+                        # 安全边界放行全部常规写工具；GrantedGate 仍收口——删除
+                        # 语义 / 引擎主目录 / 工作目录外 / DANGEROUS 一律回退会话门
+                        # 逐次确认。命令不预授权（没有模板声明的前缀清单可依）。
+                        team_gate = GrantedGate(
+                            gate,
+                            allowed_tools=[
+                                t.name for t in full_registry.all()
+                                if t.safety == Safety.WRITE
+                            ],
+                            command_prefixes=(),
+                            run_id=uuid4().hex[:12],
+                            label="团队（显式成员）",
+                        )
+            if tpl is not None and read_only:
                 await emit(NoticeEvent(
-                    message=f"模板的 {declared} 个角色去重后组成 "
-                            f"{len(specs)} 名队员：有的服务没配 Key，或角色重复"
+                    message="本次按「只读」运行模板：队员只挂只读工具，不写文件、不运行命令。"
                 ))
-        # 模板 max_calls 是 provider 调用次数（含重试/格式纠错），不是轮次：
-        # 给每个成员与 AI 总管的 provider 套一层计数代理，团队链路（含小会）
-        # 的每次真实 stream 都会 spend()（审查 finding 15）。
-        if run_budget is not None:
-            for spec in specs:
-                if spec.provider is not None:
-                    spec.provider = BudgetedProvider(spec.provider, run_budget)
-            if director is not None and director.provider is not None:
-                director.provider = BudgetedProvider(director.provider, run_budget)
-        full_registry = self._build_full_registry(recorder)
-        registry = full_registry
-        if tpl is not None:
-            registry = self._team_registry_for_template(full_registry, tpl)
-            if read_only:
-                # 「先只读跑一遍」：工具表只留 READONLY（不挂写/执行），且不授予
-                # 任何具名写工具或命令前缀
-                registry = ToolRegistry(
-                    [t for t in full_registry.all() if t.safety == Safety.READONLY]
-                )
-        # 运行级授权（grant.scope=run）：只包一层 GrantedGate——写工具限工作
-        # 目录内、命令限模板声明的前缀；删除语义 / 引擎主目录 / 目录外写入 /
-        # DANGEROUS 一律回退会话门逐次确认。成员 Agent 在建队时缓存 gate，
-        # 授权范围因此按团队生命周期固定（不做逐轮变更）。
-        team_gate = gate
-        if gate is not None and (read_only or grant_scope == "run"):
-            if read_only:
-                team_gate = GrantedGate(
-                    gate, allowed_tools=(), command_prefixes=(),
-                    run_id=uuid4().hex[:12],
-                    label=(
-                        f"模板「{tpl.get('name', '')}」只读运行"
-                        if tpl is not None else "团队只读运行"
-                    ),
-                )
-            elif grant_scope == "run":
-                if tpl is not None:
-                    team_gate = GrantedGate(
-                        gate,
-                        allowed_tools=self._template_allowed_tools(tpl),
-                        command_prefixes=collect_command_prefixes(tpl.get("roles") or []),
-                        run_id=uuid4().hex[:12],
-                        label=f"模板「{tpl.get('name', '')}」",
-                    )
-                else:
-                    # team=true 直发（无模板声明）：按「本次运行免确认」的同一
-                    # 安全边界放行全部常规写工具；GrantedGate 仍收口——删除
-                    # 语义 / 引擎主目录 / 工作目录外 / DANGEROUS 一律回退会话门
-                    # 逐次确认。命令不预授权（没有模板声明的前缀清单可依）。
-                    team_gate = GrantedGate(
-                        gate,
-                        allowed_tools=[
-                            t.name for t in full_registry.all()
-                            if t.safety == Safety.WRITE
-                        ],
-                        command_prefixes=(),
-                        run_id=uuid4().hex[:12],
-                        label="团队（显式成员）",
-                    )
-        if tpl is not None and read_only:
-            await emit(NoticeEvent(
-                message="本次按「只读」运行模板：队员只挂只读工具，不写文件、不运行命令。"
-            ))
-        team_cfg = (
-            TeamCfgView(self.cfg.team, run_budget)
-            if run_budget is not None else self.cfg.team
-        )
-        budget_note = (
-            (lambda: run_budget.reason_label()) if run_budget is not None else None
-        )
-        orch_kwargs = dict(
-            emit=emit,
-            working_dir=working_dir,
-            registry=registry,
-            gate=team_gate,
-            cfg=team_cfg,
-            max_iterations=self.cfg.subagent_max_iterations,
-            restrict_to_workdir=self.cfg.restrict_to_workdir,
-            session_id=sid,
-            job_containment=self.cfg.shell.job_containment,
-            sandbox_level=self.cfg.shell.sandbox_level,
-            use_ripgrep=self.cfg.search.use_ripgrep,
-            hooks=self.hooks,
-            mods=self.mods,
-            director_mode=effective_director_mode,
-            director=director,
-            budget_check=self._team_budget_check(run_budget, tokens),
-            context_limit_tokens=self.cfg.context_limit_tokens,
-            compaction_keep_recent=self.cfg.compaction_keep_recent,
-            compaction_trigger=self.cfg.compaction_trigger,
-            compaction_auto=self.cfg.compaction_auto,
-            # 频道消息逐条落库（三期）：收队/重启后仍可按 team_id 回放全量
-            message_sink=self._team_message_sink(sid),
-            source_template=str((tpl or {}).get("name") or template_name),
-            isolate_exec=bool(getattr(self.cfg.team, "isolated_tasks", False)),
-        )
-        # 预算越线文案：模板预算注入精确原因（次数 / 时长 / token），
-        # 未带模板时团队沿用内置的 token 预算句
-        if budget_note is not None:
-            orch_kwargs["budget_note"] = budget_note
-        orch = TeamOrchestrator(**orch_kwargs)
-        # 模板预算与跨轮 token 累计挂编排器：同一支队伍的第二条消息起不再
-        # 重读模板，预算线必须随团队生命周期延续
-        orch.collab_budget = run_budget
-        orch.collab_tokens = tokens
-        await orch.create_team(specs)  # TeamStarted 在这里发出；超上限截断发 Notice
+            team_cfg = (
+                TeamCfgView(self.cfg.team, run_budget)
+                if run_budget is not None else self.cfg.team
+            )
+            budget_note = (
+                (lambda: run_budget.reason_label()) if run_budget is not None else None
+            )
+            orch_kwargs = dict(
+                emit=emit,
+                working_dir=working_dir,
+                registry=registry,
+                gate=team_gate,
+                cfg=team_cfg,
+                max_iterations=self.cfg.subagent_max_iterations,
+                restrict_to_workdir=self.cfg.restrict_to_workdir,
+                session_id=sid,
+                job_containment=self.cfg.shell.job_containment,
+                sandbox_level=self.cfg.shell.sandbox_level,
+                use_ripgrep=self.cfg.search.use_ripgrep,
+                hooks=self.hooks,
+                mods=self.mods,
+                director_mode=effective_director_mode,
+                director=director,
+                budget_check=self._team_budget_check(run_budget, tokens),
+                context_limit_tokens=self.cfg.context_limit_tokens,
+                compaction_keep_recent=self.cfg.compaction_keep_recent,
+                compaction_trigger=self.cfg.compaction_trigger,
+                compaction_auto=self.cfg.compaction_auto,
+                # 频道消息逐条落库（三期）：收队/重启后仍可按 team_id 回放全量
+                message_sink=self._team_message_sink(sid),
+                source_template=str((tpl or {}).get("name") or template_name),
+                isolate_exec=bool(getattr(self.cfg.team, "isolated_tasks", False)),
+            )
+            # 预算越线文案：模板预算注入精确原因（次数 / 时长 / token），
+            # 未带模板时团队沿用内置的 token 预算句
+            if budget_note is not None:
+                orch_kwargs["budget_note"] = budget_note
+            orch = TeamOrchestrator(**orch_kwargs)
+            # 模板预算与跨轮 token 累计挂编排器：同一支队伍的第二条消息起不再
+            # 重读模板，预算线必须随团队生命周期延续
+            orch.collab_budget = run_budget
+            orch.collab_tokens = tokens
+            await orch.create_team(specs)  # TeamStarted 在这里发出；超上限截断发 Notice
+        except BaseException:
+            # 建队中途失败/取消：释放已构造的成员与 AI 总管 provider，防止连接池泄漏
+            cleanup = [
+                *(s.provider for s in specs if s.provider is not None),
+                *([director.provider] if director is not None and director.provider is not None else []),
+            ]
+            if cleanup:
+                self._release_turn_providers(cleanup)
+            raise
         self._teams[sid] = orch
         self._teams_interrupted.pop(sid, None)
         self._persist_team_state()
@@ -2217,13 +2232,37 @@ class CollabBodyMixin:
         }
         for ws_emit in list(self.ws_emitters):
             try:
-                spawn_bg(ws_emit(ev))
-            except RuntimeError:
+                await ws_emit(ev)
+            except Exception:  # noqa: BLE001 - 单个连接失败不影响其余
                 pass
+
+    def _team_oob_emit(self, sid: str) -> EmitFn:
+        """轮外团队控制的事件发射链（stop / deliver / takeover / task_update）。
+
+        闲置编排器手里的 _emit 可能是上一轮已结束或已断线的连接闭包；
+        在 ws_emitters 非空时切到此广播器，确保 live 连接与断线重连缓冲
+        都能实时收到 team_message / team_finished。
+        """
+        async def _send(ev_dict: dict) -> None:
+            payload = {**ev_dict, "session_id": sid}
+            framed = self.log_session_event(sid, payload)
+            for ws_emit in list(self.ws_emitters):
+                try:
+                    await ws_emit(framed)
+                except Exception:  # noqa: BLE001 - 单个连接失败不影响其余
+                    pass
+
+        return _dump_emit(_send)
+
+    def _rebind_team_oob_emit(self, sid: str, orch: TeamOrchestrator) -> None:
+        """有在线 WS 连接且非自动循环期间，将闲置编排器的 _emit 指向当前广播链。"""
+        if self.ws_emitters and not orch.loop_running:
+            orch._emit = self._team_oob_emit(sid)
 
     async def team_task_add(self, params: dict) -> dict:
         """team.task_add：登记工单（待办）。指派对象必须在名册内，依赖必须存在。"""
         sid, orch = self._team_for(params)
+        self._rebind_team_oob_emit(sid, orch)
         deps = params.get("deps")
         task = await orch.task_add(
             str(params.get("title", "")),
@@ -2278,7 +2317,10 @@ class CollabBodyMixin:
         if {str(f.get("id") or "") for f in selected} != set(ids):
             raise TeamError("部分发现不属于该对抗结果")
         assignee = str(params.get("assignee") or "")
+        self._rebind_team_oob_emit(sid, orch)
         tasks = await orch.tasks_from_adversarial(seq=seq, findings=selected, assignee=assignee)
+        for task in tasks:
+            await self._push_team_task_event(sid, task)
         return {"tasks": tasks}
 
     async def roundtable_to_team_task(self, params: dict) -> dict:
@@ -2311,10 +2353,12 @@ class CollabBodyMixin:
         if not text:
             raise TeamError("该圆桌没有可用的融合结论")
         title = text.splitlines()[0].strip()[:60] or f"圆桌结论（seq {seq}）"
+        self._rebind_team_oob_emit(sid, orch)
         task = await orch.task_from_roundtable(
             seq=seq, title=title, detail=text,
             assignee=str(params.get("assignee") or ""),
         )
+        await self._push_team_task_event(sid, task)
         return {"task": task}
 
     async def team_task_update(self, params: dict) -> dict:
@@ -2326,6 +2370,7 @@ class CollabBodyMixin:
         让被派队员在频道里看到派工。
         """
         sid, orch = self._team_for(params)
+        self._rebind_team_oob_emit(sid, orch)
         status = str(params.get("status", ""))
         task = await orch.task_update(str(params.get("task_id", "")), status)
         assign_msg = None
@@ -2345,6 +2390,7 @@ class CollabBodyMixin:
         """
         sid, orch = self._team_for(params)
         await self._cancel_team_turn_and_settle(sid)
+        self._rebind_team_oob_emit(sid, orch)
         result = await orch.stop(reason=str(params.get("reason", "") or ""))
         if self._teams.pop(sid, None) is not None:
             self._release_team_providers(orch)
@@ -2367,6 +2413,7 @@ class CollabBodyMixin:
         """
         sid, orch = self._team_for(params)
         await self._cancel_team_turn_and_settle(sid)
+        self._rebind_team_oob_emit(sid, orch)
         result = await orch.finish(status="done")
         if self._teams.pop(sid, None) is not None:
             self._release_team_providers(orch)
@@ -2390,6 +2437,7 @@ class CollabBodyMixin:
         """
         sid, orch = self._team_for(params)
         await self._cancel_team_turn_and_settle(sid)
+        self._rebind_team_oob_emit(sid, orch)
         result = await orch.takeover()
         self._persist_team_state()  # director_mode 变了：活动登记同步落盘
         return {

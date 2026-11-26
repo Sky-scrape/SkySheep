@@ -16,13 +16,14 @@ SessionModelMixin._context_detail 与内核 snapshot。本 Mixin 无 __init__。
 
 from __future__ import annotations
 
+import contextlib
 import re
 from datetime import date
 from pathlib import Path
 
 from ... import __version__
 from ...core.estimate import format_range
-from ...core.prompt import MAX_INSTRUCTIONS_CHARS
+from ...core.prompt import MAX_INSTRUCTIONS_CHARS, load_project_instructions
 from ...messages import Message
 from ...textio import read_text_file, write_text_file
 
@@ -251,31 +252,51 @@ class ProjectDataMixin:
 
     # ---- 项目记忆（AGENTS.md 等，前端侧栏「项目记忆」入口） ----
 
+    def _resolve_instructions_path(self) -> Path | None:
+        """解析项目记忆文件路径：缓存路径失效或尚为空时重新探测工作目录。
+
+        Agent 在对话里 via write_file 新建 AGENTS.md/CLAUDE.md 后，
+        _bind_project 时的空缓存会滞后；按工作目录实时探测可确保右侧面板、
+        冲突守卫与定期整理都看见新落盘的文件。
+        """
+        if self.instructions_file:
+            p = Path(self.instructions_file)
+            if p.is_file():
+                return p
+        if self.working_dir is not None:
+            found, _ = load_project_instructions(Path(self.working_dir))
+            if found:
+                self.instructions_file = found
+                return Path(found)
+            # 若原指向的文件已被删且工作目录里也没有任何说明文件，清掉陈旧路径
+            self.instructions_file = None
+            return None
+        return Path(self.instructions_file) if self.instructions_file else None
+
     async def get_instructions(self) -> dict:
         text = ""
         enc_text = ""
         certain = True
-        if self.instructions_file:
-            p = Path(self.instructions_file)
-            if p.is_file():
-                try:
-                    # 走 textio 探测编码：GBK 等非 UTF-8 的 AGENTS.md 不再被读成
-                    # 一串替换字符（此前 utf-8+replace 读完一旦保存就把乱码写死了）
-                    loaded = read_text_file(p)
-                    text = loaded.text
-                    if loaded.encoding != "utf-8":
-                        enc_text = loaded.encoding.upper()
-                    certain = loaded.certain
-                except OSError:
-                    text = ""
-        mtime = 0.0
-        if self.instructions_file:
+        p = self._resolve_instructions_path()
+        if p is not None and p.is_file():
             try:
-                mtime = round(Path(self.instructions_file).stat().st_mtime, 3)
+                # 走 textio 探测编码：GBK 等非 UTF-8 的 AGENTS.md 不再被读成
+                # 一串替换字符（此前 utf-8+replace 读完一旦保存就把乱码写死了）
+                loaded = read_text_file(p)
+                text = loaded.text
+                if loaded.encoding != "utf-8":
+                    enc_text = loaded.encoding.upper()
+                certain = loaded.certain
+            except OSError:
+                text = ""
+        mtime = 0.0
+        if p is not None:
+            try:
+                mtime = round(p.stat().st_mtime, 3)
             except OSError:
                 mtime = 0.0
         # mtime 供右侧面板保存时比对：编辑期间定期整理重写过 AGENTS.md 就拒绝覆盖
-        return {"path": self.instructions_file, "text": text, "mtime": mtime,
+        return {"path": str(p) if p is not None else None, "text": text, "mtime": mtime,
                 "encoding_text": enc_text, "editable": certain}
 
     async def save_instructions(self, text: str, base_mtime: float | None = None) -> dict:
@@ -284,45 +305,51 @@ class ProjectDataMixin:
         落盘走 textio：沿用文件原本的编码与行尾符（新建文件 UTF-8 + LF），
         原子写；超出 MAX_INSTRUCTIONS_CHARS 的部分截掉，但不静默——truncated /
         original_chars / limit 随结果带回，由界面明示。"""
-        if base_mtime is not None and float(base_mtime) > 0 and self.instructions_file:
-            try:
-                cur = round(Path(self.instructions_file).stat().st_mtime, 3)
-            except OSError:
-                cur = 0.0
-            if cur != float(base_mtime):
-                raise RuntimeError(
-                    "项目记忆在你编辑期间被更新过（如定期整理已重写 AGENTS.md），"
-                    "本次保存已阻止；请点「重读」后再编辑保存"
-                )
         original_chars = len(text)
         truncated = original_chars > MAX_INSTRUCTIONS_CHARS
         text = text[:MAX_INSTRUCTIONS_CHARS]
-        if self.instructions_file:
-            path = Path(self.instructions_file)
-        else:
-            path = Path(self.working_dir) / "AGENTS.md"
+        lock = getattr(self, "_memory_io_lock", None)
+        async with (lock if lock is not None else contextlib.nullcontext()):
+            path = self._resolve_instructions_path()
+            if path is None:
+                if self.working_dir is None:
+                    raise RuntimeError(
+                        "当前没有项目，无法保存项目记忆——先在侧栏「项目」区点 ＋ 添加项目并选择一个文件夹。"
+                    )
+                path = Path(self.working_dir) / "AGENTS.md"
+            if base_mtime is not None:
+                try:
+                    cur = round(path.stat().st_mtime, 3)
+                except OSError:
+                    cur = 0.0
+                bm = float(base_mtime)
+                if (bm > 0 and cur != bm) or (bm == 0.0 and cur > 0.0):
+                    raise RuntimeError(
+                        "项目记忆在你编辑期间被更新过（如定期整理已重写或新建了 AGENTS.md），"
+                        "本次保存已阻止；请点「重读」后再编辑保存"
+                    )
             self.instructions_file = str(path)
-        # 沿用原编码与行尾符；文件还不存在（首次创建）时按 UTF-8 + LF。
-        # 编码探不确定意味着原文件读出来就带替换字符——按它写回等于把乱码固化，
-        # 按项目规范「宁可拒绝写」，直接报错指路
-        enc, nl = "utf-8", "\n"
-        if path.is_file():
+            # 沿用原编码与行尾符；文件还不存在（首次创建）时按 UTF-8 + LF。
+            # 编码探不确定意味着原文件读出来就带替换字符——按它写回等于把乱码固化，
+            # 按项目规范「宁可拒绝写」，直接报错指路
+            enc, nl = "utf-8", "\n"
+            if path.is_file():
+                try:
+                    loaded = read_text_file(path)
+                except OSError:
+                    loaded = None
+                if loaded is not None and not loaded.certain:
+                    raise RuntimeError(
+                        "这份 AGENTS.md 的编码无法识别（读出来是替换字符），"
+                        "为避免写坏原文件已拒绝保存；请在外部编辑器里把它转成 UTF-8 后重试"
+                    )
+                if loaded is not None:
+                    enc, nl = loaded.encoding, loaded.newline
             try:
-                loaded = read_text_file(path)
-            except OSError:
-                loaded = None
-            if loaded is not None and not loaded.certain:
-                raise RuntimeError(
-                    "这份 AGENTS.md 的编码无法识别（读出来是替换字符），"
-                    "为避免写坏原文件已拒绝保存；请在外部编辑器里把它转成 UTF-8 后重试"
-                )
-            if loaded is not None:
-                enc, nl = loaded.encoding, loaded.newline
-        try:
-            write_text_file(path, text, enc, nl)
-        except (OSError, UnicodeEncodeError) as e:
-            raise RuntimeError(f"写入失败: {e}") from None
-        self.instructions_text = text
+                write_text_file(path, text, enc, nl)
+            except (OSError, UnicodeEncodeError) as e:
+                raise RuntimeError(f"写入失败: {e}") from None
+            self.instructions_text = text
         self._refresh_system_prompts()
         try:
             mtime = round(path.stat().st_mtime, 3)

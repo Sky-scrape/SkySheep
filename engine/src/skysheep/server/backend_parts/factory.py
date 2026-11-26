@@ -650,8 +650,9 @@ class FactoryMixin:
                 continue
             run_status = str(run.get("status") or "")
             line_key = factory_run_line_key(run) or f"node:{int(run['task_id'])}"
-            if started <= acks.get(line_key, 0):
-                continue  # 这条产线的这个问题已经「知道了」
+            finished = float(run.get("finished_at") or 0)
+            if max(started, finished) <= acks.get(line_key, 0):
+                continue  # 这条产线的这个问题已经「知道了」（若在知道了之后才收尾失败则重新浮出）
             # 跑完但有工具被门控拦下：状态仍是 done，但 outcome 已经降级为
             # partial，必须在这里浮出来——否则「预授权没勾全」在工厂里永远是绿的。
             if run_status == "done" and str(run.get("outcome") or "") == "partial":
@@ -698,11 +699,13 @@ class FactoryMixin:
         # 于是同一分钟到点十条产线时 HUD 依然显示 0。现在按同一个并发口径算：
         # 到点但没跑上的任务，减去当前空闲额度（额度之外才是真的在排队）。
         cap = max(1, int(self._factory_config()["max_parallel_runs"]))
-        cron_running = len(getattr(self, "_cron_running", {}) or {})
+        cron_running_map = getattr(self, "_cron_running", {}) or {}
+        cron_running = len(cron_running_map)
         free_slots = max(0, cap - cron_running)
         waiting = [
             t for t in due
             if int(t["id"]) not in running_by_task
+            and int(t["id"]) not in cron_running_map
             and t.get("project_id") is not None
             and root_ok.get(int(t["project_id"]), False)
         ] if due else []
@@ -903,7 +906,9 @@ class FactoryMixin:
         if tid in self._cron_running:
             return {"started": False, "id": tid,
                     "notice": "该任务正在运行中，本次未重复触发"}
-        spawn_bg(self._run_cron_task(tid, force=True))
+        t = spawn_bg(self._run_cron_task(tid, force=True))
+        if not t.done():
+            self._cron_running[tid] = t
         return {"started": True, "id": tid}
 
     async def factory_cancel(self, params: dict) -> dict:

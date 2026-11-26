@@ -908,7 +908,8 @@ async def run_cron_task_core(
     task = await store.get_cron_task(task_id)
     if task is None:
         return None
-    if running is not None and task_id in running:
+    cur_task = asyncio.current_task()
+    if running is not None and task_id in running and running[task_id] is not cur_task:
         return None  # 已在跑：force 也不重复触发（与既有扫描循环口径一致）
     if not task["enabled"] and not force:
         return None
@@ -1107,7 +1108,7 @@ async def run_cron_task_core(
         )
         return task
     finally:
-        if added and running is not None:
+        if added and running is not None and running.get(task_id) is cur_task:
             running.pop(task_id, None)
 
 
@@ -1117,6 +1118,16 @@ class AutomationMixin:
 
     方法自 backend.py 按职责注释逐字搬入。
     """
+
+    def _get_loop_lock(self, attr: str) -> asyncio.Lock:
+        """按当前运行事件循环惰性建锁（避免 Mixin 引入 __init__ 或跨测试循环报错）。"""
+        loop = asyncio.get_running_loop()
+        entry = getattr(self, attr, None)
+        if entry is None or entry[0] is not loop:
+            lock = asyncio.Lock()
+            setattr(self, attr, (loop, lock))
+            return lock
+        return entry[1]
 
     # ---- 无人值守忙判定（跨域 accessor，批 4 雷区收敛①） ----
 
@@ -1856,18 +1867,23 @@ class AutomationMixin:
             # 单会话轮不消费它
             return await self._execute_cron_turn(task, force=force)
 
-        return await run_cron_task_core(
-            self.store, task_id, force=force,
-            execute=dispatch_by_mode,
-            broadcast=self._broadcast_cron,
-            notify=self.notify,
-            channels=self.channels,
-            running=self._cron_running,
-            emit_run=self._emit_factory_run,
-            ledger=self.run_ledger,
-            timeout_s=self._cron_timeout_s(),
-            alert_after=int(self._factory_setting("alert_after_failures", 3) or 0),
-        )
+        try:
+            return await run_cron_task_core(
+                self.store, task_id, force=force,
+                execute=dispatch_by_mode,
+                broadcast=self._broadcast_cron,
+                notify=self.notify,
+                channels=self.channels,
+                running=self._cron_running,
+                emit_run=self._emit_factory_run,
+                ledger=self.run_ledger,
+                timeout_s=self._cron_timeout_s(),
+                alert_after=int(self._factory_setting("alert_after_failures", 3) or 0),
+            )
+        finally:
+            cur = asyncio.current_task()
+            if cur is not None and self._cron_running.get(task_id) is cur:
+                self._cron_running.pop(task_id, None)
 
     def _cron_timeout_s(self) -> float | None:
         """单次运行硬超时（秒）；0 = 不限。配置以分钟表达，接口按秒。"""
@@ -1909,90 +1925,96 @@ class AutomationMixin:
         provider = self._cron_line_provider(task)
         if provider is None:
             raise RuntimeError("尚未配置可用的模型 API Key")
-        # 厂区可用性 fail closed（与扫描循环 / 工厂派工同一口径）：_cron_execution_context
-        # 在目录缺失时会回退到当前项目，那等于把 A 项目的 prompt 跑进 B 项目目录。
-        # 这条检查会同时拦住「自动化页点立即运行」与「系统计划任务」两条入口。
-        pid = task.get("project_id")
-        if pid is not None:
-            proj = await self.store.get_project(int(pid))
-            if proj is None or not Path(proj.root_path).is_dir():
-                raise RuntimeError("厂区不可用（项目目录不存在），本次未执行")
-        cron_pid, cron_workdir = await self._cron_execution_context(task)
-        if cron_pid is None or cron_workdir is None:
-            # 项目已删空（无项目态）：没有可落的工作目录，不再重排下一次运行
-            raise RuntimeError("任务所属的项目已不存在，定时任务已停用")
+        try:
+            # 厂区可用性 fail closed（与扫描循环 / 工厂派工同一口径）：_cron_execution_context
+            # 在目录缺失时会回退到当前项目，那等于把 A 项目的 prompt 跑进 B 项目目录。
+            # 这条检查会同时拦住「自动化页点立即运行」与「系统计划任务」两条入口。
+            pid = task.get("project_id")
+            if pid is not None:
+                proj = await self.store.get_project(int(pid))
+                if proj is None or not Path(proj.root_path).is_dir():
+                    raise RuntimeError("厂区不可用（项目目录不存在），本次未执行")
+            cron_pid, cron_workdir = await self._cron_execution_context(task)
+            if cron_pid is None or cron_workdir is None:
+                # 项目已删空（无项目态）：没有可落的工作目录，不再重排下一次运行
+                raise RuntimeError("任务所属的项目已不存在，定时任务已停用")
 
-        # 每个任务一个独立会话（同名），历史随运行累积
-        sess = await self.store.create_session(cron_pid, title=f"⏰ {task['name']}")
-        sid = sess.id
-        gate = CronGate(allowed=task["allowed_tools"], store=self.store,
-                        project_id=cron_pid, working_dir=cron_workdir)
-        recorder = ChangeRecorder()
-        runtime = SessionRuntime(
-            sid=sid,
-            agent=self._build_agent(
-                provider=provider,
-                gate=gate,
-                working_dir=cron_workdir,
-                session_id=sid,
+            # 每个任务一个独立会话（同名），历史随运行累积
+            sess = await self.store.create_session(cron_pid, title=f"⏰ {task['name']}")
+            sid = sess.id
+            gate = CronGate(allowed=task["allowed_tools"], store=self.store,
+                            project_id=cron_pid, working_dir=cron_workdir)
+            recorder = ChangeRecorder()
+            runtime = SessionRuntime(
+                sid=sid,
+                agent=self._build_agent(
+                    provider=provider,
+                    gate=gate,
+                    working_dir=cron_workdir,
+                    session_id=sid,
+                    recorder=recorder,
+                ),
                 recorder=recorder,
-            ),
-            recorder=recorder,
-        )
-        runtime.agent.set_system(self.compose_system_for(cron_workdir))
+            )
+            runtime.agent.set_system(self.compose_system_for(cron_workdir))
 
-        # facts：本轮事实（步数 / 当前工具 / 被拦次数与工具名），原地累积
-        facts: dict = {}
-        progress_emit = make_progress_emit(
-            getattr(self, "run_ledger", None), "cron", int(task["id"]), facts)
+            # facts：本轮事实（步数 / 当前工具 / 被拦次数与工具名），原地累积
+            facts: dict = {}
+            progress_emit = make_progress_emit(
+                getattr(self, "run_ledger", None), "cron", int(task["id"]), facts)
 
-        async def cron_emit(ev: dict) -> None:
-            # 无人值守：流式/权限/队列事件不进前端，结果走任务行；
-            # 只有「在跑什么」与「被拦了几次」以工序进度（1 次/秒）进工厂观战窗
-            await progress_emit(ev)
+            async def cron_emit(ev: dict) -> None:
+                # 无人值守：流式/权限/队列事件不进前端，结果走任务行；
+                # 只有「在跑什么」与「被拦了几次」以工序进度（1 次/秒）进工厂观战窗
+                await progress_emit(ev)
 
-        result = await self._run_turn_pipeline(
-            task["prompt"], cron_emit, plan_mode=False,
-            images=None, runtime=runtime, session_id=sid,
-        )
-        stopped = bool(result.get("stopped"))
-        # 验收工位（可选，默认关）：只读、单轮，结论只写 facts，由
-        # run_cron_task_core 与自动判定合并（只能降级，不能升级）。
-        # 评审沿用这条产线自己的服务：不把任务内容额外发给另一家。
-        if task.get("review") and not stopped:
-            last_text = ""
-            for m in reversed(runtime.agent.history):
-                text = str(getattr(m, "text", "") or "").strip()
-                if getattr(m, "role", "") == "assistant" and text:
-                    last_text = text
-                    break
-            if last_text:
-                reviewer = provider
-                try:
-                    review = await review_output(
-                        reviewer,
-                        task_name=str(task.get("name") or ""),
-                        task_prompt=str(task.get("prompt") or ""),
-                        result=last_text,
-                        denied=int(facts.get("denied") or 0),
-                    )
-                    facts["review"] = review
-                    if review.get("in_tokens") or review.get("out_tokens"):
-                        try:
-                            await self.store.add_usage(
-                                sid,
-                                getattr(reviewer, "name", "") or self.provider_name,
-                                getattr(reviewer, "model", "") or self.provider_model,
-                                int(review.get("in_tokens") or 0),
-                                int(review.get("out_tokens") or 0),
-                                int(review.get("cached_tokens") or 0),
-                            )
-                        except Exception:  # noqa: BLE001 - 用量是附加信息
-                            pass
-                except Exception as e:  # noqa: BLE001 - 验收失败不能反噬运行收尾
-                    facts["review"] = {
-                        "outcome": "", "note": ("验收未执行：" + str(e))[:160]}
-        return runtime, sid, stopped, facts
+            result = await self._run_turn_pipeline(
+                task["prompt"], cron_emit, plan_mode=False,
+                images=None, runtime=runtime, session_id=sid,
+            )
+            stopped = bool(result.get("stopped"))
+            # 验收工位（可选，默认关）：只读、单轮，结论只写 facts，由
+            # run_cron_task_core 与自动判定合并（只能降级，不能升级）。
+            # 评审沿用这条产线自己的服务：不把任务内容额外发给另一家。
+            if task.get("review") and not stopped:
+                last_text = ""
+                for m in reversed(runtime.agent.history):
+                    text = str(getattr(m, "text", "") or "").strip()
+                    if getattr(m, "role", "") == "assistant" and text:
+                        last_text = text
+                        break
+                if last_text:
+                    reviewer = provider
+                    try:
+                        review = await review_output(
+                            reviewer,
+                            task_name=str(task.get("name") or ""),
+                            task_prompt=str(task.get("prompt") or ""),
+                            result=last_text,
+                            denied=int(facts.get("denied") or 0),
+                        )
+                        facts["review"] = review
+                        if review.get("in_tokens") or review.get("out_tokens"):
+                            try:
+                                await self.store.add_usage(
+                                    sid,
+                                    getattr(reviewer, "name", "") or self.provider_name,
+                                    getattr(reviewer, "model", "") or self.provider_model,
+                                    int(review.get("in_tokens") or 0),
+                                    int(review.get("out_tokens") or 0),
+                                    int(review.get("cached_tokens") or 0),
+                                )
+                            except Exception:  # noqa: BLE001 - 用量是附加信息
+                                pass
+                    except Exception as e:  # noqa: BLE001 - 验收失败不能反噬运行收尾
+                        facts["review"] = {
+                            "outcome": "", "note": ("验收未执行：" + str(e))[:160]}
+            return runtime, sid, stopped, facts
+        finally:
+            if provider is not self.provider:
+                release = getattr(self, "_release_turn_providers", None)
+                if callable(release):
+                    release([provider])
 
     # ---- 定时团队（团队模式设计 §14.2）：mode=team 的执行路径 ----
     # 到点以「团队模板」建队、AI 总管自动闭环跑一轮、交付《交付说明》后按
@@ -2455,10 +2477,11 @@ class AutomationMixin:
             await asyncio.sleep(self.PIPELINE_INTERVAL)
 
     async def _pipeline_pass(self) -> None:
-        for pipe in await self.store.list_pipelines():
-            if pipe["status"] != "running":
-                continue
-            await self._pipeline_advance(pipe)
+        async with self._get_loop_lock("_pipeline_pass_lock"):
+            for pipe in await self.store.list_pipelines(status="running"):
+                if pipe["status"] != "running":
+                    continue
+                await self._pipeline_advance(pipe)
 
     async def _pipeline_advance(self, pipe: dict) -> None:
         """一轮推进：挂接节点对账 + 依赖判定（blocked → ready/error/skipped）+ 并发调度 + 终态收尾。"""
@@ -2565,6 +2588,11 @@ class AutomationMixin:
                     return  # 流水线已被终止收尾，本轮到此为止
                 await self.store.update_pipeline_node(node["id"], status="ready")
                 node["status"] = "ready"
+        # 派跑前重验流水线仍处于 running（防止扫描期间用户点了 pipeline_cancel 被延迟派跑覆盖）
+        if hasattr(self.store, "get_pipeline"):
+            cur_pipe = await self.store.get_pipeline(pipe["id"])
+            if cur_pipe is None or cur_pipe["status"] != "running":
+                return
         # 调度：按 seq 顺序占并发额度；全局有上限，防止多条流水线一起跑拖垮机器。
         # 在跑数从句柄集合统计（而不是本轮 DB 快照）：扫描周期与节点结束的补扫可能
         # 并发推进，快照是调度前的旧状态，会把同一流水线的并发上限算小、短暂超跑。
@@ -2728,7 +2756,7 @@ class AutomationMixin:
                     return  # 无项目态：没有可落的工作目录，只留摘要注入
                 path = base / path
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(result, encoding="utf-8")
+            write_text_atomic(path, result)
         except Exception:  # noqa: BLE001 - 产文件失败不扣主流程（下游还有摘要）
             pass
 
@@ -2781,12 +2809,17 @@ class AutomationMixin:
         # 由 finally 恰好收尾一次——避免超时/失败/取消几条路径重复写账本。
         run = None
         outcome = {"status": "error", "error": "", "excerpt": ""}
+        retriable = False
         try:
             if self.provider is None:
                 raise RuntimeError("尚未配置可用的模型 API Key")
             run_pid, run_workdir = await self._cron_execution_context(pipe)
-            if run_pid is None or run_workdir is None:
-                raise RuntimeError("流水线所属的项目已不存在，无法继续执行")
+            if run_pid is None or run_workdir is None or (
+                pipe.get("project_id") is not None and run_pid != pipe.get("project_id")
+            ):
+                raise RuntimeError("流水线所属的项目或目录已不存在，无法继续执行")
+            if getattr(self, "project", None) is not None and not Path(run_workdir).is_dir():
+                raise RuntimeError("流水线所属的项目目录已不存在，无法继续执行")
             prev_error = node.get("last_error") or ""  # 重试上下文要取更新前的快照
             if node["kind"] == "session":
                 # 会话续跑预检：会话正被使用时不硬拒——不占并发、不消耗重试次数，
@@ -2810,6 +2843,7 @@ class AutomationMixin:
                 node["id"], status="running", started_at=time.time(),
                 runs=(node["runs"] or 0) + 1, last_error="",
             )
+            retriable = True
             self._broadcast_pipeline(await self.store.get_pipeline(pipe["id"]))
             # 记账失败不能拦节点执行——开账本失败已在 RunLedger.start 内部
             # warning 留痕并返回 None（node id + 异常），本轮不进账本但节点照跑；
@@ -2937,8 +2971,10 @@ class AutomationMixin:
             outcome["status"] = "error"
             outcome["error"] = str(e)[:300]
             try:
-                await self._pipeline_node_fail(pipe, node, sid, str(e)[:300],
-                                               notify_body=str(e)[:160])
+                await self._pipeline_node_fail(
+                    pipe, node, sid, str(e)[:300],
+                    retriable=retriable, notify_body=str(e)[:160],
+                )
             except Exception:  # noqa: BLE001
                 pass
         finally:
@@ -3566,14 +3602,34 @@ class AutomationMixin:
                         n["id"], status="blocked", result="", last_error="", finished_at=0,
                     )
         else:
-            # 只回退「因依赖失败」的错误下游（DEP_FAIL_MARK 前缀）；自身跑挂的不动
-            for n in pipe["nodes"]:
-                if (n["id"] != node["id"] and n["status"] == "error"
-                        and node["id"] in n["depends_on"]
-                        and n["last_error"].startswith(self.DEP_FAIL_MARK)):
+            # 回退「因依赖失败」的错误下游（DEP_FAIL_MARK 前缀，含传递下游）；自身跑挂的不动
+            downstream = self._pipeline_downstream(pipe["nodes"], node["id"])
+            by_id = {n["id"]: n for n in pipe["nodes"]}
+            reset_ids = {node["id"]}
+            while True:
+                progressed = False
+                for n in downstream:
+                    nid = n["id"]
+                    if nid in reset_ids or n["status"] != "error":
+                        continue
+                    if not str(n.get("last_error") or "").startswith(self.DEP_FAIL_MARK):
+                        continue
+                    deps = n["depends_on"]
+                    if not any(d in reset_ids for d in deps):
+                        continue
+                    if any(
+                        d in by_id and d not in reset_ids
+                        and by_id[d]["status"] in ("error", "cancelled")
+                        for d in deps
+                    ):
+                        continue
+                    reset_ids.add(nid)
                     await self.store.update_pipeline_node(
-                        n["id"], status="blocked", last_error="", finished_at=0,
+                        nid, status="blocked", last_error="", finished_at=0,
                     )
+                    progressed = True
+                if not progressed:
+                    break
         if pipe["status"] in ("failed", "cancelled", "done"):
             # done 也要拉回：重跑已完成节点（含级联）后，流水线必须重新参与调度
             pipe = await self.store.update_pipeline(pipe["id"], status="running", finished_at=0)
@@ -3630,10 +3686,13 @@ class AutomationMixin:
             # 运行巡检（Watchdog 的本地便宜版）：走同一根时间轴，但自带开关与
             # 「距上次够久」判定，样本不够时不消耗 last_at（下次再来）。
             try:
-                await run_inspect_pass(
-                    self,
-                    push=lambda text, **kw: push_text_to_targets(self.channels, text, **kw),
-                )
+                lock = self._get_loop_lock("_inspect_lock")
+                if not lock.locked():
+                    async with lock:
+                        await run_inspect_pass(
+                            self,
+                            push=lambda text, **kw: push_text_to_targets(self.channels, text, **kw),
+                        )
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001
@@ -3740,7 +3799,8 @@ class AutomationMixin:
             hours = int(hours) if hours is not None else None
         except (TypeError, ValueError):
             hours = None
-        return await inspect_runs(self.store, getattr(self, "provider", None), hours=hours)
+        async with self._get_loop_lock("_inspect_lock"):
+            return await inspect_runs(self.store, getattr(self, "provider", None), hours=hours)
 
 
     # ---- 今日运行总览（只读聚合）：无人值守能力从「配好了」变成「看得见」 ----

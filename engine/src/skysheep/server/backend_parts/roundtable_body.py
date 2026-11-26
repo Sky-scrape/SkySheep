@@ -166,19 +166,6 @@ class RoundtableBodyMixin:
             chair_name, chair_model = self.provider_name or "", self.provider_model or ""
         # 模板的收口角色（aggregator）非空时替换主席：新 provider 本轮临时构建，
         # 轮末释放；resident_chair（会话常驻 provider）继续保留。
-        template_chair = None
-        if tpl is not None and str(tpl_agg.get("provider") or "").strip():
-            chair_name = str(tpl_agg.get("provider") or "").strip()
-            chair_model = str(tpl_agg.get("model") or "").strip()
-            try:
-                template_chair = self._build_member_provider(chair_name, chair_model)
-            except Exception as e:  # noqa: BLE001 - 收口模型不可用要可读报错
-                raise RuntimeError(
-                    f"模板的收口模型「{chair_name}/{chair_model or '默认模型'}」不可用：{e}"
-                ) from e
-            chair = template_chair
-            if not chair_model:
-                chair_model = getattr(template_chair, "model", "") or ""
         chair_system = str(tpl_agg.get("prompt") or "").strip() if tpl is not None else ""
         budget = RunBudget(**((tpl or {}).get("budget") or {})) if tpl is not None else None
 
@@ -225,58 +212,73 @@ class RoundtableBodyMixin:
                 "（最多 3 个，含截断）。"
             )))
 
-        # 上下文压缩护栏：成员与主席都要吃全量历史 + 全部草稿，超限时先压缩
-        #（与 agent.run_turn 开头一致），否则最容易爆的反而是主席自己的上下文
-        if agent.used_context_tokens() > agent.context_limit_tokens:
-            ev = await compact_history(
-                agent, keep_recent=self.cfg.compaction_keep_recent, budget=budget,
-            )
-            if ev is not None:
-                await emit_ev(ev)
-
-        if tpl is not None:
-            # 模板成员：按角色顺序逐个构造，不复用 _resolve_members 的去重——
-            # 同一模型承担多个角色是模板的合法写法（角色靠 system prompt 区分）
-            members = self._template_member_specs(
-                tpl.get("roles") or [],
-                chair_key=(chair_name, chair_model),
-                limit=int(tpl_limits.get("max_members") or 0),
-            )
-        else:
-            members = self._resolve_members(
-                members_params, chair_in, chair_key=(chair_name, chair_model)
-            )
-        # 面板选了超过上限的成员会被静默截断，明确告知而不是让用户猜
-        if members_params and tpl is None:
-            wanted = len({
-                (str((m or {}).get("provider", "")).strip(),
-                 str((m or {}).get("model", "")).strip())
-                for m in members_params
-                if str((m or {}).get("provider", "")).strip()
-            })
-            if wanted > cfg.max_members:
-                await emit_ev(NoticeEvent(
-                    message=f"圆桌成员上限为 {cfg.max_members} 个（设置 · 圆桌 可调），"
-                            f"本轮只用了面板顺序前 {cfg.max_members} 个。"
-                ))
-        if not members:
-            await emit_ev(TurnFinished(stop_reason="error", iterations=1, duration_ms=_rt_ms()))
-            raise RuntimeError(
-                "圆桌没有可用成员：请先在成员面板选择，或给更多模型服务配置 API Key"
-            )
-        if chair_in:
-            members.insert(0, MemberSpec(
-                provider_name=chair_name,
-                model=chair_model,
-                provider=chair,
-            ))
-
-        # 成员/主席都不看图片（纯文本协作），历史里的图片块单独剥离；
-        # history[:-1] 排除刚追加的本次提问（由 run_roundtable 自己拼在末尾）
-        member_history = _strip_image_blocks(agent.history[:-1])
-
-        system = history_system_text(agent.history) or self.compose_system()
+        template_chair = None
+        members: list[MemberSpec] = []
         try:
+            if tpl is not None and str(tpl_agg.get("provider") or "").strip():
+                chair_name = str(tpl_agg.get("provider") or "").strip()
+                chair_model = str(tpl_agg.get("model") or "").strip()
+                try:
+                    template_chair = self._build_member_provider(chair_name, chair_model)
+                except Exception as e:  # noqa: BLE001 - 收口模型不可用要可读报错
+                    raise RuntimeError(
+                        f"模板的收口模型「{chair_name}/{chair_model or '默认模型'}」不可用：{e}"
+                    ) from e
+                chair = template_chair
+                if not chair_model:
+                    chair_model = getattr(template_chair, "model", "") or ""
+
+            # 上下文压缩护栏：成员与主席都要吃全量历史 + 全部草稿，超限时先压缩
+            #（与 agent.run_turn 开头一致），否则最容易爆的反而是主席自己的上下文
+            if agent.used_context_tokens() > agent.context_limit_tokens:
+                ev = await compact_history(
+                    agent, keep_recent=self.cfg.compaction_keep_recent, budget=budget,
+                )
+                if ev is not None:
+                    await emit_ev(ev)
+
+            if tpl is not None:
+                # 模板成员：按角色顺序逐个构造，不复用 _resolve_members 的去重——
+                # 同一模型承担多个角色是模板的合法写法（角色靠 system prompt 区分）
+                members = self._template_member_specs(
+                    tpl.get("roles") or [],
+                    chair_key=(chair_name, chair_model),
+                    limit=int(tpl_limits.get("max_members") or 0),
+                )
+            else:
+                members = self._resolve_members(
+                    members_params, chair_in, chair_key=(chair_name, chair_model)
+                )
+            # 面板选了超过上限的成员会被静默截断，明确告知而不是让用户猜
+            if members_params and tpl is None:
+                wanted = len({
+                    (str((m or {}).get("provider", "")).strip(),
+                     str((m or {}).get("model", "")).strip())
+                    for m in members_params
+                    if str((m or {}).get("provider", "")).strip()
+                })
+                if wanted > cfg.max_members:
+                    await emit_ev(NoticeEvent(
+                        message=f"圆桌成员上限为 {cfg.max_members} 个（设置 · 圆桌 可调），"
+                                f"本轮只用了面板顺序前 {cfg.max_members} 个。"
+                    ))
+            if not members:
+                await emit_ev(TurnFinished(stop_reason="error", iterations=1, duration_ms=_rt_ms()))
+                raise RuntimeError(
+                    "圆桌没有可用成员：请先在成员面板选择，或给更多模型服务配置 API Key"
+                )
+            if chair_in:
+                members.insert(0, MemberSpec(
+                    provider_name=chair_name,
+                    model=chair_model,
+                    provider=chair,
+                ))
+
+            # 成员/主席都不看图片（纯文本协作），历史里的图片块单独剥离；
+            # history[:-1] 排除刚追加的本次提问（由 run_roundtable 自己拼在末尾）
+            member_history = _strip_image_blocks(agent.history[:-1])
+
+            system = history_system_text(agent.history) or self.compose_system()
             outcome: RoundtableOutcome = await run_roundtable(
                 members=members,
                 chair=chair,
@@ -295,14 +297,13 @@ class RoundtableBodyMixin:
                 budget=budget,
             )
         finally:
-            # 本轮为成员临时构建的 provider（httpx 连接池）随轮结束释放：
-            # 成员列表每轮重建（_resolve_members / 模板角色），不释放就是每轮
-            # 泄漏一条连接池。主席 provider 是常驻对象（agent.provider / 全局）；
-            # 模板收口模型是本轮临时构建的，必须进释放清单（不能进 keep）。
+            # 本轮为成员/模板收口临时构建的 provider（httpx 连接池）随轮结束释放
+            # （含 compact_history / 成员空列表等提前退出路径）；resident_chair 保留。
             release = [s.provider for s in members]
             if template_chair is not None:
                 release.append(template_chair)
-            self._release_turn_providers(release, keep=(resident_chair,))
+            if release:
+                self._release_turn_providers(release, keep=(resident_chair,))
 
         # 成员级失败回写健康灯：自动挑模型（_auto_pool_services）据此把坏服务
         # 排到池尾。只收可归因的服务类故障；模型拒答/格式错不动健康灯

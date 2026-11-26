@@ -46,7 +46,7 @@ from ...core.prompt import (
     render_instructions_section,
 )
 from ...session.store import Project
-from ...textio import decode_bytes, write_text_atomic, write_text_file
+from ...textio import decode_bytes, read_text_file, write_text_atomic, write_text_file
 from ...tools.memory import (
     MAINTAIN_MIN_GLOBAL_CHARS,
     MAINTAIN_MIN_PROJECT_CHARS,
@@ -143,6 +143,15 @@ class MemoryMixin:
 
     # ---- 归档自动记忆（提炼纯函数在 tools/memory.py） ----
 
+    def _refresh_agents_system(self) -> None:
+        """记忆/指令变化后刷新全部会话的系统提示词（分屏跨项目列保留各自工作目录）。"""
+        fn = getattr(self, "_refresh_system_prompts", None)
+        if callable(fn):
+            fn()
+            return
+        for ag in self._for_each_agent():
+            ag.set_system(self.compose_system())
+
     def _schedule_memory_digest(self, session_id: str) -> None:
         if not self.cfg.memory_digest:
             return  # 设置 · 全局记忆里关掉了归档自动记忆（保存即热生效）
@@ -176,8 +185,7 @@ class MemoryMixin:
             await self.store.mark_session_memory_digested(sid)
             if not added:
                 return
-            for ag in self._for_each_agent():
-                ag.set_system(self.compose_system())
+            self._refresh_agents_system()
             self._ws_broadcast({
                 "kind": "memory_digest", "session_id": sid, "added": len(added),
                 "message": f"归档后新记住 {len(added)} 条：" + "；".join(added)[:200],
@@ -266,8 +274,7 @@ class MemoryMixin:
             res = adopt_candidate(candidate_id)
         if res.get("adopted"):
             # 采纳写入了新记忆：与 memory_save 一样立刻对所有会话生效
-            for ag in self._for_each_agent():
-                ag.set_system(self.compose_system())
+            self._refresh_agents_system()
         return res
 
     async def memory_candidate_ignore(self, candidate_id: str) -> dict:
@@ -349,12 +356,17 @@ class MemoryMixin:
         """
         if self._maintaining:
             return "skipped"  # 上一轮还没跑完（手动+定时叠加时直接让路）
+        target_workdir = str(self.working_dir or "")
         if scope == "global":
             path = memory_path()
             min_chars = MAINTAIN_MIN_GLOBAL_CHARS
             max_chars = MAX_MEMORY_FILE_CHARS
         else:
             path = Path(self.instructions_file) if self.instructions_file else None
+            if (path is None or not path.is_file()) and self.working_dir is not None:
+                found, _ = load_project_instructions(Path(self.working_dir))
+                if found:
+                    path = Path(found)
             min_chars = MAINTAIN_MIN_PROJECT_CHARS
             max_chars = MAX_INSTRUCTIONS_CHARS
         old_text, raw, encoding, newline = "", b"", "utf-8", "\n"
@@ -406,19 +418,21 @@ class MemoryMixin:
                     memory_log.warning("memory maintain write failed (%s): %s", scope, e)
                     return "skipped"
             if scope == "project":
-                self.instructions_text = new_text
+                # 异步等待模型期间用户可能已切换项目：只在新/旧工作目录一致时更新当前内存态
+                if str(self.working_dir or "") == target_workdir:
+                    self.instructions_file = str(path)
+                    self.instructions_text = new_text
             else:
                 schedule_warmup()  # memory.md 被重写：后台预热嵌入检索的词条向量
-            for ag in self._for_each_agent():
-                ag.set_system(self.compose_system())
+            self._refresh_agents_system()
             state = load_maintenance_state()
             if scope == "global":
                 state["global_last"] = time.time()
                 msg = f"已整理全局记忆（原件已备份，同目录保留最近 {MAINTENANCE_BACKUP_KEEP} 份）"
             else:
-                if self.working_dir is not None:
+                if target_workdir:
                     proj = dict(state.get("project_last") or {})
-                    proj[str(self.working_dir)] = time.time()
+                    proj[target_workdir] = time.time()
                     state["project_last"] = proj
                 msg = f"已整理项目记忆（AGENTS.md，原件已备份，同目录保留最近 {MAINTENANCE_BACKUP_KEEP} 份）"
             save_maintenance_state(state)
@@ -508,7 +522,8 @@ class MemoryMixin:
 
         p = memory_path()
         try:
-            text = p.read_text(encoding="utf-8", errors="replace")
+            tf = read_text_file(p)
+            text = "" if tf.binary else tf.text
         except OSError:
             text = ""
         try:
@@ -558,8 +573,7 @@ class MemoryMixin:
             write_text_atomic(p, full)
         schedule_warmup()  # 记忆被改写：后台预热嵌入检索的词条向量（memory_embed）
         # 记忆注入系统提示词：保存后立刻对当前所有会话生效
-        for ag in self._for_each_agent():
-            ag.set_system(self.compose_system())
+        self._refresh_agents_system()
         try:
             mtime = round(p.stat().st_mtime, 3)
         except OSError:
@@ -585,21 +599,21 @@ class MemoryMixin:
     async def instructions_save(self, text: str, base_mtime: float | None = None) -> dict:
         p = global_instructions_path()
         full = (text or "")[:MAX_GLOBAL_INSTRUCTIONS_CHARS]
-        if base_mtime is not None and float(base_mtime) > 0:
-            # 与 memory_save 同一道防覆盖：编辑期间文件被外部改过就拒绝
-            try:
-                cur = round(p.stat().st_mtime, 3)
-            except OSError:
-                cur = 0.0
-            if cur != float(base_mtime):
-                raise RuntimeError(
-                    "全局指令在你编辑期间被其他窗口改过，本次保存已阻止；"
-                    "请刷新本页重新编辑"
-                )
-        write_text_atomic(p, full)
+        async with self._memory_io_lock:
+            if base_mtime is not None and float(base_mtime) > 0:
+                # 与 memory_save 同一道防覆盖：编辑期间文件被外部改过就拒绝
+                try:
+                    cur = round(p.stat().st_mtime, 3)
+                except OSError:
+                    cur = 0.0
+                if cur != float(base_mtime):
+                    raise RuntimeError(
+                        "全局指令在你编辑期间被其他窗口改过，本次保存已阻止；"
+                        "请刷新本页重新编辑"
+                    )
+            write_text_atomic(p, full)
         # 注入系统提示词：保存后立刻对当前所有会话生效（下一轮即生效）
-        for ag in self._for_each_agent():
-            ag.set_system(self.compose_system())
+        self._refresh_agents_system()
         try:
             mtime = round(p.stat().st_mtime, 3)
         except OSError:
@@ -707,18 +721,34 @@ class MemoryMixin:
         params = params or {}
         proj = await self._map_resolve_project(params.get("project_id"), local=local)
         start, end = self._map_range(params)
-        sessions = await self.store.map_sessions_with_stats(proj.id, start, end)
-        if len(sessions) > self.MAP_SESSION_LIMIT:
-            sessions = sessions[-self.MAP_SESSION_LIMIT:]  # 保最新（已按时间升序）
+        sessions = await self.store.map_sessions_with_stats(
+            proj.id, start, end, limit=self.MAP_SESSION_LIMIT,
+        )
         # 热力天数与时间线窗口解耦：格子周数随底栏宽度自适应，天数始终备足到
         # 上限跨度（外加一周对齐富余），否则远端格子因「没查到」画成假「无活动」
         heat_start = min(start, end - (self.MAP_HEAT_WEEKS * 7 + 7) * 86400)
         days = await self.store.map_day_stats(proj.id, heat_start, end)
         events = await self.store.map_project_events(proj.id, start, end)
+        digests = await self.store.list_map_digests(proj.id)
+
+        # 检查点扫描与 memory.md 读盘移出事件循环（防止大项目扫盘或持有 _io_lock 阻塞 WS）；
+        # 全局记忆（~/.skysheep/memory.md）与候选同姿态仅限本机返回，远程连接不泄露个人跨项目记忆
+        def _read_disk_facets() -> tuple[list[dict], str]:
+            cps = self._map_checkpoint_metas(proj)
+            if not local:
+                return cps, ""
+            try:
+                tf = read_text_file(memory_path())
+                m_text = "" if tf.binary else tf.text
+            except OSError:
+                m_text = ""
+            return cps, m_text
+
+        cp_metas, mem_text = await asyncio.to_thread(_read_disk_facets)
 
         # 文件足迹：检查点 meta 按 path 聚合（count/首末时间/涉及会话），Top N
         files: dict[str, dict] = {}
-        for cp in self._map_checkpoint_metas(proj):
+        for cp in cp_metas:
             ts = float(cp.get("ts") or 0)
             if not (start <= ts <= end):
                 continue
@@ -738,20 +768,18 @@ class MemoryMixin:
             f["session_ids"] = f["session_ids"][:20]
         top_files = top_files[: self.MAP_FILE_LIMIT]
 
-        # 全局记忆条目（跨项目，前端标「全局」徽记）：日期字符串与窗口的本地
+        # 全局记忆条目（跨项目，仅本机返回，前端标「全局」徽记）：日期字符串与窗口的本地
         # 日期串直接比较，免去逐条转时区
-        try:
-            mem_text = memory_path().read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            mem_text = ""
-        start_day = time.strftime("%Y-%m-%d", time.localtime(start))
-        end_day = time.strftime("%Y-%m-%d", time.localtime(end))
-        memories = [
-            e for e in parse_memory_entries(mem_text, 400)
-            if start_day <= e["date"] <= end_day
-        ][-30:]
+        if local and mem_text:
+            start_day = time.strftime("%Y-%m-%d", time.localtime(start))
+            end_day = time.strftime("%Y-%m-%d", time.localtime(end))
+            memories = [
+                e for e in parse_memory_entries(mem_text, 400)
+                if start_day <= e["date"] <= end_day
+            ][-30:]
+        else:
+            memories = []
 
-        digests = await self.store.list_map_digests(proj.id)
         pname = proj.name or (Path(proj.root_path).name if proj.root_path else "")
         return {
             "project": {
@@ -796,23 +824,31 @@ class MemoryMixin:
         """
         self._map_generating.add(project_id)
         try:
-            sessions = await self.store.map_sessions_with_stats(project_id, 0, time.time() + 1)
+            sessions = await self.store.map_sessions_with_stats(
+                project_id, 0, time.time() + 1, limit=self.MAP_MATERIAL_SESSIONS,
+            )
             if not sessions:
                 self._ws_broadcast({
                     "kind": "map_updated", "project_id": project_id, "ok": False,
                     "message": "这个项目还没有会话，先聊出一点历史再来生成演化摘要",
                 })
                 return
-            sessions = sessions[-self.MAP_MATERIAL_SESSIONS:]
             proj = await self.store.get_project(project_id)
-            pname = (proj.name if proj and proj.name else "") or "未命名项目"
+            if proj is None:
+                return  # 生成启动瞬间项目已被删：不再调模型也不写库
+            pname = (proj.name or "") or "未命名项目"
             prompt = self._map_build_material(pname, sessions)
             digest_text = await collect_stream_text(self.provider, prompt)
             data = self._parse_map_digest_json(digest_text)
             rows = self._map_digest_rows(data, sessions)
             if not rows:
                 raise ValueError("模型没有给出有效的阶段划分")
+            if await self.store.get_project(project_id) is None:
+                return  # 调模型期间项目被删除：放弃落库，防留下孤儿摘要行
             await self.store.replace_map_digests(project_id, rows)
+            failed_at = getattr(self, "_map_auto_failed_at", None)
+            if failed_at is not None:
+                failed_at.pop(project_id, None)
             self._ws_broadcast({
                 "kind": "map_updated", "project_id": project_id, "ok": True,
                 "message": "演化摘要已生成：" + (
@@ -824,6 +860,10 @@ class MemoryMixin:
             raise
         except Exception as e:  # noqa: BLE001 - 生成失败要让前端看到原因
             logger.warning("map digest generate failed: %s", e)
+            failed_at = getattr(self, "_map_auto_failed_at", None)
+            if failed_at is None:
+                failed_at = self._map_auto_failed_at = {}
+            failed_at[project_id] = time.time()
             self._ws_broadcast({
                 "kind": "map_updated", "project_id": project_id, "ok": False,
                 "message": f"演化摘要生成失败：{e}",
@@ -985,7 +1025,9 @@ class MemoryMixin:
         if pid is None or pid in self._map_generating:
             return
         last = await self.store.latest_map_digest_ts(pid)
-        if time.time() - last < self.MAP_AUTO_COOLDOWN_S:
+        failed_at = float((getattr(self, "_map_auto_failed_at", None) or {}).get(pid) or 0.0)
+        now = time.time()
+        if now - max(last, failed_at) < self.MAP_AUTO_COOLDOWN_S:
             return
         if await self.store.count_project_sessions_since(pid, last) < self.MAP_AUTO_MIN_SESSIONS:
             return

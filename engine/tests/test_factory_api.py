@@ -1001,3 +1001,65 @@ def test_factory_cancel_cancels_background_run(home):
             assert task.cancelled() or task.done()
         finally:
             backend._cron_running.pop(tid, None)
+
+
+def test_factory_ack_resurfaces_run_finished_after_ack(home):
+    """在点了「知道了」之前起跑、但在点完之后才失败收尾的运行，必须重新浮进需留意。"""
+    import time
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        assert _call(ws, "boot")["ok"]
+        proj = _call(ws, "project.list")["result"]["projects"][0]
+        tid = _call(ws, "cron.add", {
+            "name": "跨界失败", "prompt": "noop", "schedule_type": "interval",
+            "interval_minutes": 10,
+        })["result"]["id"]
+        backend = client.app.state.backend
+        now = time.time()
+
+        async def _start_before_ack():
+            return await backend.store.add_automation_run(
+                kind="cron", task_id=tid, project_id=proj["id"],
+                trigger="schedule", status="running", started_at=now - 30,
+            )
+
+        run_row = client.portal.call(_start_before_ack)
+        assert _call(ws, "factory.ack", {"line_keys": [f"cron:{tid}"]})["ok"]
+
+        async def _finish_after_ack():
+            await backend.store.finish_automation_run(
+                run_row["id"], status="error", finished_at=time.time() + 1, duration_s=31.0,
+                error="post-ack failure", outcome="failed",
+            )
+
+        client.portal.call(_finish_after_ack)
+        st = _call(ws, "factory.state")["result"]
+        keys = [a["line_key"] for a in st["attention"]]
+        assert f"cron:{tid}" in keys
+
+
+def test_factory_state_waiting_excludes_in_memory_cron_running(home):
+    """已占住 _cron_running 的到点任务不再被重复计入 waiting。"""
+    import time
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        assert _call(ws, "boot")["ok"]
+        tid = _call(ws, "cron.add", {
+            "name": "并发任务", "prompt": "noop", "schedule_type": "interval",
+            "interval_minutes": 10,
+        })["result"]["id"]
+        backend = client.app.state.backend
+        now = time.time()
+
+        async def _mark_due():
+            await backend.store.update_cron_task(tid, next_run_at=now - 15)
+
+        client.portal.call(_mark_due)
+        backend._cron_running[tid] = object()
+        try:
+            st = _call(ws, "factory.state")["result"]
+            wait_keys = [w["key"] for w in st["waiting"]]
+            assert f"cron:{tid}" not in wait_keys
+        finally:
+            backend._cron_running.pop(tid, None)
+

@@ -177,7 +177,7 @@ class TeamBoard:
         # 引用一并清除（回放前无法知道哪些行能上板，逐条过滤会看错对象）
         restored_ids = {t.id for t in restored}
         for task in restored:
-            task.deps = [d for d in task.deps if d in restored_ids]
+            task.deps = [d for d in task.deps if d in restored_ids and d != task.id]
         for task in restored:
             self._tasks[task.id] = task
         return len(restored), len(rows) - len(restored)

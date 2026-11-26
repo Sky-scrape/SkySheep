@@ -41,7 +41,7 @@ EMBED_TIMEOUT_S = 2.0     # 单次请求超时（总耗时另受各调用方的�
 UNAVAILABLE_TTL_S = 600.0  # 「本机不可用」标记有效期：过期允许再探测一次（装好 Ollama 不重启也能用）
 EMBED_MIN_COSINE = 0.35    # 余弦低于它的条目视为不相关（对应规则评分「0 分不返回」的语义）
 _EMBED_MAX_ENTRIES = 200   # 条目数超过它直接走规则评分（首查全量嵌向量的代价失控）
-_VEC_CACHE_MAX = 1024      # 词条向量缓存上限：超出整体清空（memory.md 以追加为主，损失可接受）
+_VEC_CACHE_MAX = 1024      # 词条向量缓存上限：超出按 LRU 淘汰最久未用条
 # 轮首墙钟护栏：单次检索调用最多补嵌的未命中词条数（超出当轮回落规则评分，
 # 由后台预热把缓存填齐后自动恢复嵌入排序）+ 探测/查询/补嵌共享的总预算。
 # 预算按「逐请求前检查」生效，单请求仍受 EMBED_TIMEOUT_S 约束，故最坏
@@ -57,7 +57,8 @@ _HYBRID_VEC_WEIGHT = 0.5
 
 # 探测缓存：None=还没探测过；False=不可用（TTL 内不再探测）；True=可用
 _state: dict = {"available": None, "checked_at": 0.0}
-_vec_cache: dict[str, list[float]] = {}  # sha256(条目原文) → 向量（条目几乎不变，跨轮复用）
+_vec_cache: dict[str, list[float]] = {}  # sha256(原文) → 向量（按插入序做 LRU 淘汰）
+_cache_lock = threading.Lock()
 
 # 后台预热单飞：memory.md 可能连续变更（归档提炼/整理/设置页保存），同一时刻
 # 只允许一条预热线程（预热线程与调度方跨线程，用锁做 check-and-set）
@@ -70,16 +71,18 @@ class _EmbedBudgetExceeded(TimeoutError):
 
 
 def _mark_available(ok: bool) -> None:
-    _state["available"] = ok
-    _state["checked_at"] = time.monotonic()
+    with _cache_lock:
+        _state["available"] = ok
+        _state["checked_at"] = time.monotonic()
 
 
 def reset_state() -> None:
     """清空探测缓存与向量缓存（测试用；进程内正常路径不需要）。"""
     global _warming
-    _state["available"] = None
-    _state["checked_at"] = 0.0
-    _vec_cache.clear()
+    with _cache_lock:
+        _state["available"] = None
+        _state["checked_at"] = 0.0
+        _vec_cache.clear()
     with _warm_lock:
         _warming = False
 
@@ -90,10 +93,12 @@ def embeddings_available(deadline: float | None = None) -> bool:
     deadline 是墙钟预算（time.monotonic() 时刻）：到点未探测按「本轮不可用」
     返回 False，但不写不可用标记——预算耗尽说明本轮时间不够，不是 Ollama 没了。
     """
-    ok = _state["available"]
+    with _cache_lock:
+        ok = _state["available"]
+        checked_at = _state["checked_at"]
     if ok is True:
         return True
-    if ok is False and time.monotonic() - _state["checked_at"] < UNAVAILABLE_TTL_S:
+    if ok is False and time.monotonic() - checked_at < UNAVAILABLE_TTL_S:
         return False  # 已知不可用且未过期：零探测、零延迟
     try:
         _embed_via_http(["ok"], deadline=deadline)
@@ -166,7 +171,11 @@ def _embedded(
     """
     out: list[list[float]] = []
     for t in texts:
-        cached = _vec_cache.get(_vec_key(t))
+        key = _vec_key(t)
+        with _cache_lock:
+            cached = _vec_cache.get(key)
+            if cached is not None:
+                _vec_cache[key] = _vec_cache.pop(key)
         if cached is not None:
             out.append(cached)
             continue
@@ -177,9 +186,13 @@ def _embedded(
         except Exception:  # noqa: BLE001
             _mark_available(False)
             return None
-        if len(_vec_cache) >= _VEC_CACHE_MAX:
-            _vec_cache.clear()
-        _vec_cache[_vec_key(t)] = vec
+        with _cache_lock:
+            if key in _vec_cache:
+                _vec_cache[key] = _vec_cache.pop(key)
+            else:
+                if len(_vec_cache) >= _VEC_CACHE_MAX:
+                    _vec_cache.pop(next(iter(_vec_cache)))
+                _vec_cache[key] = vec
         out.append(vec)
     return out
 
@@ -218,7 +231,9 @@ def cosine_scores(
         return []
     if len(entries) > _EMBED_MAX_ENTRIES:
         return None
-    if sum(1 for e in entries if _vec_cache.get(_vec_key(e)) is None) > _UNCACHED_TURN_MAX:
+    with _cache_lock:
+        uncached = sum(1 for e in entries if _vec_cache.get(_vec_key(e)) is None)
+    if uncached > _UNCACHED_TURN_MAX:
         return None  # 缓存没暖齐：本轮回落规则评分，预热补齐后自动切回嵌入排序
     vecs = _embedded([query_text, *entries], deadline=deadline)
     if vecs is None:
@@ -358,11 +373,13 @@ def warm_vec_cache() -> int:
         return 0
     if not embeddings_available():
         return 0
-    missing = [e for e in entries if _vec_cache.get(_vec_key(e)) is None]
+    with _cache_lock:
+        missing = [e for e in entries if _vec_cache.get(_vec_key(e)) is None]
     if not missing:
         return 0
     _embedded(missing, deadline=time.monotonic() + _WARM_BUDGET_S)
-    return sum(1 for e in missing if _vec_cache.get(_vec_key(e)) is not None)
+    with _cache_lock:
+        return sum(1 for e in missing if _vec_cache.get(_vec_key(e)) is not None)
 
 
 def schedule_warmup() -> None:

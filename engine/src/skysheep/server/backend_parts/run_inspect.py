@@ -181,7 +181,7 @@ async def inspect_runs(store, provider, *, hours: int | None = None,
     done = [r for r in runs if str(r.get("status") or "") not in ("running", "queued")]
     if len(done) < MIN_RUNS:
         return {"ok": False, "reason": "too_few_runs", "runs": len(done), "text": ""}
-    if provider is None:
+    if provider is None or getattr(provider, "demo_mode", False):
         return {"ok": False, "reason": "no_provider", "runs": len(done), "text": ""}
 
     digest = build_digest(done)

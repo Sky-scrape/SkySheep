@@ -65,7 +65,7 @@ from ..security.gate import PermissionGate
 from ..textio import write_text_atomic
 from ..tools.base import Safety, Tool, ToolContext, ToolError, ToolRegistry
 from .agent import Agent
-from .collab_budget import RunBudget
+from .collab_budget import BudgetedProvider, RunBudget
 from .prompt import TEAM_DIRECTOR_PROMPT, TEAM_HUDDLE_PROMPT, TEAM_MEMBER_PROMPT
 from .report_prune import prune_report_files
 from .roundtable import MemberSpec, run_roundtable
@@ -286,8 +286,9 @@ class TeamChannel:
         插话只见一次原文）。
         """
         cursor = self._cursors.get(member, 0)
+        start = bisect.bisect_right(self._seqs, cursor)
         return [
-            m for m in self.messages
+            m for m in self.messages[start:]
             if m.seq > cursor and m.from_member != member
             and m.to_member in ("all", member)
             and not (exclude_seqs and m.seq in exclude_seqs)
@@ -1065,8 +1066,15 @@ class TeamOrchestrator:
         tool_sigs: set[str] = set()  # 本轮工具结果签名（name+预览，停滞守卫比对用）
         result = MemberTurnResult(member=member_name, index=rt.index, seq=seq)
 
+        turn_errors: list[str] = []
+
         async def consume() -> None:
             async for ev in agent.run_turn(wake_prompt):
+                if ev.kind == "error":
+                    msg = (getattr(ev, "message", "") or "").strip()
+                    if msg:
+                        turn_errors.append(msg)
+                    continue
                 if ev.kind == "text_delta":
                     parts.append(ev.text)
                     await self._emit(TeamMessageDelta(
@@ -1086,6 +1094,11 @@ class TeamOrchestrator:
 
         try:
             await asyncio.wait_for(consume(), timeout=self._timeout_s)
+            if turn_errors or getattr(agent, "last_turn_failed", False):
+                result.status = "error"
+                result.error = (
+                    (turn_errors[-1] if turn_errors else "") or "模型调用失败"
+                )[:200]
         except TimeoutError:
             result.status = "error"
             result.error = f"成员单轮超时（>{self._timeout_s} 秒），按失败隔离"
@@ -1621,8 +1634,15 @@ class TeamOrchestrator:
         parts: list[str] = []
         result = DirectorTurnResult(seq=seq)
 
+        turn_errors: list[str] = []
+
         async def consume() -> None:
             async for ev in agent.run_turn(wake):
+                if ev.kind == "error":
+                    msg = (getattr(ev, "message", "") or "").strip()
+                    if msg:
+                        turn_errors.append(msg)
+                    continue
                 if ev.kind == "text_delta":
                     parts.append(ev.text)
                     await self._emit(TeamMessageDelta(
@@ -1640,6 +1660,11 @@ class TeamOrchestrator:
 
         try:
             await asyncio.wait_for(consume(), timeout=self._timeout_s)
+            if turn_errors or getattr(agent, "last_turn_failed", False):
+                result.status = "error"
+                result.error = (
+                    (turn_errors[-1] if turn_errors else "") or "总管模型调用失败"
+                )[:200]
         except TimeoutError:
             result.status = "error"
             result.error = f"总管单轮超时（>{self._timeout_s} 秒），按失败隔离"
@@ -2072,13 +2097,25 @@ class TeamOrchestrator:
         async def swallow(_ev: AgentEvent) -> None:
             return None  # 内部收集：圆桌事件一律不出编排器
 
+        def _unwrap_budget(prov):
+            # 模板成员与总管外层已包 BudgetedProvider；圆桌内部还会对同一份
+            # budget 调 spend()，传入前拆掉同源包装以免按 2x 扣减调用上限。
+            if (
+                self.collab_budget is not None
+                and isinstance(prov, BudgetedProvider)
+                and getattr(prov, "_budget", None) is self.collab_budget
+            ):
+                return getattr(prov, "_inner", prov)
+            return prov
+
         outcome = await run_roundtable(
             members=[
                 MemberSpec(provider_name=s.provider_name, model=s.model,
-                           provider=s.provider, build_error=s.build_error)
+                           provider=_unwrap_budget(s.provider),
+                           build_error=s.build_error)
                 for s in specs
             ],
-            chair=self._director.provider,
+            chair=_unwrap_budget(self._director.provider),
             system_text=TEAM_HUDDLE_PROMPT,
             history=[],
             user_text=dispute,
@@ -2088,6 +2125,7 @@ class TeamOrchestrator:
             fuse=True,
             chair_provider=self._director.provider_name,
             chair_model=self._director.model,
+            budget=self.collab_budget,
         )
         if outcome.status == "cancelled":
             # 用户停止：无任何增量外发过，频道保持干净；保持取消语义上抛

@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS pipeline_nodes (
     finished_at REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_pipeline_nodes_pipeline ON pipeline_nodes(pipeline_id, seq);
+CREATE INDEX IF NOT EXISTS idx_pipelines_status ON pipelines(status);
 CREATE TABLE IF NOT EXISTS usage_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
@@ -123,6 +124,7 @@ CREATE TABLE IF NOT EXISTS usage_log (
     failed INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_log(ts);
+CREATE INDEX IF NOT EXISTS idx_usage_session_ts ON usage_log(session_id, ts);
 CREATE TABLE IF NOT EXISTS snippets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -165,6 +167,7 @@ CREATE TABLE IF NOT EXISTS cron_tasks (
     next_run_at REAL NOT NULL DEFAULT 0,
     created_at REAL NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_cron_tasks_due ON cron_tasks(enabled, next_run_at);
 CREATE TABLE IF NOT EXISTS schedules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
@@ -198,6 +201,7 @@ CREATE TABLE IF NOT EXISTS channel_sources (
 -- 已从 SCHEMA 移除，旧库里残留的由 connect() 的迁移 DROP 掉。
 CREATE INDEX IF NOT EXISTS idx_messages_session_seq ON messages(session_id, seq);
 CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_project_created ON sessions(project_id, created_at);
 CREATE TABLE IF NOT EXISTS project_tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id INTEGER NOT NULL REFERENCES projects(id),
@@ -361,6 +365,8 @@ CREATE INDEX IF NOT EXISTS idx_automation_runs_project
 CREATE INDEX IF NOT EXISTS idx_automation_runs_task
     ON automation_runs(task_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_automation_runs_status ON automation_runs(status);
+CREATE INDEX IF NOT EXISTS idx_automation_runs_started
+    ON automation_runs(started_at DESC, id DESC);
 CREATE TABLE IF NOT EXISTS factory_acks (
     line_key TEXT PRIMARY KEY,
     acked_at REAL NOT NULL
@@ -1496,6 +1502,7 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
             )
             await conn.execute("DELETE FROM pipelines WHERE project_id = ?", (project_id,))
             await conn.execute("DELETE FROM cron_tasks WHERE project_id = ?", (project_id,))
+            await conn.execute("DELETE FROM map_digests WHERE project_id = ?", (project_id,))
             cur = await conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
             return cur.rowcount
 
@@ -1672,29 +1679,50 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
 
     async def map_sessions_with_stats(
         self, project_id: int, start_ts: float, end_ts: float,
+        *, limit: int | None = None,
     ) -> list[dict]:
         """记忆地图时间线的会话主体：窗口内的会话（含已归档）带消息数与 token 量。
 
         归档会话是演化史的一半，必须计入；ORDER BY created_at 让前端按时间
-        铺时间线。消息数与 token 各自 LEFT JOIN，没发过消息/没消耗的会话
-        （比如空的分叉）以 0 计，不丢行。
+        铺时间线。消息数与 token 各自按过滤后的 session_id 相关子查询聚合，
+        配合 idx_sessions_project_created / idx_messages_session_seq /
+        idx_usage_session_ts 索引，避免全库扫描与全表 GROUP BY。
+        传入 limit 时只对最新的 limit 条会话统计聚合，结果仍保持时间升序。
         """
         assert self._db
-        cur = await self._db.execute(
-            "SELECT s.id, s.title, s.summary, s.tags, s.pinned, s.archived,"
-            " s.created_at, s.updated_at,"
-            " COALESCE(m.cnt, 0) AS msg_count,"
-            " COALESCE(u.it, 0) AS in_tokens, COALESCE(u.ot, 0) AS out_tokens"
-            " FROM sessions s"
-            " LEFT JOIN (SELECT session_id, COUNT(*) AS cnt FROM messages GROUP BY session_id) m"
-            "   ON m.session_id = s.id"
-            " LEFT JOIN (SELECT session_id,"
-            "   SUM(in_tokens) AS it, SUM(out_tokens) AS ot FROM usage_log GROUP BY session_id) u"
-            "   ON u.session_id = s.id"
-            " WHERE s.project_id = ? AND s.created_at >= ? AND s.created_at <= ?"
-            " ORDER BY s.created_at ASC",
-            (project_id, start_ts, end_ts),
-        )
+        if limit is not None:
+            lim = max(1, int(limit))
+            sql = (
+                "SELECT t.id, t.title, t.summary, t.tags, t.pinned, t.archived,"
+                " t.created_at, t.updated_at,"
+                " (SELECT COUNT(*) FROM messages m WHERE m.session_id = t.id) AS msg_count,"
+                " COALESCE((SELECT SUM(u.in_tokens) FROM usage_log u"
+                " WHERE u.session_id = t.id), 0) AS in_tokens,"
+                " COALESCE((SELECT SUM(u.out_tokens) FROM usage_log u"
+                " WHERE u.session_id = t.id), 0) AS out_tokens"
+                " FROM ("
+                "   SELECT id, title, summary, tags, pinned, archived, created_at, updated_at"
+                "   FROM sessions"
+                "   WHERE project_id = ? AND created_at >= ? AND created_at <= ?"
+                "   ORDER BY created_at DESC LIMIT ?"
+                " ) t ORDER BY t.created_at ASC"
+            )
+            params: tuple = (project_id, start_ts, end_ts, lim)
+        else:
+            sql = (
+                "SELECT s.id, s.title, s.summary, s.tags, s.pinned, s.archived,"
+                " s.created_at, s.updated_at,"
+                " (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS msg_count,"
+                " COALESCE((SELECT SUM(u.in_tokens) FROM usage_log u"
+                " WHERE u.session_id = s.id), 0) AS in_tokens,"
+                " COALESCE((SELECT SUM(u.out_tokens) FROM usage_log u"
+                " WHERE u.session_id = s.id), 0) AS out_tokens"
+                " FROM sessions s"
+                " WHERE s.project_id = ? AND s.created_at >= ? AND s.created_at <= ?"
+                " ORDER BY s.created_at ASC"
+            )
+            params = (project_id, start_ts, end_ts)
+        cur = await self._db.execute(sql, params)
         rows = await cur.fetchall()
         return [
             {
@@ -1750,7 +1778,9 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         events: list[dict] = []
         cur = await self._db.execute(
             "SELECT id, title, done, created_at, done_at FROM project_tasks"
-            " WHERE project_id = ?", (project_id,),
+            " WHERE project_id = ? AND ((created_at >= ? AND created_at <= ?)"
+            "   OR (done != 0 AND done_at >= ? AND done_at <= ?))",
+            (project_id, start_ts, end_ts, start_ts, end_ts),
         )
         for r in await cur.fetchall():
             if start_ts <= r["created_at"] <= end_ts:
@@ -1761,20 +1791,20 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
                                "title": r["title"], "ref": r["id"]})
         cur = await self._db.execute(
             "SELECT id, name, status, finished_at FROM pipelines"
-            " WHERE project_id = ? AND finished_at > 0", (project_id,),
+            " WHERE project_id = ? AND finished_at > 0 AND finished_at >= ? AND finished_at <= ?",
+            (project_id, start_ts, end_ts),
         )
         for r in await cur.fetchall():
-            if start_ts <= r["finished_at"] <= end_ts:
-                events.append({"ts": r["finished_at"], "kind": "pipeline",
-                               "title": r["name"], "ref": r["id"]})
+            events.append({"ts": r["finished_at"], "kind": "pipeline",
+                           "title": r["name"], "ref": r["id"]})
         cur = await self._db.execute(
             "SELECT id, name, last_run_at FROM cron_tasks"
-            " WHERE project_id = ? AND last_run_at > 0", (project_id,),
+            " WHERE project_id = ? AND last_run_at > 0 AND last_run_at >= ? AND last_run_at <= ?",
+            (project_id, start_ts, end_ts),
         )
         for r in await cur.fetchall():
-            if start_ts <= r["last_run_at"] <= end_ts:
-                events.append({"ts": r["last_run_at"], "kind": "cron",
-                               "title": r["name"], "ref": r["id"]})
+            events.append({"ts": r["last_run_at"], "kind": "cron",
+                           "title": r["name"], "ref": r["id"]})
         events.sort(key=lambda e: e["ts"])
         return events
 
@@ -1936,6 +1966,17 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
             )
         rows = await cur.fetchall()
         return [session_from_row(r) for r in rows]
+
+    async def list_session_ids(self) -> set[str]:
+        """库内全部会话 id（含归档与各项目）：运行快照清理孤儿记录时判存活用。
+
+        不分页也不带列表字段：会话可能有上千个，不能用 list_sessions 的
+        limit 口径判断「某个 id 还在不在」；单列全量读在 SQLite 上足够便宜，
+        且只在启动与库整体替换后各调一次。
+        """
+        assert self._db
+        cur = await self._db.execute("SELECT id FROM sessions")
+        return {str(r["id"]) for r in await cur.fetchall()}
 
     async def list_quick_sessions(self, limit: int = 50) -> list[Session]:
         """只取快聊会话（project_id IS NULL），最近活跃在前。
@@ -3374,6 +3415,23 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         row = await cur.fetchone()
         return self._automation_run_row(row) if row else None
 
+    async def clear_automation_run_session(self, session_id: str) -> int:
+        """会话删除：断开工单运行账本里的会话链接，运行历史与统计保留。
+
+        automation_runs 是工厂的长期账本（日报统计也读它），删会话不该把
+        整行历史抹掉；但 session_id 指向已删会话就是死链（工厂抽屉的
+        「打开会话」会开出一张空标签），所以只清链接，不删行。
+        """
+        if not session_id:
+            return 0
+        assert self._db
+        cur = await self._db.execute(
+            "UPDATE automation_runs SET session_id = NULL WHERE session_id = ?",
+            (str(session_id),),
+        )
+        await self._db.commit()
+        return int(cur.rowcount or 0)
+
     async def add_automation_run(
         self,
         *,
@@ -3747,23 +3805,43 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
             "finished_at": r["finished_at"],
         }
 
-    async def list_pipelines(self, project_id: int | None = None) -> list[dict]:
-        """流水线列表（含全部节点），新建序倒序。"""
+    async def list_pipelines(
+        self, project_id: int | None = None, *, status: str | None = None,
+    ) -> list[dict]:
+        """流水线列表（含全部节点），新建序倒序；批量拉取节点避免 N+1 查询。"""
         assert self._db
-        if project_id is None:
-            cur = await self._db.execute("SELECT * FROM pipelines ORDER BY created_at DESC, id DESC")
-        else:
-            cur = await self._db.execute(
-                "SELECT * FROM pipelines WHERE project_id = ? ORDER BY created_at DESC, id DESC",
-                (project_id,),
-            )
+        clauses: list[str] = []
+        args: list = []
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            args.append(project_id)
+        if status is not None:
+            clauses.append("status = ?")
+            args.append(str(status))
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        cur = await self._db.execute(
+            f"SELECT * FROM pipelines{where} ORDER BY created_at DESC, id DESC",
+            tuple(args),
+        )
         prows = await cur.fetchall()
-        out = []
-        for pr in prows:
-            pipe = self._pipeline_row(pr)
-            pipe["nodes"] = await self.list_pipeline_nodes(pipe["id"])
-            out.append(pipe)
-        return out
+        if not prows:
+            return []
+        pipes = [self._pipeline_row(pr) for pr in prows]
+        by_pid: dict[int, list[dict]] = {p["id"]: [] for p in pipes}
+        placeholders = ",".join("?" for _ in by_pid)
+        ncur = await self._db.execute(
+            f"SELECT * FROM pipeline_nodes WHERE pipeline_id IN ({placeholders})"
+            " ORDER BY pipeline_id ASC, seq ASC, id ASC",
+            tuple(by_pid.keys()),
+        )
+        for nr in await ncur.fetchall():
+            node = self._pipeline_node_row(nr)
+            bucket = by_pid.get(node["pipeline_id"])
+            if bucket is not None:
+                bucket.append(node)
+        for p in pipes:
+            p["nodes"] = by_pid[p["id"]]
+        return pipes
 
     async def get_pipeline(self, pipeline_id: int) -> dict | None:
         assert self._db
@@ -4320,6 +4398,8 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         node_attempt: int | None = None,
         node_usage: dict | None = None,
         node_error: object = _RELAY_UNSET,
+        next_node_id: str | None = None,
+        next_node_status: str | None = None,
     ) -> dict | None:
         """一次 CAS 状态变更（独立短事务）。
 
@@ -4397,6 +4477,12 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
                     tuple(nparams),
                 )
                 node_changed = cur.rowcount == 1
+            if next_node_id is not None and next_node_status is not None:
+                await conn.execute(
+                    "UPDATE relay_nodes SET status = ?, updated_at = ?"
+                    " WHERE task_id = ? AND node_id = ?",
+                    (next_node_status, now, task_id, next_node_id),
+                )
             snap = await self._relay_snapshot_conn(conn, task_id)
             if snap is None:
                 return None
@@ -4832,6 +4918,38 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         )
         row = await cur.fetchone()
         return self._relay_turn_row(row) if row else None
+
+    async def relay_pair_last_done_output(
+        self, pair_id: str, *, exclude_side: str,
+    ) -> str:
+        """对方最近一次非空成功输出（避免整本 relay_pair_snapshot 扫描）。"""
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT output FROM relay_turns"
+            " WHERE pair_id = ? AND side != ? AND status = 'done' AND output != ''"
+            " ORDER BY turn_no DESC",
+            (pair_id, exclude_side),
+        )
+        async for row in cur:
+            text = str(row["output"] or "").strip()
+            if text:
+                return text
+        return ""
+
+    async def last_assistant_text(self, session_id: str) -> str:
+        """读取会话最新一条非空 assistant 文本（逆序扫描，避免全量加载消息历史）。"""
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT content FROM messages"
+            " WHERE session_id = ? AND role = 'assistant'"
+            " ORDER BY seq DESC",
+            (session_id,),
+        )
+        async for row in cur:
+            text = (Message.model_validate_json(row["content"]).text or "").strip()
+            if text:
+                return text
+        return ""
 
 
 def export_messages_text(messages: list[Message]) -> str:

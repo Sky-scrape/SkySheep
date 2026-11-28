@@ -223,7 +223,14 @@ class FeishuChannel(Channel):
 
         App Secret 走 stdin（``--app-secret-stdin``），不进进程命令行。
         """
-        marker = os.path.join(self.config_dir(), "config.json")
+        import hashlib
+
+        cfg_dir = self.config_dir()
+        marker = os.path.join(cfg_dir, "config.json")
+        hash_path = os.path.join(cfg_dir, ".cred_hash")
+        cred_digest = hashlib.sha256(
+            f"{self.app_id}\n{self.app_secret}".encode()
+        ).hexdigest()
         try:
             with open(marker, encoding="utf-8") as f:
                 cur = json.load(f)
@@ -231,12 +238,19 @@ class FeishuChannel(Channel):
             # 真实 CLI 是 {"apps": [{"appId", ...}]}（可能多应用，取首个）。
             apps = cur.get("apps") if isinstance(cur.get("apps"), list) else None
             saved_id = str((apps[0] if apps else cur).get("appId") or "")
-            if saved_id == self.app_id:
+            saved_hash = ""
+            if os.path.exists(hash_path):
+                with open(hash_path, encoding="utf-8") as hf:
+                    saved_hash = hf.read().strip()
+            if saved_id == self.app_id and (not saved_hash or saved_hash == cred_digest):
+                if not saved_hash:
+                    with open(hash_path, "w", encoding="utf-8") as hf:
+                        hf.write(cred_digest)
                 return True  # 已是这份凭据，不必重写
         except (OSError, ValueError):
             pass
 
-        os.makedirs(self.config_dir(), exist_ok=True)
+        os.makedirs(cfg_dir, exist_ok=True)
         ok, payload = self._run_cli(
             ["config", "init", "--app-id", self.app_id, "--app-secret-stdin"],
             stdin_text=self.app_secret,
@@ -246,6 +260,11 @@ class FeishuChannel(Channel):
             self.error = f"飞书凭据写入失败：{self._err_text(payload)}"
             logger.warning("feishu 凭据写入失败：%s", self.error)
             return False
+        try:
+            with open(hash_path, "w", encoding="utf-8") as hf:
+                hf.write(cred_digest)
+        except OSError:
+            pass
         return True
 
     # ---- 生命周期 ----
@@ -459,14 +478,11 @@ class FeishuChannel(Channel):
                     continue
                 fut = asyncio.run_coroutine_threadsafe(self._on_event(obj), loop)
                 try:
-                    fut.result(timeout=30)
+                    fut.result(timeout=2.0)
                 except TimeoutError:
-                    # 30 秒没等到结果，多数是渠道串行队列在忙（一轮可能跑几分钟，
-                    # 前面可能还有排队的消息）。run_coroutine_threadsafe 的超时只是
-                    # 不再等待，协程不会被取消，事件仍会被按序处理——这里只降为
-                    # info，不能当失败告警。py3.11 起 concurrent.futures 的超时
-                    # 就是内建 TimeoutError。
-                    logger.info("feishu 事件处理仍在后台排队，读流继续")
+                    # 事件已投递到主循环处理：超时只是不堵住 stdout 读线程
+                    # （审批回复 /stop 等必须马上送达，不能等上一轮跑完）。
+                    logger.info("feishu 事件处理仍在后台运行，读流继续")
                 except Exception as e:  # noqa: BLE001 - 单条事件失败不断流
                     logger.warning("feishu 处理事件失败：%s", e)
         except Exception as e:  # noqa: BLE001 - 流断掉由上层重连

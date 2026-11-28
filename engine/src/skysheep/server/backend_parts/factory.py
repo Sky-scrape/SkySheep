@@ -236,6 +236,15 @@ def factory_line_health(rows: list[dict]) -> dict[str, dict]:
             (r for r in items if str(r.get("status")) not in _NON_ATTEMPT_STATUSES),
             None,
         )
+        tokens_7d = sum(
+            int(r.get("in_tokens") or 0) + int(r.get("out_tokens") or 0)
+            for r in attempts
+        )
+        wasted_7d = sum(
+            1 for r in attempts
+            if str(r.get("status")) in ("error", "interrupted", "empty")
+            or _outcome(r) in ("failed", "partial")
+        )
         out[key] = {
             "total": total,
             "done": done,
@@ -243,6 +252,8 @@ def factory_line_health(rows: list[dict]) -> dict[str, dict]:
             "partial": partial,
             "error": sum(1 for r in attempts if r.get("status") == "error"),
             "marked_failed": marked_failed,
+            "tokens_7d": tokens_7d,
+            "wasted_7d": wasted_7d,
             "success_rate": round(succeeded / total, 3) if total else 0.0,
             "avg_s": round(sum(durations) / len(durations), 1) if durations else 0.0,
             "p95_s": _p95(durations),
@@ -955,6 +966,17 @@ class FactoryMixin:
             await self.store.factory_ack(key, ts)
         return {"ok": True, "line_keys": keys, "acked_at": ts}
 
+    async def _apply_cron_toggle(self, task: dict, enabled: bool) -> tuple[dict, object | None]:
+        """共享单条定时产线启停逻辑（与 cron_update / factory_toggle / project_toggle 同口径）。"""
+        tid = int(task["id"])
+        kw: dict = {"enabled": 1 if enabled else 0}
+        merged = {**task, **kw}
+        kw["next_run_at"] = self.store.compute_next_run(merged) if enabled else 0
+        updated = await self.store.update_cron_task(tid, **kw)
+        self._broadcast_cron(updated)
+        sync = await self._sync_system_schedule(updated)
+        return updated, sync
+
     async def factory_toggle(self, params: dict) -> dict:
         """暂停 / 启用一条产线（复刻 cron.update 的 enabled 分支与广播）。"""
         tid = int(params.get("task_id", 0))
@@ -962,14 +984,7 @@ class FactoryMixin:
         if task is None:
             raise RuntimeError("任务不存在: " + str(tid))
         enabled = bool(params.get("enabled"))
-        kw: dict = {"enabled": 1 if enabled else 0}
-        # 与 cron_update 同一口径：启用后按合并后的行重排下次运行，停用清零
-        merged = {**task, **kw}
-        kw["next_run_at"] = self.store.compute_next_run(merged) if enabled else 0
-        task = await self.store.update_cron_task(tid, **kw)
-        self._broadcast_cron(task)
-        # 与 cron_update 一致：启停可能改变系统计划任务的注册状态
-        sync = await self._sync_system_schedule(task)
+        task, sync = await self._apply_cron_toggle(task, enabled)
         out = {
             "ok": True,
             "id": tid,
@@ -979,6 +994,78 @@ class FactoryMixin:
         if sync is not None:
             out["schtask_sync"] = sync
         return out
+
+    async def factory_project_toggle(self, params: dict) -> dict:
+        """按厂区批量暂停或恢复自动定时产线（运维态开关，不改排期定义）。"""
+        try:
+            pid = int(params.get("project_id", 0))
+        except (TypeError, ValueError):
+            raise RuntimeError("project_id 需要一个整数") from None
+        enabled = bool(params.get("enabled"))
+        if enabled:
+            await self._factory_target_project(pid)
+        else:
+            proj = await self.store.get_project(pid)
+            if proj is None:
+                raise RuntimeError("目标厂区不存在: " + str(pid))
+        tasks = [
+            t for t in await self.store.list_cron_tasks()
+            if t.get("project_id") is not None and int(t["project_id"]) == pid
+            and bool(t.get("enabled")) != enabled
+        ]
+        for task in tasks:
+            await self._apply_cron_toggle(task, enabled)
+        return {
+            "ok": True,
+            "project_id": pid,
+            "enabled": enabled,
+            "updated": len(tasks),
+        }
+
+    async def factory_cancel_all(self, params: dict | None = None) -> dict:
+        """叫停当前全部（或指定厂区的）在跑定时产线；不动启用态。"""
+        raw_pid = (params or {}).get("project_id")
+        pid_filter: int | None = None
+        if raw_pid not in (None, "", 0):
+            try:
+                pid_filter = int(raw_pid)
+            except (TypeError, ValueError):
+                raise RuntimeError("project_id 需要一个整数") from None
+        cron_map = getattr(self, "_cron_running", {}) or {}
+        cancelled = 0
+        for tid, handle in list(cron_map.items()):
+            if handle is None or handle.done() or not is_bg_task(handle):
+                continue
+            if pid_filter is not None:
+                task = await self.store.get_cron_task(int(tid))
+                if not task or int(task.get("project_id") or 0) != pid_filter:
+                    continue
+            handle.cancel()
+            cancelled += 1
+        return {"ok": True, "cancelled": cancelled}
+
+    async def factory_pipeline_start(self, params: dict) -> dict:
+        """从工厂跨项目启动 / 续跑一条装配流水线。"""
+        try:
+            pipe_id = int(params.get("pipeline_id", 0))
+        except (TypeError, ValueError):
+            raise RuntimeError("pipeline_id 需要一个整数") from None
+        pipe = await self.store.get_pipeline(pipe_id)
+        if pipe is None:
+            raise RuntimeError("流水线不存在: " + str(pipe_id))
+        await self._factory_target_project(pipe.get("project_id"))
+        return await self._pipeline_start_core(pipe)
+
+    async def factory_pipeline_cancel(self, params: dict) -> dict:
+        """从工厂跨项目叫停一条在跑装配流水线。"""
+        try:
+            pipe_id = int(params.get("pipeline_id", 0))
+        except (TypeError, ValueError):
+            raise RuntimeError("pipeline_id 需要一个整数") from None
+        pipe = await self.store.get_pipeline(pipe_id)
+        if pipe is None:
+            raise RuntimeError("流水线不存在: " + str(pipe_id))
+        return await self._pipeline_cancel_core(pipe)
 
     async def factory_grant_tools(self, params: dict) -> dict:
         """把「被门控拦下的工具」补进产线的预授权名单（处置台的一次点击）。
@@ -1147,3 +1234,118 @@ class FactoryMixin:
             ledger.keep = int(cfg["history_keep"])
             ledger.days = int(cfg["history_days"])
         return {"ok": True, "config": cfg}
+
+    async def factory_workbench(self) -> dict:
+        """工作台聚合补充视图（本机专属）：待审批权限、进行中团队/接力、巡检报告与会话归属。
+
+        刻意独立于 ``factory.state``，既保住 ``state`` 既有契约字段不膨胀，又让前端
+        一次拿到「可立即拍板的权限卡 + 非定时的团队/接力进度 + 巡检结论」。
+        """
+        from . import run_inspect
+
+        now = time.time()
+        all_projects = await self.store.list_projects()
+        proj_names = {int(p.id): str(p.name or "") for p in all_projects}
+
+        pending = self.list_pending_permissions(only_sid=None)
+        live_rows = []
+        center = getattr(self, "runs", None)
+        if center is not None:
+            try:
+                live_rows = center.running_runs()
+            except Exception:  # noqa: BLE001
+                live_rows = []
+
+        team_map = dict(self.team_orchestrators().items())
+        relays = await self.store.relay_list_active_tasks(limit=20)
+
+        sids: list[str] = []
+        for p in pending:
+            if p.get("session_id"):
+                sids.append(str(p["session_id"]))
+        for r in live_rows:
+            if getattr(r, "session_id", ""):
+                sids.append(str(r.session_id))
+        for sid in team_map:
+            sids.append(str(sid))
+
+        sess_meta = await self.store.session_project_map(sids)
+        session_projects: dict[str, int | None] = {
+            sid: meta.get("project_id") for sid, meta in sess_meta.items()
+        }
+
+        for p in pending:
+            sid = str(p.get("session_id") or "")
+            meta = sess_meta.get(sid) or {}
+            pid = meta.get("project_id")
+            p["session_title"] = meta.get("title") or ""
+            p["project_id"] = pid
+            p["project_name"] = proj_names.get(int(pid), "") if pid is not None else ""
+
+        teams = []
+        for sid, orch in team_map.items():
+            if not getattr(orch, "active", False):
+                continue
+            meta = sess_meta.get(str(sid)) or {}
+            pid = meta.get("project_id")
+            tasks = []
+            try:
+                tasks = orch.board.tasks()
+            except Exception:  # noqa: BLE001
+                tasks = []
+            done_n = sum(1 for t in tasks if getattr(t, "status", "") == "done")
+            teams.append({
+                "session_id": str(sid),
+                "session_title": meta.get("title") or "",
+                "project_id": pid,
+                "project_name": proj_names.get(int(pid), "") if pid is not None else "",
+                "team_id": str(getattr(orch, "team_id", "") or ""),
+                "template": str(getattr(orch, "source_template", "") or ""),
+                "director_mode": str(getattr(orch, "director_mode", "user") or "user"),
+                "rounds_used": int(getattr(orch, "rounds_used", 0) or 0),
+                "max_rounds": int(getattr(orch, "_max_rounds", 0) or 0),
+                "members": len(getattr(orch, "roster", ()) or ()),
+                "tasks_total": len(tasks),
+                "tasks_done": done_n,
+            })
+
+        relay_items = [
+            {
+                "id": str(r.get("id") or ""),
+                "session_id": str(r.get("session_id") or ""),
+                "project_id": r.get("project_id"),
+                "project_name": (
+                    proj_names.get(int(r["project_id"]), "")
+                    if r.get("project_id") is not None else ""
+                ),
+                "state": str(r.get("state") or ""),
+                "current_node": str(r.get("current_node") or ""),
+                "step": int(r.get("step") or 0),
+                "goal": str(r.get("goal") or "")[:120],
+                "updated_at": float(r.get("updated_at") or 0),
+            }
+            for r in relays
+        ]
+
+        try:
+            insp = run_inspect.load_state()
+        except Exception:  # noqa: BLE001
+            insp = run_inspect.default_state()
+        report_path = str(insp.get("last_report") or "")
+        if report_path and not Path(report_path).is_file():
+            report_path = ""
+        inspect_view = {
+            "enabled": bool(insp.get("enabled")),
+            "last_at": float(insp.get("last_at") or 0.0),
+            "last_summary": str(insp.get("last_summary") or ""),
+            "last_report": report_path,
+        }
+
+        return {
+            "pending_permissions": pending,
+            "teams": teams,
+            "relays": relay_items,
+            "session_projects": session_projects,
+            "inspect": inspect_view,
+            "now": now,
+        }

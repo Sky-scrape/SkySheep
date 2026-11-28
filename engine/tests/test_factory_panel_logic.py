@@ -167,7 +167,7 @@ _DRIVER_JS = r'''
 def _build_probe_source() -> str:
     """按加载顺序拼接工厂四个分区文件（共享 window.FX），探针从 FX 取内部 API。"""
     js = "\n".join((STATIC_DIR / n).read_text(encoding="utf-8") for n in (
-        "app-factory.js", "app-factory-scene.js",
+        "app-factory.js", "app-factory-camera.js", "app-factory-scene.js",
         "app-factory-drawer.js", "app-factory-draw.js"))
     exports = ", ".join(f"{name}: window.FX.{name}" for name in _EXPORTED)
     tail = f"\nwindow.__panelTest = {{ {exports} }};\n"

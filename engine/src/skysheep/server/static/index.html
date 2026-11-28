@@ -2797,9 +2797,15 @@
                 title="有一条产线需要看一眼（上次失败 / 被拦 / 停工）；点击逐条列出">
           <i aria-hidden="true"></i><b id="factory-attn-num">0</b><span>需留意</span>
         </button>
+        <button id="factory-live-pill" class="fh-pulse hidden" type="button"
+                title="当前实时活动（在跑 / 等待确认 / 排队）；点击查看详情"></button>
         <!-- 样板厂：数据只在内存、永不运行。计数条同时灰掉，避免把演示数字当成真的 -->
         <span id="factory-demo-badge" class="fh-demo hidden"
               title="样板厂：本机还没有真实产线，下面全是演示数据，只在内存、不会真的运行">演示</span>
+        <div id="factory-view-switch" class="fh-switch" role="tablist" aria-label="工厂视图">
+          <button type="button" class="fh-tab active" data-fview="board" role="tab" aria-selected="true">调度看板</button>
+          <button type="button" class="fh-tab" data-fview="scene" role="tab" aria-selected="false">厂区场景</button>
+        </div>
         <div id="factory-hud-ops">
           <button id="factory-settings" class="btn-ghost" title="工厂设置：入口开关、样板厂、昼夜天色、现实天气与运行历史保留">⚙</button>
           <button id="factory-close" class="btn-ghost" title="返回对话（Esc）">← 返回对话</button>
@@ -2833,17 +2839,18 @@
           </div>
           <div id="factory-panel-body"></div>
         </aside>
-        <section id="factory-stage" aria-label="工厂像素场景">
+        <section id="factory-stage" class="hidden" aria-label="工厂像素场景">
           <canvas id="factory-canvas"></canvas>
           <div id="factory-labels" aria-hidden="true"></div>
-          <!-- 工具栏：全景 / 名牌 / 运行记录。全景按钮在聚焦档里是可见的返回出口；
-               滚轮与拖动仍不改比例，场景保持固定 45°。 -->
+          <!-- 工具栏：作业区 / 全景 / 名牌 / 运行记录；支持滚轮局部缩放与拖拽平移，全景一键复位。 -->
           <div id="factory-toolbar" role="toolbar" aria-label="显示">
-            <button id="factory-center" title="回到全景（Esc）">全景</button>
+            <button id="factory-work-view" title="聚焦作业区（调度厅与项目厂区）" aria-pressed="true">作业区</button>
+            <button id="factory-center" title="回到全景（Esc）" aria-pressed="false">全景</button>
             <button id="factory-labels-toggle" title="显示 / 隐藏厂区与机台名牌" aria-pressed="true">名牌</button>
             <button id="factory-all-runs" title="运行记录：按状态 / 厂区筛选、翻页，行内可直接打开产出">运行记录</button>
           </div>
         </section>
+        <section id="factory-board" aria-label="产线调度看板"></section>
         <!-- 远程 / 空态 / 样板厂提示：放 stage 外，窄屏不画场景时也能看到 -->
         <div id="factory-notice" class="hidden"></div>
         <aside id="factory-drawer" class="hidden" aria-label="运行详情"></aside>
@@ -2946,6 +2953,7 @@
      工厂拆成四个分区，按序加载：主文件（状态/面板/事件）→ 场景构建 → 抽屉 → 绘制，
      共享状态与跨层函数经 window.FX 命名空间互调 -->
 <script src="/static/app-factory.js"></script>
+<script src="/static/app-factory-camera.js"></script>
 <script src="/static/app-factory-scene.js"></script>
 <script src="/static/app-factory-drawer.js"></script>
 <script src="/static/app-factory-draw.js"></script>

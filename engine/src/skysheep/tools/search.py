@@ -112,7 +112,7 @@ class GrepTool(Tool):
             return None
         cmd: list[str] = [
             rg,
-            "--line-number", "--no-heading", "--color", "never",
+            "--line-number", "--with-filename", "--no-heading", "--color", "never",
             "--no-config", "--no-require-git", "--hidden",
             "--max-filesize", str(MAX_FILE_SIZE),
             "--max-count", str(MAX_PER_FILE),
@@ -256,30 +256,48 @@ class GrepTool(Tool):
         的全部条目）物化成列表再逐个过滤，大项目上白列几十万条；剪枝后这些
         子树一次都不进。匹配 MAX_MATCHES 提前 break 时也不会再往下走。
         """
-        if base.is_file():
-            yield base
-            return
-        workroot = Path(ctx.working_dir).resolve()
+        workroot = Path(ctx.working_dir).resolve() if ctx.working_dir is not None else None
 
         def rel_norm(p: Path) -> str | None:
+            if workroot is None:
+                return None
             try:
                 return p.resolve().relative_to(workroot).as_posix()
             except (OSError, ValueError):
                 return None
+
+        def _within_workdir(p: Path) -> bool:
+            if not ctx.restrict_to_workdir or workroot is None:
+                return True
+            try:
+                p.resolve().relative_to(workroot)
+                return True
+            except (OSError, ValueError):
+                return False
+
+        if base.is_file():
+            if _within_workdir(base):
+                yield base
+            return
 
         for dirpath, dirnames, filenames in os.walk(base):
             kept: list[str] = []
             for d in sorted(dirnames):
                 if d in SKIP_DIRS or d.startswith(".git"):
                     continue
+                dp = Path(dirpath) / d
+                if not _within_workdir(dp):
+                    continue
                 if ignore is not None:
-                    rn = rel_norm(Path(dirpath) / d)
+                    rn = rel_norm(dp)
                     if rn is not None and ignore.matches(rn, is_dir=True):
                         continue
                 kept.append(d)
             dirnames[:] = kept
             for name in sorted(filenames):
                 p = Path(dirpath) / name
+                if not _within_workdir(p):
+                    continue
                 if ignore is not None:
                     rn = rel_norm(p)
                     if rn is not None and ignore.matches(rn):

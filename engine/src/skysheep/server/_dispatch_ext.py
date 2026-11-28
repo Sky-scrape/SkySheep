@@ -7,7 +7,7 @@ skills / mods / mcp / tools。自 app.py 逐字迁入，行为零变化。
 
 from __future__ import annotations
 
-from ._dispatch_common import _WsMethod
+from ._dispatch_common import _param_float, _param_int, _WsMethod
 from .backend import ServerBackend
 
 
@@ -42,17 +42,14 @@ async def _h_config_save_provider(backend: ServerBackend, params: dict, emit, lo
             bool(params["supports_vision"])
             if params.get("supports_vision") is not None else None
         ),
-        context_limit=(
-            int(params["context_limit"])
-            if params.get("context_limit") not in (None, "") else None
-        ),
+        context_limit=_param_int(params, "context_limit"),
         # 温度用字符串透传：空串 = 清除该项（回到服务默认）
         temperature=(
             params["temperature"] if params.get("temperature") is not None else None
         ),
-        price_in=(float(params["price_in"]) if params.get("price_in") is not None else None),
-        price_out=(float(params["price_out"]) if params.get("price_out") is not None else None),
-        price_cache=(float(params["price_cache"]) if params.get("price_cache") is not None else None),
+        price_in=_param_float(params, "price_in", empty_as_default=False),
+        price_out=_param_float(params, "price_out", empty_as_default=False),
+        price_cache=_param_float(params, "price_cache", empty_as_default=False),
         proxy=(str(params["proxy"]) if params.get("proxy") is not None else None),
     )
 
@@ -97,12 +94,10 @@ async def _h_subagent_get(backend: ServerBackend, params: dict, emit, local: boo
 
 async def _h_subagent_save(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     enabled = params.get("enabled")
-    max_iters = params.get("max_iterations")
-    max_conc = params.get("max_concurrent")
     return await backend.save_subagent_settings(
         enabled=bool(enabled) if enabled is not None else None,
-        max_iterations=(int(max_iters) if max_iters not in (None, "") else None),
-        max_concurrent=(int(max_conc) if max_conc not in (None, "") else None),
+        max_iterations=_param_int(params, "max_iterations"),
+        max_concurrent=_param_int(params, "max_concurrent"),
     )
 
 
@@ -136,7 +131,7 @@ async def _h_subagent_delete_custom(backend: ServerBackend, params: dict, emit, 
 
 async def _h_whitelist_remove(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     # 归属校验在 backend：凭枚举到的 rule_id 不能删别的项目的规则（B11）
-    return await backend.remove_whitelist_rule(int(params.get("id", 0)))
+    return await backend.remove_whitelist_rule(_param_int(params, "id", 0))
 
 
 async def _h_whitelist_add(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
@@ -168,7 +163,7 @@ async def _h_whitelist_enable(backend: ServerBackend, params: dict, emit, local:
     # 启停规则：停用是收紧（远端也允许），启用是放宽 = 与 whitelist.add 同限本机
     enabling = bool(params.get("enabled", True))
     return await backend.set_whitelist_rule_enabled(
-        int(params.get("id", 0)), enabling
+        _param_int(params, "id", 0), enabling
     )
 
 
@@ -337,7 +332,7 @@ async def _h_mcp_save_server(backend: ServerBackend, params: dict, emit, local: 
         env=params.get("env") or None,
         headers=params.get("headers") or None,
         readonly=bool(params.get("readonly", False)),
-        timeout=float(params.get("timeout") or 0),
+        timeout=_param_float(params, "timeout", 0.0) or 0.0,
         scope=str(params.get("scope", "global")),
     )
 

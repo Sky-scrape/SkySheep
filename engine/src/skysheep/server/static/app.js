@@ -12528,6 +12528,13 @@ async function initUiPrefs() {
   usageScope = prefs.usage_scope === "project" ? "project" : "all";
   document.querySelectorAll("#usage-scope-tabs button").forEach((x) =>
     x.classList.toggle("active", x.dataset.scope === usageScope));
+  // 工厂偏好（调度看板默认 vs 厂区场景、作业区 vs 全景、目录折叠）：落盘 ui.json
+  window.__factoryPrefs = {
+    view: prefs.factory_view === "scene" ? "scene" : "board",
+    cam: prefs.factory_cam === "panorama" ? "panorama" : "work",
+    folded: prefs.factory_panel_folded == null ? true : prefs.factory_panel_folded === 1,
+  };
+  if (typeof factoryApplyUiPrefs === "function") factoryApplyUiPrefs(window.__factoryPrefs);
   // 组内会话的自定义拖动序（分组视图）：渲染前先填好缓存
   sessionOrderPrefs = (prefs.session_order && typeof prefs.session_order === "object")
     ? prefs.session_order : {};

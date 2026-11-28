@@ -41,15 +41,20 @@ class SnippetsMixin:
         设置页拖拽排序提交整份顺序；写入值离散化后，后续新建条目
         仍取 min-1 置顶，两种来源不会打架。返回实际更新的行数。"""
         assert self._db
-        changed = 0
-        for idx, sid in enumerate(ids):
-            cur = await self._db.execute(
-                "UPDATE snippets SET sort_order = ? WHERE id = ?",
-                (float(idx), int(sid)),
-            )
-            changed += cur.rowcount
-        await self._db.commit()
-        return changed
+        if not ids:
+            return 0
+
+        async def txn(conn) -> int:
+            changed = 0
+            for idx, sid in enumerate(ids):
+                cur = await conn.execute(
+                    "UPDATE snippets SET sort_order = ? WHERE id = ?",
+                    (float(idx), int(sid)),
+                )
+                changed += cur.rowcount
+            return changed
+
+        return await self._write_txn(txn)
 
     async def mark_snippet_used(self, snippet_id: int) -> bool:
         """记一次插入使用：计数 +1、刷新最近使用时间（设置页展示用）。"""

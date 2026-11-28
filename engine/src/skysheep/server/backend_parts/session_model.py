@@ -288,25 +288,31 @@ class SessionModelMixin:
             "overridden": True,
         }
 
-    # ---- 全局模型切换 ----
+    # ---- 全局模型切换与配置刷新共用同步 ----
 
-    async def switch_model(self, name: str, model: str | None = None) -> dict:
-        self.provider = self._build_provider(name, model)
-        self.provider_error = None
-        limit = self._context_limit()
+    def _sync_global_provider_agents(
+        self,
+        name: str,
+        model: str | None = None,
+        *,
+        limit: int | None = None,
+        old_provider: Provider | None = None,
+    ) -> None:
+        """把切换/重载后的 self.provider 同步到未设私有模型的 agent，不踩私有覆盖与思考档位。
+
+        - 模型身份私有（覆盖 ∪ 默认模型会话）→ 跳过；
+        - 只覆盖思考档位 → 基于 (name, model) 重建 detached 副本并重放档位
+          （新服务不支持思考则清除档位并回归共享 self.provider）；
+        - 无覆盖（含基底）→ 共享全局 self.provider。
+        """
         private = self._model_private_sessions()
-        # 单一循环按 sid 分派（避免两处循环口径漂移）：
-        # - 模型身份私有（覆盖 ∪ 默认模型会话）→ 完全跳过，模型与上限都不动；
-        # - 只覆盖档位 → 模型跟新全局：建 detached 副本并把已存档位重放
-        #   （新服务不支持思考则清除档位，provider 回归共享全局对象）；
-        # - 无覆盖（含基底）→ 共享全局 provider，上限刷新
         pairs: list[tuple[str | None, Agent]] = [(None, self._base_agent)]
         pairs.extend((rt.sid, rt.agent) for rt in self.runtimes.values())
         for sid, ag in pairs:
             if sid is not None and sid in private:
                 continue
             saved_effort = self._session_efforts.get(sid) if sid is not None else None
-            if saved_effort is not None:
+            if saved_effort is not None and name:
                 prov = self._build_detached_provider(name, model)
                 if getattr(prov, "supports_reasoning", False):
                     prov.set_reasoning_effort(saved_effort)
@@ -316,8 +322,41 @@ class SessionModelMixin:
                     ag.provider = self.provider
             else:
                 ag.provider = self.provider
-            # 换服务/换模型 = 换上下文窗口：上限与视觉能力都跟着新的服务走
-            ag.context_limit_tokens = limit
+            if limit is not None:
+                ag.context_limit_tokens = limit
+        self._maybe_close_unused_global_provider(old_provider)
+
+    def _detach_global_provider_agents(self, old_provider: Provider | None) -> None:
+        """删除或停用当前全局服务时，仅清空跟随全局的 agent，保留私有会话模型。"""
+        private = self._model_private_sessions()
+        pairs: list[tuple[str | None, Agent]] = [(None, self._base_agent)]
+        pairs.extend((rt.sid, rt.agent) for rt in self.runtimes.values())
+        for sid, ag in pairs:
+            if sid is None or sid not in private:
+                ag.provider = None
+        self._maybe_close_unused_global_provider(old_provider)
+
+    def _maybe_close_unused_global_provider(self, old_provider: Provider | None) -> None:
+        """旧全局 provider 不再被任何 agent 使用且无活跃轮次时释放其连接池。"""
+        if old_provider is None or old_provider is self.provider:
+            return
+        if any(ag.provider is old_provider for ag in self._for_each_agent()):
+            return
+        if self._base_run_task is not None and not self._base_run_task.done():
+            return
+        if any(rt.run_task is not None and not rt.run_task.done() for rt in self.runtimes.values()):
+            return
+        self._close_provider_after(old_provider)
+
+    async def switch_model(self, name: str, model: str | None = None) -> dict:
+        old_provider = self.provider
+        self.provider = self._build_provider(name, model)
+        self.provider_error = None
+        limit = self._context_limit()
+        # 换服务/换模型 = 换上下文窗口：上限与视觉能力都跟着新的服务走
+        self._sync_global_provider_agents(
+            name, model, limit=limit, old_provider=old_provider,
+        )
         return {
             "provider": name, "model": self.provider_model,
             "reasoning": self.reasoning_state(),

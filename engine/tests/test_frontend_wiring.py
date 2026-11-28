@@ -1689,9 +1689,9 @@ def test_process_timeline_rows_are_chronological():
     assert "function buildProcBox(folded)" in js
     assert "const box = buildProcBox(true);" in js
     assert "box.classList.add(\"folded\");" in js
-    # 折叠意图不变（folded 时正文收起），机制改为可过渡的 grid 0fr↔1fr
+    # 折叠意图不变（folded 时正文收起），机制改为 height auto↔0（见下方专项用例）
     assert ".proc-box.folded .proc-box-body {" in css
-    assert "grid-template-rows: 0fr; grid-auto-rows: 0fr; row-gap: 0; padding-bottom: 0;" in css
+    assert "height: 0; padding-bottom: 0;" in css
     # 工具行有图标 + 中文动作名（读起来像一条操作时间线）
     assert 'run_command: { ico: "▣", label: "终端"' in js
     assert 'write_file: { ico: "✎", label: "编辑"' in js
@@ -1703,6 +1703,35 @@ def test_process_timeline_rows_are_chronological():
     seg = js[k:js.index('case AP_EVENTS.ROUNDTABLE_STARTED', k)]
     assert "finishThinking(t);" in seg
     assert "t.thinkEl = null;" in seg and 't.thinkText = "";' in seg
+
+
+# ---------- 过程框展开/收起：行永远按内容高度排 ----------
+
+def test_proc_box_rows_never_share_the_container_height():
+    """过程框不能再靠 `grid-auto-rows: 1fr` 承接展开/收起。
+
+    `1fr` 行的含义是「按可用高度平分」：容器一旦在某种布局里拿到确定高度（窄视口 /
+    不同内核的网格解析），三条收起的行会被摊成等距的大段空白——2026-11-26 用户截图里
+    思考 / 查阅 / 终端之间各空了约 250px，就是这个形态。折叠动画改走 height auto↔0
+    + overflow 裁剪（与工具行 .t-body 同一机制，:root 已开 interpolate-size），
+    行始终按内容高度排，多余高度只会留在最后一行下面。"""
+    css = read_static("app.css")
+
+    start = css.index(".proc-box-body {")
+    rule = css[start:css.index("}", start)]
+    assert "grid-auto-rows" not in rule and "grid-template-rows" not in rule
+    assert "display: flex; flex-direction: column;" in rule
+    assert "height: auto; overflow: clip;" in rule
+
+    folded = css[css.index(".proc-box.folded .proc-box-body {"):]
+    folded = folded[:folded.index("}")]
+    assert "height: 0;" in folded
+    assert "visibility: hidden;" in folded
+
+    # 折叠动画期间子项不被压扁：保持自然高度，由外层裁掉
+    child = css[css.index(".proc-box-body > * {"):]
+    child = child[:child.index("}")]
+    assert "flex-shrink: 0;" in child
 
 
 # ---------- 发送期间切标签 / 历史晚归：别把用户的话弄丢 ----------

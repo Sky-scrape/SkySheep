@@ -2,8 +2,8 @@
 
 > 本文件由 engine/tools/gen_ws_reference.py 自动生成，改协议后重跑 `uv run python tools/gen_ws_reference.py`，勿手改。
 
-- 生成时间：2026-11-15 15:38:03
-- 方法总数：342（本机专属 local_only 185 个）
+- 生成时间：2026-11-27 00:11:38
+- 方法总数：347（本机专属 local_only 190 个）
 - 说明：dispatch handler 的 docstring 首行；无 docstring 记「—」。
 - local_only：是 = 远程客户端（局域网 / Tailscale 持令牌）不可调用，仅桌面端本机可执行。
 
@@ -41,7 +41,7 @@
 | model.test | 是 | — |
 | model.probe_capabilities | 是 | — |
 | model.providers_health |  | — |
-| permission.queue |  | 当前未决权限请求队列（本机跨会话聚合，运行中心「等待确认」分区用）。 |
+| permission.queue |  | 当前未决权限请求队列（本机跨会话聚合，运行中心「等待确认」分区与工厂共用）。 |
 | config.probe_models | 是 | — |
 | config.probe_context | 是 | — |
 
@@ -180,6 +180,11 @@
 | factory.grant_tools | 是 | — |
 | factory.save | 是 | — |
 | factory.run_mark | 是 | — |
+| factory.workbench | 是 | — |
+| factory.project_toggle | 是 | — |
+| factory.cancel_all | 是 | — |
+| factory.pipeline_start | 是 | — |
+| factory.pipeline_cancel | 是 | — |
 
 ## 偏好与治理域（`_dispatch_prefs.py`）
 

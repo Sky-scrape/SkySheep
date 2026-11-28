@@ -644,8 +644,7 @@ def apply_migration_package(
                     aside_root = backup_dir / ("skills-" + time.strftime("%Y%m%d-%H%M%S"))
                     for _src, dst, name in staged_dirs:
                         if not dst.is_dir():
-                            if skills_mode != "replace":
-                                skills_new.append(name)
+                            skills_new.append(name)
                             continue
                         aside = aside_root / name
                         aside.parent.mkdir(parents=True, exist_ok=True)

@@ -290,6 +290,7 @@ def _no_store_static(app) -> None:
         "/static/app-browser.js",
         "/static/app-mods.js",
         "/static/app-factory.js",
+        "/static/app-factory-camera.js",
         "/static/app-factory-scene.js",
         "/static/app-factory-drawer.js",
         "/static/app-factory-draw.js",

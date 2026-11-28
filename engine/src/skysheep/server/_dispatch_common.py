@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import math
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 
@@ -39,6 +40,54 @@ logger = logging.getLogger("skysheep.security")
 # 「if … and not local: raise」逐字一致。
 
 _LOCAL_ONLY_MSG = "该操作涉及配置或本机权限，只能在桌面端本机执行"
+
+
+def _param_int(
+    params: dict,
+    key: str,
+    default: int | None = None,
+    *,
+    lo: int | None = None,
+    hi: int | None = None,
+    empty_as_default: bool = True,
+) -> int | None:
+    """安全解析整数参数：拒绝 bool / 非数字字符串，并可选夹取区间。"""
+    raw = params.get(key)
+    if raw is None or (empty_as_default and raw == ""):
+        return default
+    if isinstance(raw, bool):
+        raise RuntimeError(f"参数 {key} 必须是整数")
+    try:
+        val = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"参数 {key} 必须是整数") from exc
+    if lo is not None:
+        val = max(lo, val)
+    if hi is not None:
+        val = min(hi, val)
+    return val
+
+
+def _param_float(
+    params: dict,
+    key: str,
+    default: float | None = None,
+    *,
+    empty_as_default: bool = True,
+) -> float | None:
+    """安全解析有限浮点数参数：拒绝 bool / 非数字 / NaN / Inf。"""
+    raw = params.get(key)
+    if raw is None or (empty_as_default and raw == ""):
+        return default
+    if isinstance(raw, bool):
+        raise RuntimeError(f"参数 {key} 必须是数字")
+    try:
+        val = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"参数 {key} 必须是数字") from exc
+    if not math.isfinite(val):
+        raise RuntimeError(f"参数 {key} 不能是 NaN 或无穷大")
+    return val
 
 
 @dataclasses.dataclass(frozen=True)

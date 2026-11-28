@@ -200,6 +200,7 @@
 
     var minX = hall.x - 70, maxX = hall.x + 70;
     var minY = hall.y - 50, maxY = hall.y + 50;
+    var horizonWorldY = null;
     factories.forEach(function (f) {
       minX = Math.min(minX, f.x - f.halfW - 20);
       maxX = Math.max(maxX, f.x + f.halfW + 20);
@@ -219,11 +220,17 @@
       var spanY = Math.abs(hw * ay) + Math.abs(hh * ax);
       // 取景包含塔顶，避免缩放和不同窗口尺寸下裁掉主体。
       var height = (m.z0 || 0) + (m.h || Math.max(m.h0 || 0, m.h1 || 0));
+      var depth = m.hh || (m.r ? m.r * 0.5 : 5);
+      var trackHorizon = !!(m.peripheral && (m.h || m.h0 || m.h1) && !m.paving);
       points.forEach(function (pt) {
         minX = Math.min(minX, pt.x - spanX - 8);
         maxX = Math.max(maxX, pt.x + spanX + 8);
         minY = Math.min(minY, pt.y - height - spanY - 16);
         maxY = Math.max(maxY, pt.y + spanY + 12);
+        if (trackHorizon) {
+          var ry = pt.y - height - depth;
+          if (horizonWorldY == null || ry < horizonWorldY) horizonWorldY = ry;
+        }
       });
     });
 
@@ -244,6 +251,7 @@
     S.world = {
       hall: hall, factories: factories, lines: lines,
       models: site.models, site: site, plateau: plateau,
+      horizonWorldY: horizonWorldY,
       bounds: { minX: minX, maxX: maxX, minY: minY, maxY: maxY },
     };
     S.worldSig = projects.map(function (p) {
@@ -447,7 +455,7 @@
                     h0: 9, h1: 9, width: 2.6, ore: false, projectId: f.id });
       f.lines.forEach(function (rec) {
         models.push({ kind: "conveyor", path: [hub, { x: rec.x, y: rec.y - 7 }],
-                      h0: 9, h1: 7, width: 1.6, ore: false, spur: true, projectId: f.id });
+                      h0: 9, h1: 7, width: 1.6, ore: false, spur: true, projectId: f.id, lineKey: rec.key });
       });
       // 前场两角：成品托盘 / 料箱与卷盘；灯杆与工头放在通道边
       // 取货托盘（pick）：站在装货纵列上，只放一只可取箱——叉车取货的锚点
@@ -531,34 +539,33 @@
     anchorFacility(coolingStart, coolingSmokeStart, "coolingPlant",
                    { x: 380, y: -220 }, { x: 155, y: -140 });
 
-    models.push({ kind: "box", x: 480, y: -220, hw: 42, hh: 22, h: 24, role: "steel", windows: 4, roof: "saw", bg: true });
-    models.push({ kind: "cyl", x: 510, y: -180, r: 16, h: 34, role: "rust", bands: 4, bg: true });
-    // 远景工业带：独立物件不参与建筑组的零件位移。
+    models.push({ kind: "box", x: 602, y: -290, hw: 42, hh: 22, h: 24, role: "steel", windows: 4, roof: "saw", bg: true });
+    models.push({ kind: "cyl", x: 630, y: -250, r: 16, h: 34, role: "rust", bands: 4, bg: true });
+    // 远景工业带：独立物件不参与建筑组的零件位移，全部避开中央台地与前缘干道（含 9+ 项目二环扩圈）。
 
     models.push({ kind: "cyl", x: 470, y: -100, r: 12, h: 26, role: "steel", bands: 3, bg: true, roadsideTank: 1 });
-    models.push({ kind: "archHangar", x: -480, y: -200, hw: 44, hh: 21, h: 15, rise: 11, role: "steel", door: true, bg: true });
-    models.push({ kind: "bridgeCrane", x: -472, y: -158, hw: 30, hh: 7, h: 20, role: "paint", bg: true });
-    models.push({ kind: "rail", path: [{ x: -512, y: -158 }, { x: -432, y: -158 }], bg: true });
+    models.push({ kind: "archHangar", x: -662, y: -262, hw: 44, hh: 21, h: 15, rise: 11, role: "steel", door: true, bg: true });
+    models.push({ kind: "bridgeCrane", x: -656, y: -222, hw: 30, hh: 7, h: 20, role: "paint", bg: true });
+    models.push({ kind: "rail", path: [{ x: -696, y: -222 }, { x: -616, y: -222 }], bg: true });
     models.push({ kind: "cyl", x: -460, y: -60, r: 24, h: 40, role: "rust", bands: 4, bg: true, roadsideTank: -1 });
-    models.push({ kind: "pylon", x: -380, y: -160, bg: true });
-    models.push({ kind: "pylon", x: 400, y: -150, bg: true });
-    models.push({ kind: "pylon", x: 520, y: -140, bg: true });
+    models.push({ kind: "pylon", x: -465, y: -195, bg: true });
+    models.push({ kind: "pylon", x: 490, y: -195, bg: true });
+    models.push({ kind: "pylon", x: 645, y: -215, bg: true });
     models.push({ kind: "truck", x: -360, y: 190, z0: 0, bg: true });
     models.push({ kind: "truck", x: 360, y: 200, z0: 0, bg: true });
-    models.push({ kind: "ore", x: 380, y: 170, s: 2.6, bg: true });
-    models.push({ kind: "ore", x: -380, y: 175, s: 2.2, bg: true });
-    models.push({ kind: "rock", x: -380, y: -170, s: 2, bg: true });
-    models.push({ kind: "rock", x: 400, y: 80, s: 1.6, bg: true });
-    models.push({ kind: "shrub", x: -360, y: 180, s: 1.3, bg: true });
-    models.push({ kind: "shrub", x: 360, y: 180, s: 1.2, bg: true });
-    models.push({ kind: "conveyor", path: [{ x: 454, y: -224 }, { x: 508, y: -180 }], h0: 16, h1: 10, width: 2.6, ore: true, bg: true });
-    models.push({ kind: "transferBridge", path: [{ x: 468, y: -196 }, { x: 528, y: -152 }],
+    models.push({ kind: "ore", x: 380, y: 196, s: 2.6, bg: true });
+    models.push({ kind: "ore", x: -305, y: 225, s: 2.2, bg: true });
+    models.push({ kind: "rock", x: -620, y: -210, s: 2, bg: true });
+    models.push({ kind: "rock", x: 400, y: 128, s: 1.6, bg: true });
+    models.push({ kind: "shrub", x: -300, y: 228, s: 1.3, bg: true });
+    models.push({ kind: "shrub", x: 360, y: 198, s: 1.2, bg: true });
+    models.push({ kind: "conveyor", path: [{ x: 574, y: -294 }, { x: 628, y: -250 }], h0: 16, h1: 10, width: 2.6, ore: true, bg: true });
+    models.push({ kind: "transferBridge", path: [{ x: 588, y: -266 }, { x: 644, y: -226 }],
                   h0: 16, h1: 12, width: 6, bg: true });
-    models.push({ kind: "box", x: 466, y: -198, hw: 7, hh: 4, h: 20, role: "steel", windows: 1, roof: "flat", bg: true });
-    models.push({ kind: "box", x: 530, y: -150, hw: 6, hh: 3.5, h: 18, role: "rust", roof: "flat", bg: true });
-    var frontY = factories.reduce(function (y, f) { return Math.max(y, f.y + f.halfH); }, 110) + 25;
-    models.push({ kind: "truck", x: -380, y: frontY + 10, z0: 0, bg: true });
-    // 外围新设施：变电站、水塔和维修库；与项目厂区保持独立。
+    models.push({ kind: "box", x: 586, y: -268, hw: 7, hh: 4, h: 20, role: "steel", windows: 1, roof: "flat", bg: true });
+    models.push({ kind: "box", x: 646, y: -224, hw: 6, hh: 3.5, h: 18, role: "rust", roof: "flat", bg: true });
+    models.push({ kind: "truck", x: -295, y: 235, z0: 0, bg: true });
+    // 外围新设施：变电站、水塔和维修库；与项目厂区、中央台地保持独立。
     var substationStart = models.length;
     addBox(-410, -182, 22, 11, 3, "concrete", { paving: true, bg: true, facility: "substation" });
     for (var tr = 0; tr < 2; tr += 1) {
@@ -569,7 +576,7 @@
       }
     }
     anchorFacility(substationStart, smoke.length, "substation",
-                   { x: -410, y: -182 }, { x: -210, y: -92 });
+                   { x: -410, y: -182 }, { x: -264, y: -112 });
     var waterStart = models.length;
     addBox(-414, -111, 12, 6, 3, "concrete", { paving: true, bg: true, facility: "waterTower" });
     [[-6, -2], [6, -2], [0, 3]].forEach(function (leg) {
@@ -577,7 +584,7 @@
     });
     addCyl(-414, -111, 11, 13, "steel", { z0: 22, bg: true, bands: 2, ladder: true, facility: "waterTower" });
     anchorFacility(waterStart, smoke.length, "waterTower",
-                   { x: -414, y: -111 }, { x: -214, y: -21 });
+                   { x: -414, y: -111 }, { x: -314, y: -112 });
     var repairStart = models.length;
     addBox(441, -255, 21, 10.5, 16, "rust",
            { windows: 2, roof: "saw", bg: true, facility: "repairDepot", door: true });
@@ -598,7 +605,7 @@
         else m.facilityAnchor = { x: x, y: y };
       });
     }
-    utilityGroup("serviceQuarter", -170, -140, function (x, y) {
+    utilityGroup("serviceQuarter", -194, -162, function (x, y) {
       addBox(x, y, 66, 27, 2, "concrete", { paving: true });
       addBox(x - 26, y - 8, 24, 12, 30, "steel", { z0: 2, roof: "flat", windows: 4, door: true });
       addBox(x - 26, y - 8, 17, 8, 8, "glass", { z0: 32, roof: "flat", windows: 3 });
@@ -652,25 +659,25 @@
       models.push({ kind: "gantry", x: x + 49, y: y + 30, w: 7, h: 18, hw: 8, hh: 3 });
       models.push({ kind: "crate", x: x + 49, y: y + 34, s: 1.2 });
     }, { near: true });
-    // 外围新增建筑群（拱形机库 / 球罐站 / 光伏阵列 / 风机 / 遥测铁塔）：按环数整体外移，避开相邻设施与干道走廊
-    utilityGroup("commHill", 52, -192, function (x, y) {
+    // 外围新增建筑群（拱形机库 / 球罐站 / 光伏阵列 / 风机 / 遥测铁塔）：按环数整体外移，避开中央台地、相邻设施与干道走廊
+    utilityGroup("commHill", 52, -200, function (x, y) {
       models.push({ kind: "commTower", x: x, y: y, r: 6.5, h: 32 });
       models.push({ kind: "solarArray", x: x + 26, y: y + 8, hw: 14, hh: 7, rows: 3 });
       addBox(x - 16, y + 6, 8, 4, 7, "concrete", { roof: "flat", windows: 2, door: true });
     });
-    utilityGroup("windSolarField", -468, 4, function (x, y) {
+    utilityGroup("windSolarField", -468, 22, function (x, y) {
       models.push({ kind: "windTurbine", x: x - 18, y: y - 10, r: 3.5, h: 36, phase: 0.2 });
       models.push({ kind: "windTurbine", x: x + 16, y: y + 8, r: 3.2, h: 32, phase: 2.3 });
       models.push({ kind: "solarArray", x: x - 2, y: y + 24, hw: 18, hh: 8, rows: 3 });
     });
-    utilityGroup("sphereTerminal", 356, 12, function (x, y) {
+    utilityGroup("sphereTerminal", 430, 46, function (x, y) {
       models.push({ kind: "sphereTank", x: x - 16, y: y - 4, r: 13, h: 14, role: "steel" });
       models.push({ kind: "sphereTank", x: x + 16, y: y + 8, r: 11, h: 12, role: "rust" });
       models.push({ kind: "pipeRack", path: [{ x: x - 12, y: y - 2 }, { x: x + 12, y: y + 8 }],
                     h0: 7, h1: 7, width: 2.5 });
       models.push({ kind: "archHangar", x: x + 28, y: y - 22, hw: 16, hh: 8, h: 8, rise: 6, role: "rust", door: true });
     });
-    utilityGroup("eastWindRidge", 455, -118, function (x, y) {
+    utilityGroup("eastWindRidge", 516, -168, function (x, y) {
       models.push({ kind: "windTurbine", x: x - 14, y: y - 4, r: 3.4, h: 34, phase: 1.1 });
       models.push({ kind: "windTurbine", x: x + 22, y: y + 14, r: 3.0, h: 30, phase: 3.5 });
       models.push({ kind: "commTower", x: x - 34, y: y + 18, r: 5.5, h: 28 });

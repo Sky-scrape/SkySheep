@@ -117,7 +117,8 @@ def test_no_unsafe_utf8_replace_read_text():
     只放行引擎自产固定 UTF-8 缓存（tools/memory*）、展示用失败回落（gate 预览）与日志读取（support）。
     """
     allowed = {
-        "security/gate.py",          # _read_text_for_preview：decode_bytes 不确定时的纯展示兜底
+        "security/gate.py",          # 预览兜底历史白名单
+        "security/preview.py",       # _read_text_for_preview：decode_bytes 不确定时的纯展示兜底
         "support.py",                # 诊断日志切片读取（log 文件）
         "tools/memory.py",           # 引擎自产 UTF-8 memory.md 内部读取
         "tools/memory_distill.py",   # 引擎自产 UTF-8 memory.md 内部读取

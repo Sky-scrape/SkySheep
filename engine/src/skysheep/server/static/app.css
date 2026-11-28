@@ -1069,20 +1069,23 @@ mark.search-hit-mark {
   transition: transform var(--dur-fast) var(--ease-out);
 }
 .proc-box:not(.folded) .pb-caret { transform: rotate(90deg); }
-/* 操作过程框：展开/收起同样走 grid 0fr↔1fr；行数不固定，用 grid-auto-rows 一起收，
-   行距与底部内边距随轨道归零（小面板、低频操作，过渡成本可忽略） */
+/* 操作过程框：展开/收起走 height auto↔0（interpolate-size）+ overflow 裁剪。
+   不要用 grid-auto-rows: 1fr 做折叠——1fr 行的含义是「按可用高度平分」，一旦
+   这个容器在某个布局里拿到确定高度（窄视口 / 不同内核的网格解析），收起的行会被
+   摊成等距的一大段空白（2026-11-26 用户截图）。height 动画没有这个副作用：
+   行始终按内容高度排，多出来的高度只会留在最后一行下面。 */
 .proc-box-body {
-  display: grid; grid-template-rows: 1fr; grid-auto-rows: 1fr;
+  display: flex; flex-direction: column;
   gap: 2px; padding: 0 12px 8px;
-  transition: grid-template-rows var(--dur-base) var(--ease-std),
-              grid-auto-rows var(--dur-base) var(--ease-std),
-              row-gap var(--dur-base) var(--ease-std),
+  height: auto; overflow: clip;
+  transition: height var(--dur-base) var(--ease-std),
               padding-bottom var(--dur-base) var(--ease-std),
               visibility var(--dur-base);
 }
-.proc-box-body > * { min-height: 0; overflow: hidden; }
+/* 折叠动画期间子项保持自然高度（被外层裁掉，而不是被压扁） */
+.proc-box-body > * { flex-shrink: 0; min-height: 0; overflow: hidden; }
 .proc-box.folded .proc-box-body {
-  grid-template-rows: 0fr; grid-auto-rows: 0fr; row-gap: 0; padding-bottom: 0;
+  height: 0; padding-bottom: 0;
   visibility: hidden; /* 收起后行里的按钮不再被 Tab 到 */
 }
 .proc-row {
@@ -9318,6 +9321,36 @@ li.mod-row {
   padding: 1px 9px; font-size: var(--fs-cap); border-radius: 0;
   border: 1px dashed var(--gold); color: var(--gold); letter-spacing: .5px;
 }
+/* 实时脉搏胶囊：只在有在跑 / 待确认 / 排队时出现，补充设置里隐身的 live 状态 */
+.fh-pulse {
+  display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+  padding: 2px 10px; border: 1px solid var(--line2); border-radius: var(--r-pill);
+  background: var(--paper-raised); color: var(--text2); font-size: var(--fs-sm);
+  font-variant-numeric: var(--num); white-space: nowrap;
+  transition: border-color var(--dur-fast), color var(--dur-fast), transform var(--dur-fast) var(--ease-out);
+}
+.fh-pulse:hover { border-color: var(--blue); color: var(--blue); transform: translateY(-1px); }
+.fh-pulse:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.fh-pulse.has-wait { border-color: var(--gold); color: var(--gold); }
+.fh-pulse-dot {
+  width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+  background: var(--blue); animation: fx-pulse var(--dur-loop) var(--ease-std) infinite;
+}
+.fh-pulse.has-wait .fh-pulse-dot { background: var(--gold); }
+/* 视图切换：厂区场景 ↔ 调度看板 */
+.fh-switch {
+  display: inline-flex; align-items: center; gap: 2px; padding: 2px;
+  border: 1px solid var(--line2); border-radius: var(--r-sm);
+  background: var(--paper-sunken);
+}
+.fh-tab {
+  padding: 2px 10px; border: 0; border-radius: var(--r-xs);
+  background: transparent; color: var(--text2); font-size: var(--fs-sm); cursor: pointer;
+  transition: background var(--dur-fast), color var(--dur-fast);
+}
+.fh-tab:hover { color: var(--text); }
+.fh-tab.active { background: var(--card); color: var(--blue); font-weight: var(--fw-bold); box-shadow: var(--shadow-sm); }
+.fh-tab:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
 #factory-hud.demo .fh-lamp { border-color: var(--line2); color: var(--dim); background: var(--paper-raised); }
 /* 置灰只改色：圆点填灰、数字文字变灰。background 打在数字上会糊成一块与
    文字同色的色板，数字自隐（外观像一截黑色竖条）；演示态圆点也不再闪。 */
@@ -9468,29 +9501,65 @@ li.mod-row {
 }
 #factory-labels { position: absolute; inset: 0; z-index: 2; pointer-events: none; overflow: hidden; }
 /* 悬停信息牌：跟随命中点的轻量 DOM 层（中文文案不入 canvas）。
-   不接收指针事件、不挡画布交互；配色与场景标签同一套主题变量。 */
+   配色同步像素建筑昼夜盘（--fx-plate-*，独立测试或首次重绘前退回主题变量）。 */
 #factory-tip {
   position: absolute; z-index: 4; pointer-events: none;
   max-width: 260px; padding: 2px 8px;
-  background: color-mix(in srgb, var(--card) 94%, transparent);
-  border: 1px solid var(--line2); border-radius: var(--r-xs);
-  box-shadow: var(--shadow-sm, none); color: var(--text2);
+  background: color-mix(in srgb, var(--fx-plate-bg, var(--card)) 96%, transparent);
+  border: 1.5px solid var(--fx-plate-ink, var(--ink-line)); border-radius: 0;
+  box-shadow: inset 0 1px 0 var(--fx-plate-hi, var(--line2)), 0 2px 0 var(--fx-plate-ink, var(--ink-line));
+  color: var(--fx-plate-text, var(--text2));
   font-size: var(--fs-cap); line-height: 1.5; white-space: nowrap;
 }
+/* 厂区铭牌：直角像素铁牌（硬墨描边 + 顶部金属高光 + 底部 2px 实体台阶投影） */
 .fx-label {
   position: absolute; left: 0; top: 0; transform: translate(-50%, -100%);
-  padding: 1px 5px; border: 1px solid var(--line2); border-radius: var(--r-xs);
-  background: var(--card); color: var(--text2); font-size: var(--fs-cap); line-height: 1.5;
-  white-space: nowrap; opacity: .95;
+  padding: 1px 6px; border: 1.5px solid var(--fx-plate-ink, var(--ink-line)); border-radius: 0;
+  background: var(--fx-plate-bg, color-mix(in srgb, var(--ink-line) 76%, var(--paper-sunken)));
+  color: var(--fx-plate-text, var(--paper-raised));
+  box-shadow: inset 0 1px 0 var(--fx-plate-hi, var(--line2)), 0 2px 0 var(--fx-plate-ink, var(--ink-line));
+  font-size: var(--fs-cap); line-height: 1.35;
+  white-space: nowrap; opacity: .96;
 }
-.fx-label.project { font-weight: var(--fw-bold); color: var(--text); }
-.fx-label.hall { background: var(--blue); color: var(--on-accent); border-color: var(--blue-deep); }
-.fx-label.machine { color: var(--dim); font-size: var(--fs-cap); }
-.fx-label.pkg { padding: 0 3px; font-size: var(--fs-cap); }
-.fx-label.overflow { color: var(--gold); border-color: var(--gold); }
+.fx-label.project {
+  padding: 1px 7px 1px 9px; font-weight: var(--fw-bold); letter-spacing: .3px;
+  box-shadow: inset 3px 0 0 var(--fx-accent, var(--gold)), inset 0 1px 0 var(--fx-plate-hi, var(--line2)), 0 2px 0 var(--fx-plate-ink, var(--ink-line));
+  pointer-events: auto; cursor: pointer;
+}
+.fx-label.project:hover {
+  border-color: var(--fx-accent-hi, var(--gold)); color: var(--fx-accent-hi, var(--gold));
+  box-shadow: inset 3px 0 0 var(--fx-accent-hi, var(--gold)), inset 0 1px 0 var(--fx-accent-hi, var(--gold)), 0 2px 0 var(--fx-plate-ink, var(--ink-line));
+}
+/* 调度厅中枢牌：暖黄铜底 + 深墨压印，呼应塔楼吊臂与沙地主调，区别于周边铁灰分厂 */
+.fx-label.hall {
+  padding: 1px 7px; font-weight: var(--fw-bold); letter-spacing: .3px;
+  background: var(--fx-hall-bg, var(--gold)); color: var(--fx-hall-ink, var(--ink-line));
+  border-color: var(--fx-plate-ink, var(--ink-line));
+  box-shadow: inset 0 1px 0 var(--fx-hall-hi, var(--paper-raised)), 0 2px 0 var(--fx-plate-ink, var(--ink-line));
+  pointer-events: auto; cursor: pointer;
+}
+.fx-label.hall:hover { filter: brightness(1.07); }
+.fx-label.machine {
+  padding: 0 5px; font-size: var(--fs-cap); line-height: 1.35;
+  background: var(--fx-plate-soft, var(--paper-sunken));
+  color: var(--fx-plate-soft-text, var(--text2));
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--fx-plate-hi, var(--line2)) 65%, transparent), 0 1px 0 var(--fx-plate-ink, var(--ink-line));
+}
+.fx-label.machine.live-cap {
+  background: var(--fx-plate-bg, color-mix(in srgb, var(--ink-line) 76%, var(--paper-sunken)));
+  color: var(--fx-plate-text, var(--paper-raised)); font-weight: var(--fw-bold);
+  border-color: var(--fx-accent, var(--blue));
+  box-shadow: inset 0 1px 0 var(--fx-plate-hi, var(--line2)), 0 2px 0 var(--fx-plate-ink, var(--ink-line));
+  pointer-events: auto; cursor: pointer;
+}
+.fx-label.machine.live-cap.warn { border-color: var(--fx-warn, var(--gold)); color: var(--fx-warn, var(--gold)); }
+.fx-label.machine.live-cap.bad { border-color: var(--fx-bad, var(--bad)); color: var(--fx-bad, var(--bad)); }
+.fx-label.machine.live-cap.soon { border-color: var(--fx-ok, var(--ok)); color: var(--fx-ok, var(--ok)); }
+.fx-label.pkg { padding: 0 4px; font-size: var(--fs-cap); box-shadow: 0 1px 0 var(--fx-plate-ink, var(--ink-line)); }
+.fx-label.overflow { padding: 0 5px; font-weight: var(--fw-bold); color: var(--fx-accent-hi, var(--gold)); border-color: var(--fx-accent, var(--gold)); }
 /* 排队标记贴在箱体下沿：无底牌、紧凑字重，不和像素货箱争主次。 */
 .fx-label.queued {
-  padding: 0 2px; border-color: transparent; background: transparent;
+  padding: 0 2px; border-color: transparent; background: transparent; box-shadow: none;
   font-size: 12px; font-weight: var(--fw-bold); line-height: 1.25;
   text-shadow: 0 1px 0 var(--card), 0 -1px 0 var(--card);
 }
@@ -9500,12 +9569,13 @@ li.mod-row {
 /* 中文由 DOM 贴在小告示牌上方，热区仍由画布处理。牌子只有几格宽，牌面不再写
    任务名 / 倒计时 / 条数——明细点击后进居中弹窗，这里只留「待发」短标题。 */
 .fx-label.board {
-  padding: 0 4px; font-size: 12px; font-weight: var(--fw-bold); line-height: 1.2;
-  letter-spacing: 1px;
+  padding: 0 5px; font-size: 12px; font-weight: var(--fw-bold); line-height: 1.25;
+  letter-spacing: 1px; background: var(--fx-board-bg, var(--ink-line));
+  color: var(--fx-plate-text, var(--paper-raised));
 }
-.fx-label.float { color: var(--ok); border-color: var(--ok); font-weight: var(--fw-bold); }
-.fx-label.float.bad { color: var(--bad); border-color: var(--bad); }
-.fx-label.float.warn { color: var(--gold); border-color: var(--gold); }
+.fx-label.float { color: var(--fx-ok, var(--ok)); border-color: var(--fx-ok, var(--ok)); font-weight: var(--fw-bold); }
+.fx-label.float.bad { color: var(--fx-bad, var(--bad)); border-color: var(--fx-bad, var(--bad)); }
+.fx-label.float.warn { color: var(--fx-warn, var(--gold)); border-color: var(--fx-warn, var(--gold)); }
 
 #factory-notice {
   position: absolute; left: 50%; top: 14px; transform: translateX(-50%);
@@ -9532,9 +9602,242 @@ li.mod-row {
 }
 #factory-toolbar button:hover { border-color: var(--blue); color: var(--blue); transform: translateY(-1px); }
 #factory-toolbar button:active { transform: translateY(0); }
-#factory-toolbar button[aria-pressed="false"] { color: var(--dim); text-decoration: line-through; }
+#factory-toolbar button[aria-pressed="true"]#factory-work-view,
+#factory-toolbar button[aria-pressed="true"]#factory-center {
+  background: var(--blue-weak); border-color: var(--blue); color: var(--blue); font-weight: var(--fw-bold);
+}
+#factory-toolbar button[aria-pressed="false"]#factory-labels-toggle { color: var(--dim); text-decoration: line-through; }
 /* 厂区少的时候筛选条不出现：它只解决「厂区多到看不过来」这一个问题 */
 #factory-panel-filter.sparse { display: none; }
+
+/* 调度看板（默认主视图，与厂区场景共用同一份 factory.state）：泳道 + 24h 时间轴 + DAG 拓扑 */
+#view-factory.board-mode #factory-panel { display: none; }
+#view-factory.board-mode #factory-notice:not(.error) { display: none; }
+#view-factory.board-mode #factory-notice.error {
+  position: static; transform: none; max-width: none; margin: 10px 18px 0;
+}
+#factory-board {
+  flex: 1; min-width: 0; min-height: 0; overflow-y: auto;
+  padding: 14px 18px 28px;
+  display: flex; flex-direction: column; gap: 12px;
+  background: var(--bg);
+}
+.fb-top {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: 10px;
+}
+.fb-card {
+  display: flex; flex-direction: column; gap: 6px; padding: 10px 12px;
+  border: 1px solid var(--line2); border-radius: var(--r-md);
+  background: var(--card); box-shadow: var(--shadow-sm);
+}
+.fb-card-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  font-size: var(--fs-sm); font-weight: var(--fw-bold); color: var(--text2);
+}
+.fb-filter-row { display: flex; flex-direction: column; gap: 6px; }
+.fb-search {
+  width: 100%; padding: 4px 8px; font: inherit; font-size: var(--fs-sm);
+  border: 1px solid var(--line2); border-radius: var(--r-sm);
+  background: var(--paper-raised); color: var(--text);
+}
+.fb-search::placeholder { color: var(--dim); }
+.fb-search:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+.fb-attn-strip {
+  display: flex; flex-direction: column; gap: 6px; padding: 9px 12px;
+  border: 1px solid var(--bad); border-left: 3px solid var(--bad); border-radius: var(--r-md);
+  background: var(--card);
+}
+.fb-attn-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: 6px; }
+.fb-attn-item {
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+  padding: 4px 8px; border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--paper-raised);
+}
+.fb-attn-text {
+  flex: 1; min-width: 0; text-align: left; background: transparent; border: 0; padding: 0;
+  font: inherit; font-size: var(--fs-sm); color: var(--text); cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.fb-attn-text:hover { color: var(--blue); }
+.fb-empty-card {
+  padding: 16px; border: 1px dashed var(--line2); border-radius: var(--r-md);
+  background: var(--card); text-align: center;
+}
+.fb-slots { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.fb-slot {
+  width: 20px; height: 12px; border-radius: var(--r-xs);
+  border: 1px solid var(--line2); background: var(--paper-sunken);
+}
+.fb-slot.busy { background: var(--blue); border-color: var(--blue); }
+.fb-metric-row {
+  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  font-size: var(--fs-sm); color: var(--text2); font-variant-numeric: var(--num);
+}
+.fb-metric-row b { font-size: var(--fs-title); color: var(--text); }
+.fb-live-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.fb-live-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 8px; border-radius: var(--r-sm);
+  border: 1px solid var(--line2); background: var(--paper-raised);
+  font-size: var(--fs-cap); color: var(--text); cursor: pointer;
+}
+.fb-live-chip:hover { border-color: var(--blue); color: var(--blue); }
+.fb-live-chip.wait { border-color: var(--gold); color: var(--gold); }
+.fb-lanes { display: flex; flex-direction: column; gap: 12px; }
+.fb-lane {
+  border: 1px solid var(--line2); border-radius: var(--r-md);
+  background: var(--card); overflow: hidden; box-shadow: var(--shadow-sm);
+}
+.fb-lane.stopped { border-color: var(--bad); }
+.fb-lane-head {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 9px 12px; border-bottom: 1px solid var(--line);
+  background: var(--paper-sunken);
+}
+.fb-lane-title { font-size: var(--fs-base); font-weight: var(--fw-heavy); color: var(--text); }
+.fb-lane-stats {
+  display: flex; align-items: center; gap: 10px; font-size: var(--fs-cap);
+  color: var(--dim); font-variant-numeric: var(--num);
+}
+.fb-lane-stats .ok { color: var(--ok); font-weight: var(--fw-bold); }
+.fb-lane-stats .bad { color: var(--bad); font-weight: var(--fw-bold); }
+.fb-lane-ops { margin-left: auto; display: flex; gap: 6px; }
+.fb-lane-ops .btn-ghost { padding: 2px 9px; font-size: var(--fs-cap); }
+.fb-axis-bar {
+  display: grid; grid-template-columns: minmax(180px, 240px) 1fr 156px;
+  gap: 10px; align-items: center;
+  padding: 4px 12px; border-bottom: 1px dashed var(--line);
+  font-size: var(--fs-cap); color: var(--dim);
+  background: var(--paper-sunken);
+}
+.fb-axis-ticks {
+  position: relative; height: 16px; font-variant-numeric: var(--num);
+}
+.fb-axis-ticks span { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
+.fb-axis-ticks span:first-child { transform: none; }
+.fb-axis-ticks span.now { color: var(--blue); font-weight: var(--fw-bold); }
+.fb-axis-ticks span.end { right: 0; left: auto; transform: none; }
+.fb-line-row {
+  display: grid; grid-template-columns: minmax(180px, 240px) 1fr 156px;
+  gap: 10px; align-items: center;
+  padding: 8px 12px; border-bottom: 1px solid var(--line);
+  transition: background var(--dur-fast);
+}
+.fb-line-row:last-child { border-bottom: 0; }
+.fb-line-row:hover { background: var(--paper-raised); }
+.fb-line-row.selected { background: var(--blue-weak); }
+.fb-line-id {
+  display: flex; align-items: flex-start; gap: 8px; min-width: 0;
+  cursor: pointer; text-align: left; background: transparent; border: 0; padding: 0;
+}
+.fb-line-id .fx-dot { margin-top: 5px; }
+.fb-line-info { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.fb-line-name-row { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.fb-line-name {
+  font-size: var(--fs-md); font-weight: var(--fw-bold); color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.fb-line-meta {
+  font-size: var(--fs-cap); color: var(--dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-variant-numeric: var(--num);
+}
+.fb-line-meta.running { color: var(--blue); font-weight: var(--fw-bold); }
+.fb-line-meta.bad { color: var(--bad); }
+.fb-line-meta.warn { color: var(--gold); }
+.fb-track-wrap { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.fb-track {
+  position: relative; height: 20px; border-radius: var(--r-sm);
+  background: var(--paper-sunken); border: 1px solid var(--line); overflow: hidden;
+}
+.fb-now-line {
+  position: absolute; top: 0; bottom: 0; width: 1.5px;
+  background: var(--blue); opacity: .75; pointer-events: none;
+}
+.fb-bar {
+  position: absolute; top: 3px; height: 12px; min-width: 4px; border-radius: var(--r-xs);
+  border: 0; padding: 0; cursor: pointer; background: var(--ok);
+  transition: transform var(--dur-fast);
+}
+.fb-bar:hover { transform: scaleY(1.2); z-index: 2; }
+.fb-bar.partial, .fb-bar.empty { background: var(--gold); }
+.fb-bar.error, .fb-bar.interrupted, .fb-bar.failed { background: var(--bad); }
+.fb-bar.cancelled, .fb-bar.skipped { background: var(--dim); opacity: .7; }
+.fb-bar.running { background: var(--blue); animation: fh-lamp var(--dur-loop) var(--ease-std) infinite; }
+.fb-next-pin {
+  position: absolute; top: 3px; width: 4px; height: 12px; border-radius: var(--r-xs);
+  border: 1px dashed var(--blue); background: var(--blue-weak); pointer-events: none;
+}
+.fb-dag {
+  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+}
+.fb-dag-node {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 1px 6px; border-radius: var(--r-xs);
+  border: 1px solid var(--line2); background: var(--paper-raised);
+  font-size: var(--fs-cap); color: var(--text2);
+}
+.fb-dag-node.done { border-color: var(--ok); color: var(--ok); }
+.fb-dag-node.running { border-color: var(--blue); color: var(--blue); font-weight: var(--fw-bold); }
+.fb-dag-node.failed, .fb-dag-node.error { border-color: var(--bad); color: var(--bad); }
+.fb-dag-node.ready { border-color: var(--gold); color: var(--gold); }
+.fb-dag-arrow { font-size: var(--fs-cap); color: var(--dim); }
+.fb-line-right {
+  display: flex; flex-direction: column; align-items: flex-end; gap: 4px;
+}
+.fb-health-row { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 4px 6px; font-size: var(--fs-cap); color: var(--dim); font-variant-numeric: var(--num); }
+.fb-health-row .fx-bad { color: var(--bad); font-weight: var(--fw-bold); }
+.fb-line-ops { display: flex; gap: 4px; }
+.fb-line-ops button {
+  padding: 1px 7px; font-size: var(--fs-cap); border-radius: var(--r-xs);
+  border: 1px solid var(--line2); background: var(--paper-raised); color: var(--text2); cursor: pointer;
+}
+.fb-line-ops button:hover:not(:disabled) { border-color: var(--blue); color: var(--blue); }
+.fb-line-ops button:disabled { opacity: .45; cursor: not-allowed; }
+.fb-line-ops button.danger { color: var(--bad); border-color: var(--bad); }
+.fx-dag-strip {
+  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+  padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--paper-sunken);
+}
+/* 工厂内联审批卡 / 今日产出简报 / 巡检提示（全走主题变量） */
+.fx-perm-list { display: flex; flex-direction: column; gap: 8px; }
+.fx-perm-card {
+  display: flex; flex-direction: column; gap: 6px; padding: 8px 10px;
+  border: 1px solid var(--gold); border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--card) 92%, var(--gold));
+}
+.fx-perm-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.fx-perm-tool { font-weight: var(--fw-bold); font-size: var(--fs-sm); color: var(--text); }
+.fx-perm-detail {
+  padding: 4px 7px; border-radius: var(--r-xs);
+  background: var(--paper-sunken); border: 1px solid var(--line);
+  font-family: var(--font-mono); font-size: var(--fs-cap); color: var(--text2);
+  word-break: break-all;
+}
+.fb-brief {
+  display: flex; flex-direction: column; gap: 8px; padding: 10px 12px;
+  border: 1px solid var(--line2); border-radius: var(--r-md);
+  background: var(--card); box-shadow: var(--shadow-sm);
+}
+.fb-brief-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 1fr)); gap: 8px;
+}
+.fb-brief-item {
+  display: flex; flex-direction: column; gap: 4px; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--paper-raised);
+}
+.fb-brief-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: var(--fs-sm); }
+.fb-brief-name { font-weight: var(--fw-bold); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fb-brief-excerpt { font-size: var(--fs-cap); color: var(--text2); line-height: 1.45; word-break: break-word; }
+.fb-brief-ops { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 2px; }
+.fb-inspect-bar {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  padding: 8px 10px; border: 1px solid var(--gold); border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--paper-raised) 90%, var(--gold));
+  font-size: var(--fs-sm); color: var(--text2);
+}
 
 #factory-drawer {
   position: absolute; top: 0; right: 0; bottom: 0; z-index: 6;
@@ -9681,6 +9984,8 @@ li.mod-row {
   border: 1px solid var(--line2); color: var(--text2); background: var(--paper-raised);
 }
 .fx-ack:hover { border-color: var(--blue); color: var(--blue); }
+.fx-ack.danger { color: var(--bad); border-color: var(--bad); }
+.fx-ack.danger:hover { border-color: var(--bad); background: var(--paper-inset); }
 /* 叫停：破坏性动作，只染文字与边框，不抢「立即运行」的主按钮位 */
 .fx-drawer-ops .fx-danger { color: var(--bad); border-color: var(--bad); }
 .fx-drawer-ops .fx-danger:hover:not(:disabled) { background: var(--paper-inset); }
@@ -9708,9 +10013,16 @@ li.mod-row {
   #factory-drawer { position: relative; top: auto; right: auto; bottom: auto; width: min(380px, 38%); flex-shrink: 0; }
 }
 
+@media (max-width: 1280px) {
+  #view-factory.has-drawer .fb-axis-bar { display: none; }
+  #view-factory.has-drawer .fb-line-row { grid-template-columns: 1fr; gap: 6px; }
+  #view-factory.has-drawer .fb-line-right { flex-direction: row; align-items: center; justify-content: space-between; }
+}
+
 @media (max-width: 860px) {
   /* 窄屏不画场景：监控面板就是主体（信息不丢，等价入口是侧栏与全部运行） */
   #factory-stage { display: none; }
+  #view-factory.board-mode #factory-panel { display: none; }
   #factory-panel { width: auto; flex: 1; border-right: none; }
   #factory-panel.folded { width: auto; }
   #factory-panel.folded #factory-panel-body,
@@ -9723,8 +10035,16 @@ li.mod-row {
   #factory-panel.folded #factory-line-add { display: inline-block; }
   #factory-panel-fold { display: none; }
   .fx-narrow-only { display: inline-flex; }
+  .fb-axis-bar { display: none; }
+  #factory-board { padding: 10px 10px 22px; }
+  .fb-line-row { grid-template-columns: 1fr; gap: 6px; }
+  .fb-line-right { flex-direction: row; align-items: center; justify-content: space-between; }
+  .fb-lane-head { gap: 8px; }
+  .fb-lane-ops { margin-left: 0; width: 100%; flex-wrap: wrap; }
+  [data-board-focus] { display: none; }
   #factory-drawer { width: 100%; }
-  #factory-hud { gap: 6px 8px; padding: 6px 10px; }
+  #factory-hud { flex-wrap: wrap; gap: 6px 8px; padding: 6px 10px; }
+  #factory-hud-ops { margin-left: auto; }
   #factory-hud .fh-weather { max-width: 120px; }
   #factory-clock-date { display: none; }
   #factory-clock { align-items: flex-start; }

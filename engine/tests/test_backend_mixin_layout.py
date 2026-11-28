@@ -586,8 +586,8 @@ def test_batch6_teams_bare_access_only_in_collab_body():
     assert inspect.getsource(channels).count("self.team_orchestrator(session_id)") == 1
     from skysheep.server import _dispatch_chat
 
-    assert inspect.getsource(_dispatch_chat).count(
-        "backend.team_orchestrators().items()") == 1
+    assert inspect.getsource(backend_module.ServerBackend.list_pending_permissions).count(
+        "self.team_orchestrators().items()") == 1
     assert inspect.getsource(_dispatch_chat).count('backend, "_teams"') == 0
     assert inspect.getsource(automation).count("self.team_orchestrator(resident.session_id)") == 2
     assert inspect.getsource(lifecycle).count(

@@ -17,6 +17,7 @@
   var activeConfig = FX.activeConfig, activeState = FX.activeState;
   var hashKey = FX.hashKey, lineStall = FX.lineStall, clamp = FX.clamp;
   var pathLength = FX.pathLength, pointAt = FX.pointAt, ringPts = FX.ringPts;
+  var viewPoint = FX.viewPoint;
   var drawBerths = FX.drawBerths, drawPackages = FX.drawPackages, drawUpcoming = FX.drawUpcoming;
   var collectPackageItems = FX.collectPackageItems;   // 实时包裹进动态画序
   var refreshFactoryAlerts = FX.refreshFactoryAlerts, refreshUpcoming = FX.refreshUpcoming;
@@ -197,14 +198,6 @@
     }
   }
 
-  // 世界坐标 → 视口（内部缓冲）坐标；全部取整，避免半像素抖动
-  function viewPoint(x, y) {
-    var z = S.cam.zoom;
-    return {
-      x: Math.round((x - S.cam.x) * z + S.bufW / 2),
-      y: Math.round((y - S.cam.y) * z + S.bufH / 2),
-    };
-  }
   function vlen(v) { return Math.max(1, Math.round(v * S.cam.zoom)); }
 
   // ---------- 静态层离屏缓存 ----------
@@ -244,6 +237,30 @@
     ctx.drawImage(c.canvas, 0, 0);
   }
 
+  // 场景铭牌贴在像素建筑上方：从当前昼夜调色板派生工业铁牌/铜牌变量挂到 #factory-stage，
+  // 让牌面跟随厂区建筑本身（而非聊天区浅粉/艳蓝主题皮肤），只在 pal 对象引用变化时写 DOM。
+  function syncStageLabelVars(pal) {
+    if (!dom.stage || !dom.stage.style || typeof dom.stage.style.setProperty !== "function") return;
+    if (S._labelPal === pal) return;
+    S._labelPal = pal;
+    var st = dom.stage.style;
+    st.setProperty("--fx-plate-bg", lerpColor(pal.steelDark, pal.ink, 0.28));
+    st.setProperty("--fx-plate-hi", lerpColor(pal.steel, pal.steelLight, 0.35));
+    st.setProperty("--fx-plate-ink", pal.ink);
+    st.setProperty("--fx-plate-text", pal.mark);
+    st.setProperty("--fx-plate-soft", lerpColor(pal.concreteDark, pal.steelDark, 0.42));
+    st.setProperty("--fx-plate-soft-text", pal.smoke);
+    st.setProperty("--fx-hall-bg", lerpColor(pal.paint, pal.concreteWarm, 0.14));
+    st.setProperty("--fx-hall-hi", pal.paintLight);
+    st.setProperty("--fx-hall-ink", pal.ink);
+    st.setProperty("--fx-board-bg", lerpColor(pal.panelLine, pal.ink, 0.45));
+    st.setProperty("--fx-accent", pal.paint);
+    st.setProperty("--fx-accent-hi", pal.window);
+    st.setProperty("--fx-ok", pal.ok);
+    st.setProperty("--fx-warn", pal.warn);
+    st.setProperty("--fx-bad", pal.bad);
+  }
+
   // ---------- 渲染 ----------
   function render() {
     if (!S.mounted || !dom.canvas) return;
@@ -258,6 +275,7 @@
       S.ctx = ctx;
     }
     var pal = palette();
+    syncStageLabelVars(pal);
     var W = S.bufW, H = S.bufH;
     var z = S.cam.zoom;
 
@@ -339,16 +357,22 @@
   function sceneHorizon() {
     var nominal = Math.max(22, Math.round(S.bufH * 0.22));
     if (!S.world) return nominal;
-    var nearestRoof = S.bufH;
-    S.world.models.forEach(function (m) {
-      if (!m.peripheral || (!m.h && !m.h0 && !m.h1) || m.paving) return;
-      var height = (m.z0 || 0) + (m.h || Math.max(m.h0 || 0, m.h1 || 0));
-      var depth = m.hh || (m.r ? m.r * 0.5 : 5);
-      (m.path || [m]).forEach(function (p) {
-        nearestRoof = Math.min(nearestRoof, viewPoint(p.x, p.y - height - depth).y);
+    // 用世界坐标里外围建筑最高屋檐当锚点：平移 / 缩放时地平线与建筑同步 1:1 移动，不再跳变抽动
+    var hwy = S.world.horizonWorldY;
+    if (hwy == null) {
+      S.world.models.forEach(function (m) {
+        if (!m.peripheral || (!m.h && !m.h0 && !m.h1) || m.paving) return;
+        var height = (m.z0 || 0) + (m.h || Math.max(m.h0 || 0, m.h1 || 0));
+        var depth = m.hh || (m.r ? m.r * 0.5 : 5);
+        (m.path || [m]).forEach(function (p) {
+          var ry = p.y - height - depth;
+          if (hwy == null || ry < hwy) hwy = ry;
+        });
       });
-    });
-    return Math.max(22, Math.min(nominal, nearestRoof - 14));
+    }
+    if (hwy == null) return nominal;
+    var roofScreenY = viewPoint(0, hwy).y;
+    return Math.max(0, Math.min(nominal, roofScreenY - 14));
   }
 
   function drawSkyGround(ctx, pal) {
@@ -357,178 +381,189 @@
     var kind = weatherKind();
     var heavy = kind === "cloudy" || kind === "rain" || kind === "drizzle"
       || kind === "snow" || kind === "thunder" || kind === "fog";
-    var sky = ctx.createLinearGradient(0, 0, 0, skyH + 26);
-    sky.addColorStop(0, pal.skyTop);
-    sky.addColorStop(0.58, pal.skyMid);
-    sky.addColorStop(1, pal.skyLow);
-    ctx.fillStyle = sky;
-    ctx.fillRect(0, 0, W, skyH + 26);
-    // 太阳/月亮放在左上：与墙面受光（左面中、右面暗）和右下投影同一方向
-    var sunX = Math.round(W * 0.24);
-    var sunY = Math.round(skyH * 0.30);
-    var glow = ctx.createRadialGradient(sunX, sunY, 2, sunX, sunY, Math.round(W * 0.38));
-    glow.addColorStop(0, pal.sun);
-    glow.addColorStop(1, "rgba(255, 210, 130, 0)");
-    ctx.globalAlpha = (S.night ? 0.18 : 0.42) * (heavy ? 0.25 : 1);
-    ctx.fillStyle = glow;
-    ctx.fillRect(0, 0, W, skyH + 26);
-    var sunBreath = S.reduced ? 0 : Math.sin(S.ticks * 0.025) * 0.025;
-    var orbR = Math.max(2, Math.round(W * 0.011));
-    if (!heavy) {
-      ctx.globalAlpha = S.night ? 0.12 : 0.16;
-      fillOval(ctx, sunX, sunY, orbR * 2, orbR * 2, pal.sun);
-    }
-    ctx.globalAlpha = ((S.night ? 0.62 : 0.48) + sunBreath) * (heavy ? 0.35 : 1);
-    fillOval(ctx, sunX, sunY, orbR, orbR, pal.sun);
-    if (S.night && !heavy && orbR >= 3) {
-      // 月牙暗缘：用夜空顶色错位遮出一弯柔和新月
-      ctx.globalAlpha = 0.72;
-      fillOval(ctx, sunX + Math.max(1, Math.round(orbR * 0.45)), sunY - 1,
-               Math.max(1, Math.round(orbR * 0.8)), Math.max(1, Math.round(orbR * 0.8)), pal.skyTop);
-    }
-    ctx.globalAlpha = 1;
-    // 夜空星点：两档亮度 + 偶尔一颗十字星芒；阴雨 / 雾天被云层挡住
-    if (S.night && !heavy) {
-      for (var st = 0; st < 42; st += 1) {
-        var stx = (st * 97 + 31) % W;
-        var sty = (st * 53 + 11) % Math.max(4, skyH - 5);
-        var twinkle = S.reduced ? 0 : Math.sin(S.ticks * 0.05 + st * 1.3) * 0.14;
-        ctx.globalAlpha = Math.max(0.12, 0.24 + (st % 4) * 0.13 + twinkle);
-        ctx.fillStyle = st % 7 === 0 ? pal.sun : pal.glassLight;
-        ctx.fillRect(stx, sty, 1, 1);
-        if (st % 11 === 0 && sty > 2 && stx > 2) {
-          ctx.globalAlpha *= 0.45;
-          ctx.fillRect(stx - 1, sty, 3, 1);
-          ctx.fillRect(stx, sty - 1, 1, 3);
+    if (skyH > 2) {
+      var sky = ctx.createLinearGradient(0, 0, 0, skyH + 26);
+      sky.addColorStop(0, pal.skyTop);
+      sky.addColorStop(0.58, pal.skyMid);
+      sky.addColorStop(1, pal.skyLow);
+      ctx.fillStyle = sky;
+      ctx.fillRect(0, 0, W, skyH + 26);
+      // 太阳/月亮放在左上：与墙面受光（左面中、右面暗）和右下投影同一方向
+      var sunX = Math.round(W * 0.24);
+      var sunY = Math.round(skyH * 0.30);
+      var glow = ctx.createRadialGradient(sunX, sunY, 2, sunX, sunY, Math.round(W * 0.38));
+      glow.addColorStop(0, pal.sun);
+      glow.addColorStop(1, "rgba(255, 210, 130, 0)");
+      ctx.globalAlpha = (S.night ? 0.18 : 0.42) * (heavy ? 0.25 : 1);
+      ctx.fillStyle = glow;
+      ctx.fillRect(0, 0, W, skyH + 26);
+      var sunBreath = S.reduced ? 0 : Math.sin(S.ticks * 0.025) * 0.025;
+      var orbR = Math.max(2, Math.round(W * 0.011));
+      if (!heavy) {
+        ctx.globalAlpha = S.night ? 0.12 : 0.16;
+        fillOval(ctx, sunX, sunY, orbR * 2, orbR * 2, pal.sun);
+      }
+      ctx.globalAlpha = ((S.night ? 0.62 : 0.48) + sunBreath) * (heavy ? 0.35 : 1);
+      fillOval(ctx, sunX, sunY, orbR, orbR, pal.sun);
+      if (S.night && !heavy && orbR >= 3) {
+        ctx.globalAlpha = 0.72;
+        fillOval(ctx, sunX + Math.max(1, Math.round(orbR * 0.45)), sunY - 1,
+                 Math.max(1, Math.round(orbR * 0.8)), Math.max(1, Math.round(orbR * 0.8)), pal.skyTop);
+      }
+      ctx.globalAlpha = 1;
+      if (S.night && !heavy) {
+        for (var st = 0; st < 42; st += 1) {
+          var stx = (st * 97 + 31) % W;
+          var sty = (st * 53 + 11) % Math.max(4, skyH - 5);
+          var twinkle = S.reduced ? 0 : Math.sin(S.ticks * 0.05 + st * 1.3) * 0.14;
+          ctx.globalAlpha = Math.max(0.12, 0.24 + (st % 4) * 0.13 + twinkle);
+          ctx.fillStyle = st % 7 === 0 ? pal.sun : pal.glassLight;
+          ctx.fillRect(stx, sty, 1, 1);
+          if (st % 11 === 0 && sty > 2 && stx > 2) {
+            ctx.globalAlpha *= 0.45;
+            ctx.fillRect(stx - 1, sty, 3, 1);
+            ctx.fillRect(stx, sty - 1, 1, 3);
+          }
         }
+        ctx.globalAlpha = 1;
       }
-      ctx.globalAlpha = 1;
-    }
-    // 远山剪影（必须高于工业天际线才能不被近景建筑遮没）：
-    // 第一层远山连峰 + 第二层风化台地平顶丘陵 + 极细日照/月光山脊亮边
-    var mtnHeight = Math.max(12, Math.round(skyH * 0.44));
-    var ridgePts = [{ x: 0, y: skyH + 3 }];
-    var ridgeSeed = seeded(0x3017A1);
-    var ridgeSteps = 22;
-    var ridgeTone = lerpColor(pal.skyLow, pal.bgSteelDark, S.night ? 0.56 : 0.46);
-    for (var ri = 0; ri <= ridgeSteps; ri += 1) {
-      var rx = Math.round(ri * W / ridgeSteps);
-      var wave = Math.sin(ri * 0.72) * 0.34 + Math.cos(ri * 0.31) * 0.24 + 0.42;
-      var rh = Math.max(8, Math.round(mtnHeight * (0.38 + wave * 0.44 + ridgeSeed() * 0.22)));
-      ridgePts.push({ x: rx, y: skyH - rh });
-    }
-    ridgePts.push({ x: W, y: skyH + 3 });
-    ctx.globalAlpha = S.night ? 0.68 : 0.56;
-    fillPoly(ctx, ridgePts, ridgeTone);
-    ctx.globalAlpha = S.night ? 0.22 : 0.26;
-    linePath(ctx, ridgePts.slice(1, -1), 1, S.night ? pal.steelLight : pal.groundHi);
+      var mtnHeight = Math.max(12, Math.round(skyH * 0.44));
+      var ridgePts = [{ x: 0, y: skyH + 3 }];
+      var ridgeSeed = seeded(0x3017A1);
+      var ridgeSteps = 22;
+      var ridgeTone = lerpColor(pal.skyLow, pal.bgSteelDark, S.night ? 0.56 : 0.46);
+      for (var ri = 0; ri <= ridgeSteps; ri += 1) {
+        var rx = Math.round(ri * W / ridgeSteps);
+        var wave = Math.sin(ri * 0.72) * 0.34 + Math.cos(ri * 0.31) * 0.24 + 0.42;
+        var rh = Math.max(8, Math.round(mtnHeight * (0.38 + wave * 0.44 + ridgeSeed() * 0.22)));
+        ridgePts.push({ x: rx, y: skyH - rh });
+      }
+      ridgePts.push({ x: W, y: skyH + 3 });
+      ctx.globalAlpha = S.night ? 0.68 : 0.56;
+      fillPoly(ctx, ridgePts, ridgeTone);
+      ctx.globalAlpha = S.night ? 0.22 : 0.26;
+      linePath(ctx, ridgePts.slice(1, -1), 1, S.night ? pal.steelLight : pal.groundHi);
 
-    var mesaPts = [{ x: 0, y: skyH + 2 }];
-    var mesaTone = lerpColor(pal.skyLow, pal.groundDark, S.night ? 0.52 : 0.58);
-    for (var mi = 0; mi < 7; mi += 1) {
-      var mx0 = Math.round(mi * W / 7);
-      var mx1 = Math.round((mi + 1) * W / 7);
-      var mh = Math.max(6, Math.round(mtnHeight * (0.24 + (mi % 3) * 0.14)));
-      mesaPts.push({ x: mx0 + Math.round((mx1 - mx0) * 0.14), y: skyH - mh });
-      mesaPts.push({ x: mx1 - Math.round((mx1 - mx0) * 0.16), y: skyH - mh });
-    }
-    mesaPts.push({ x: W, y: skyH + 2 });
-    ctx.globalAlpha = S.night ? 0.74 : 0.52;
-    fillPoly(ctx, mesaPts, mesaTone);
-    ctx.globalAlpha = S.night ? 0.18 : 0.20;
-    linePath(ctx, mesaPts.slice(1, -1), 1, S.night ? pal.glassLight : pal.groundLight);
-    ctx.globalAlpha = 1;
+      var mesaPts = [{ x: 0, y: skyH + 2 }];
+      var mesaTone = lerpColor(pal.skyLow, pal.groundDark, S.night ? 0.52 : 0.58);
+      for (var mi = 0; mi < 7; mi += 1) {
+        var mx0 = Math.round(mi * W / 7);
+        var mx1 = Math.round((mi + 1) * W / 7);
+        var mh = Math.max(6, Math.round(mtnHeight * (0.24 + (mi % 3) * 0.14)));
+        mesaPts.push({ x: mx0 + Math.round((mx1 - mx0) * 0.14), y: skyH - mh });
+        mesaPts.push({ x: mx1 - Math.round((mx1 - mx0) * 0.16), y: skyH - mh });
+      }
+      mesaPts.push({ x: W, y: skyH + 2 });
+      ctx.globalAlpha = S.night ? 0.74 : 0.52;
+      fillPoly(ctx, mesaPts, mesaTone);
+      ctx.globalAlpha = S.night ? 0.18 : 0.20;
+      linePath(ctx, mesaPts.slice(1, -1), 1, S.night ? pal.glassLight : pal.groundLight);
+      ctx.globalAlpha = 1;
 
-    drawSkyline(ctx, pal, skyH, W);
-    if (!S.night && !heavy) {
-      // 晴天 / 多云的分层积云：平底暖影 + 上部日光亮朵，与黄金天空拉出清晰层次
-      var cloudDrift = S.reduced ? 0 : (S.ticks % 4800) * 0.025;
-      for (var cl = 0; cl < 6; cl += 1) {
-        var cw = Math.round(W * (0.048 + (cl % 3) * 0.022));
-        var cx2 = ((cl * 193 + 55 + cloudDrift) % (W + cw * 2)) - cw;
-        var cy2 = Math.round(skyH * (0.14 + (cl % 3) * 0.14));
-        var ch = Math.max(2, Math.round(skyH * 0.042));
-        ctx.globalAlpha = 0.20;
-        fillOval(ctx, cx2 + 2, cy2 + 2, cw, ch, pal.skyMid);
-        ctx.globalAlpha = 0.34;
-        fillOval(ctx, cx2, cy2, cw, ch, pal.sun);
-        fillOval(ctx, cx2 + cw * 0.45, cy2 + 1, cw * 0.58, Math.max(2, Math.round(ch * 0.78)), pal.groundHi);
-        ctx.globalAlpha = 0.28;
-        fillOval(ctx, cx2 - cw * 0.34, cy2 - 1, cw * 0.46, Math.max(1, Math.round(ch * 0.72)), pal.sun);
+      drawSkyline(ctx, pal, skyH, W);
+      if (!S.night && !heavy) {
+        var cloudDrift = S.reduced ? 0 : (S.ticks % 4800) * 0.025;
+        for (var cl = 0; cl < 6; cl += 1) {
+          var cw = Math.round(W * (0.048 + (cl % 3) * 0.022));
+          var cx2 = ((cl * 193 + 55 + cloudDrift) % (W + cw * 2)) - cw;
+          var cy2 = Math.round(skyH * (0.14 + (cl % 3) * 0.14));
+          var ch = Math.max(2, Math.round(skyH * 0.042));
+          ctx.globalAlpha = 0.20;
+          fillOval(ctx, cx2 + 2, cy2 + 2, cw, ch, pal.skyMid);
+          ctx.globalAlpha = 0.34;
+          fillOval(ctx, cx2, cy2, cw, ch, pal.sun);
+          fillOval(ctx, cx2 + cw * 0.45, cy2 + 1, cw * 0.58, Math.max(2, Math.round(ch * 0.78)), pal.groundHi);
+          ctx.globalAlpha = 0.28;
+          fillOval(ctx, cx2 - cw * 0.34, cy2 - 1, cw * 0.46, Math.max(1, Math.round(ch * 0.72)), pal.sun);
+        }
+        ctx.globalAlpha = 1;
       }
-      ctx.globalAlpha = 1;
-    }
-    if (heavy) {
-      // 阴雨 / 雾天：低垂的灰云压住天空，颜色用钢灰而不是暖沙
-      ctx.globalAlpha = S.night ? 0.30 : 0.24;
-      ctx.fillStyle = S.night ? pal.steelDark : pal.concreteLight;
-      var clouds = kind === "fog" ? 5 : 8;
-      for (var hc = 0; hc < clouds; hc += 1) {
-        var hx = (hc * 179 + 40) % W;
-        var hy = Math.round(skyH * (0.10 + (hc % 4) * 0.085));
-        var hw = Math.round(W * (0.07 + (hc % 3) * 0.035));
-        fillOval(ctx, hx, hy, hw, Math.max(3, Math.round(skyH * 0.085)), ctx.fillStyle);
-        fillOval(ctx, hx + hw * 0.5, hy - 2, hw * 0.62,
-                 Math.max(2, Math.round(skyH * 0.06)), ctx.fillStyle);
+      if (heavy) {
+        ctx.globalAlpha = S.night ? 0.30 : 0.24;
+        ctx.fillStyle = S.night ? pal.steelDark : pal.concreteLight;
+        var clouds = kind === "fog" ? 5 : 8;
+        for (var hc = 0; hc < clouds; hc += 1) {
+          var hx = (hc * 179 + 40) % W;
+          var hy = Math.round(skyH * (0.10 + (hc % 4) * 0.085));
+          var hw = Math.round(W * (0.07 + (hc % 3) * 0.035));
+          fillOval(ctx, hx, hy, hw, Math.max(3, Math.round(skyH * 0.085)), ctx.fillStyle);
+          fillOval(ctx, hx + hw * 0.5, hy - 2, hw * 0.62,
+                   Math.max(2, Math.round(skyH * 0.06)), ctx.fillStyle);
+        }
+        ctx.globalAlpha = 1;
       }
-      ctx.globalAlpha = 1;
     }
-    // 沙地：柔和远近过渡 + 天际线接壤路基带 + 沿等距斜线的风成沙阶（消除生硬直尺切线）
-    var ground = ctx.createLinearGradient(0, skyH, 0, H);
-    ground.addColorStop(0, pal.groundLight);
-    ground.addColorStop(0.24, pal.ground);
+    // 沙地底色渐变（风成沙阶与斜坡纹已迁入 drawTerrain 世界坐标系，随镜头同步平移）
+    var groundTop = skyH > 2 ? skyH : 0;
+    var ground = ctx.createLinearGradient(0, groundTop, 0, H);
+    ground.addColorStop(0, skyH > 2 ? pal.groundLight : pal.ground);
+    ground.addColorStop(skyH > 2 ? 0.24 : 0.15, pal.ground);
     ground.addColorStop(1, pal.groundDark);
     ctx.fillStyle = ground;
-    ctx.fillRect(0, skyH, W, H - skyH);
-    // 远景工业带底座护堤：跨幅起伏碎边衔接天空与地面
-    ctx.globalAlpha = S.night ? 0.42 : 0.30;
-    ctx.fillStyle = pal.groundDark;
-    ctx.fillRect(0, skyH - 1, W, 3);
-    for (var berm = 0; berm < 26; berm += 1) {
-      var bx = Math.round((berm * 67 + 19) % Math.max(1, W - 24));
-      var bw = 12 + (berm % 4) * 7;
-      ctx.fillRect(bx, skyH - 2 + (berm % 2), bw, 2);
+    ctx.fillRect(0, groundTop, W, H - groundTop);
+    if (skyH > 2) {
+      ctx.globalAlpha = S.night ? 0.42 : 0.30;
+      ctx.fillStyle = pal.groundDark;
+      ctx.fillRect(0, skyH - 1, W, 3);
+      for (var berm = 0; berm < 26; berm += 1) {
+        var bx = Math.round((berm * 67 + 19) % Math.max(1, W - 24));
+        var bw = 12 + (berm % 4) * 7;
+        ctx.fillRect(bx, skyH - 2 + (berm % 2), bw, 2);
+      }
+      var haze = ctx.createLinearGradient(0, skyH - 8, 0, skyH + 34);
+      haze.addColorStop(0, "rgba(0,0,0,0)");
+      haze.addColorStop(0.28, pal.bgHaze);
+      haze.addColorStop(1, "rgba(0,0,0,0)");
+      var hazeAlpha = kind === "fog"
+        ? (S.night ? 0.42 : 0.48)
+        : (S.night ? 0.22 : 0.28) * (heavy ? 1.25 : 1);
+      ctx.globalAlpha = hazeAlpha;
+      ctx.fillStyle = haze;
+      ctx.fillRect(0, skyH - 8, W, 42);
+      ctx.globalAlpha = 1;
     }
-    // 风成地形层阶：沿等距视角浅浅拉出宽阔高原纹理
-    for (var shelf = 0; shelf < 7; shelf += 1) {
-      var sy = skyH + Math.round((shelf + 0.4) * (H - skyH) * 0.12);
-      var sx = Math.round(((shelf * 157 + 23) % Math.max(1, W * 0.62)));
-      var sw = Math.round(W * (0.26 + (shelf % 3) * 0.13));
-      var sh = Math.max(1, Math.round(H * 0.009));
-      ctx.globalAlpha = shelf % 2 ? 0.11 : 0.08;
-      ctx.fillStyle = shelf % 2 ? pal.groundDark : pal.groundHi;
-      ctx.fillRect(sx, sy, sw, sh);
-      ctx.fillStyle = pal.groundLight;
-      ctx.globalAlpha = 0.06;
-      ctx.fillRect(sx + 6, sy + sh, Math.max(6, Math.round(sw * 0.72)), 1);
-    }
-    // 外盆地低伏沙脊斜线（弱对比顺透视方向，让四周空沙地更有尺度感）
-    ctx.globalAlpha = S.night ? 0.09 : 0.10;
-    for (var dn = 0; dn < 5; dn += 1) {
-      var dnx = Math.round(W * (0.06 + dn * 0.21));
-      var dny = skyH + Math.round((H - skyH) * (0.18 + (dn % 3) * 0.22));
-      var dnl = Math.round(W * 0.14);
-      linePath(ctx, [{ x: dnx, y: dny }, { x: dnx + dnl, y: dny + Math.round(dnl * 0.45) }],
-               1, dn % 2 ? pal.groundHi : pal.groundDark);
-    }
-    ctx.globalAlpha = 1;
-    // 地平线雾带（拉柔天空—地坪交界）
-    var haze = ctx.createLinearGradient(0, skyH - 8, 0, skyH + 34);
-    haze.addColorStop(0, "rgba(0,0,0,0)");
-    haze.addColorStop(0.28, pal.bgHaze);
-    haze.addColorStop(1, "rgba(0,0,0,0)");
-    var hazeAlpha = kind === "fog"
-      ? (S.night ? 0.42 : 0.48)
-      : (S.night ? 0.22 : 0.28) * (heavy ? 1.25 : 1);
-    ctx.globalAlpha = hazeAlpha;
-    ctx.fillStyle = haze;
-    ctx.fillRect(0, skyH - 8, W, 42);
-    ctx.globalAlpha = 1;
   }
 
   function drawTerrain(ctx, pal) {
     var z = S.cam.zoom;
+    var skyH = sceneHorizon();
     var pl = (S.world && S.world.plateau) || { cx: 0, cy: 0, hw: 260, hh: 125 };
+    // 外盆地风成沙阶与斜坡纹（走世界坐标投影，拖动缩放不再和前景台地各跑各的）
+    var duneRows = [
+      { wx: -480, wy: -40, len: 240, h: 4, light: false },
+      { wx: 210, wy: -70, len: 260, h: 4, light: true },
+      { wx: -620, wy: 150, len: 320, h: 5, light: false },
+      { wx: 180, wy: 210, len: 340, h: 5, light: true },
+      { wx: -280, wy: 270, len: 380, h: 5, light: false },
+      { wx: -520, wy: 320, len: 280, h: 4, light: true },
+      { wx: 90, wy: 340, len: 300, h: 4, light: false },
+    ];
+    for (var di = 0; di < duneRows.length; di += 1) {
+      var dr = duneRows[di];
+      var dp = viewPoint(pl.cx + dr.wx, pl.cy + dr.wy);
+      if (dp.y < skyH + 3 || dp.y > S.bufH + 12) continue;
+      var dw = Math.max(12, Math.round(dr.len * z));
+      var dh = Math.max(1, Math.round(dr.h * z));
+      ctx.globalAlpha = dr.light ? 0.06 : 0.08;
+      ctx.fillStyle = dr.light ? pal.groundHi : pal.groundDark;
+      ctx.fillRect(dp.x, dp.y, dw, dh);
+    }
+    var ridgeSpecs = [
+      { x0: -600, y0: 120, len: 220, light: false },
+      { x0: 290, y0: 140, len: 210, light: true },
+      { x0: -380, y0: 250, len: 260, light: true },
+      { x0: 140, y0: 270, len: 250, light: false },
+    ];
+    ctx.globalAlpha = S.night ? 0.08 : 0.09;
+    for (var rj = 0; rj < ridgeSpecs.length; rj += 1) {
+      var rs = ridgeSpecs[rj];
+      var rp0 = viewPoint(pl.cx + rs.x0, pl.cy + rs.y0);
+      var rp1 = viewPoint(pl.cx + rs.x0 + rs.len, pl.cy + rs.y0 + Math.round(rs.len * 0.45));
+      if (rp0.y < skyH + 3 || rp1.y < skyH + 3) continue;
+      linePath(ctx, [rp0, rp1], 1, rs.light ? pal.groundHi : pal.groundDark);
+    }
+    ctx.globalAlpha = 1;
+
     var c = viewPoint(pl.cx, pl.cy);
     var hw = Math.max(120, Math.round(pl.hw * z));
     var hh = Math.max(60, Math.round(pl.hh * z));
@@ -550,7 +585,7 @@
     ctx.globalAlpha = 0.45;
     linePath(ctx, innerRim, 1, pal.stoneLight);
     ctx.globalAlpha = 1;
-    // 干道贴着台地前缘两条边，两端顺走向延长出去——并补充虚线中分与路肩灯桩
+    // 干道贴着台地前缘两条边，两端沿等距直线长距离延展到画幅边缘之外（不再在视野内截断）
     var armL = { x: pl.cx - pl.hw - 14, y: pl.cy };
     var armR = { x: pl.cx + pl.hw + 14, y: pl.cy };
     var face = { x: pl.cx, y: pl.cy + pl.hh + 8 };
@@ -559,16 +594,18 @@
       var l = Math.hypot(dx, dy) || 1;
       return { x: from.x - dx / l * len, y: from.y - dy / l * len };
     }
-    var worldRoad = [extendRoad(armL, face, 150), armL, face, armR, extendRoad(armR, face, 150)];
+    var roadReach = Math.max(1800, Math.round(pl.hw * 4));
+    var worldRoad = [extendRoad(armL, face, roadReach), armL, face, armR, extendRoad(armR, face, roadReach)];
     var road = worldRoad.map(function (p) { return viewPoint(p.x, p.y); });
     linePath(ctx, road, vlen(12), pal.roadDark);
     linePath(ctx, road, vlen(9), pal.road);
-    // 公路中线虚线标线：增强工业大道的纵深节奏
+    // 公路中线虚线标线：增强工业大道的纵深节奏（画幅外跳过绘制）
     var rLen = pathLength(road);
     ctx.fillStyle = pal.mark;
     ctx.globalAlpha = 0.42;
     for (var rd = 4; rd < rLen; rd += Math.max(6, vlen(14))) {
       var rp = pointAt(road, rLen ? rd / rLen : 0);
+      if (rp.x < -8 || rp.x > S.bufW + 8 || rp.y < -8 || rp.y > S.bufH + 8) continue;
       ctx.fillRect(Math.round(rp.x), Math.round(rp.y), Math.max(1, vlen(2)), 1);
     }
     ctx.globalAlpha = 1;
@@ -579,9 +616,9 @@
     if (!site) return;
     var z = S.cam.zoom;
     var pl = (S.world && S.world.plateau) || { cx: 0, cy: 0, hw: 260, hh: 125 };
-    // 沙地风纹与轻质感铺装：弱化圆斑坑洼感，让路面与厂坪成为视觉主角
+    // 沙地风纹与轻质感铺装：柔化圆斑，避免地面显得斑驳脏乱
     var wr = seeded(0x6C0FFEE);
-    ctx.globalAlpha = 0.05;
+    ctx.globalAlpha = 0.035;
     for (var w = 0; w < 7; w += 1) {
       var wx = pl.cx + (wr() * 2 - 1) * pl.hw * 0.66;
       var wy = pl.cy + (wr() * 2 - 1) * pl.hh * 0.62;
@@ -589,7 +626,7 @@
                Math.max(6, Math.round(pl.hw * (0.10 + wr() * 0.16) * z)),
                Math.max(1, Math.round(2 * z)), pal.groundHi);
     }
-    ctx.globalAlpha = 0.08;
+    ctx.globalAlpha = 0.035;
     site.patches.forEach(function (b) {
       var p = viewPoint(b.x, b.y);
       fillOval(ctx, p.x, p.y, Math.max(2, Math.round(b.rx * 1.15 * z)),
@@ -976,6 +1013,15 @@
       }
       if (drawLayer(it.m) >= 2) flushDyn(it.d, it.m.z0 || 0);
       drawModel(ctx, pal, it.m);
+      if (it.m.hallBase) {
+        var hp = viewPoint(it.m.x, it.m.y);
+        if (S.hover && S.hover.type === "hall") {
+          drawHoverRing(ctx, pal, hp.x, hp.y - vlen(6), vlen(38), vlen(19));
+        }
+        if (Array.isArray(S.hits)) {
+          S.hits.push({ type: "hall", x: hp.x, y: hp.y - vlen(26), r: Math.max(16, vlen(32)) });
+        }
+      }
     });
     flushDyn(Infinity, 0);
   }
@@ -995,9 +1041,8 @@
   }
 
   function drawModel(ctx, pal, m) {
-    // 厂区建筑（compoundPart）是布景：压淡 22%。机台 / 成品 / 返工不在其中，
-    // 保持全饱和——这就是「交互层与布景层分色」的全部实现。
-    if (m.compoundPart && !m.facility) pal = dimPal(pal, 0.16);
+    // 厂区建筑（compoundPart）是布景：压淡到 38%，把饱和度留给前场机台 / 包裹 / 成品 / 返工。
+    if (m.compoundPart && !m.facility) pal = dimPal(pal, 0.38);
     if (m.kind === "box") drawBoxModel(ctx, pal, m);
     else if (m.kind === "cyl") drawCylinderModel(ctx, pal, m);
     else if (m.kind === "furnace") drawFurnaceModel(ctx, pal, m);
@@ -1117,6 +1162,12 @@
       // 空场地：中间一个「返工」叉形地标（两条短斜线），低调但可辨
       ctx.fillStyle = pal.paintDark;
       ctx.fillRect(p.x - 2, baseY - 1, 4, 1);
+      if (S.hover && S.hover.type === "rework" && String(S.hover.pid) === String(m.projectId)) {
+        drawHoverRing(ctx, pal, p.x, baseY, hw + vlen(3), hh + vlen(2));
+      }
+      if (Array.isArray(S.hits) && m.projectId != null) {
+        S.hits.push({ type: "rework", pid: m.projectId, x: p.x, y: baseY, r: Math.max(8, hw + vlen(4)) });
+      }
       return;
     }
     var s = Math.max(3, Math.round(5 * z));
@@ -1130,6 +1181,12 @@
       ctx.fillStyle = pal.mark;
       ctx.fillRect(bx - s, by - Math.max(2, Math.round(s * 1.6)),
                    Math.max(1, Math.round(s * 0.6)), 1);
+    }
+    if (S.hover && S.hover.type === "rework" && String(S.hover.pid) === String(m.projectId)) {
+      drawHoverRing(ctx, pal, p.x, baseY, hw + vlen(3), hh + vlen(2));
+    }
+    if (Array.isArray(S.hits) && m.projectId != null) {
+      S.hits.push({ type: "rework", pid: m.projectId, x: p.x, y: baseY - Math.round(s * 1.2), r: Math.max(9, hw + vlen(4)) });
     }
   }
 
@@ -1344,7 +1401,7 @@
         fillPoly(ctx, [
           facePt(side, u0 + 0.012, v0 + 0.02), facePt(side, u0 + du - 0.012, v0 + 0.02),
           facePt(side, u0 + du - 0.012, v0 + dv - 0.02), facePt(side, u0 + 0.012, v0 + dv - 0.02),
-        ], S.night ? glassLit : glassDay);
+        ], S.night ? (m.compoundPart && !m.bg ? lerpColor(glassDay, glassLit, 0.45) : glassLit) : glassDay);
         // 玻璃上沿反光
         linePath(ctx, [facePt(side, u0 + 0.02, v0 + dv * 0.22),
                       facePt(side, u0 + du - 0.02, v0 + dv * 0.22)], 1,
@@ -1356,7 +1413,7 @@
                  1, frame);
         if (S.night && !m.bg) {
           var wc = facePt(side, u0 + du / 2, v0 + dv / 2);
-          ctx.globalAlpha = 0.20;
+          ctx.globalAlpha = m.compoundPart ? 0.07 : 0.20;
           fillOval(ctx, wc.x, wc.y, Math.max(3, hw * 0.20), Math.max(2, hw * 0.13), glassLit);
           ctx.globalAlpha = 1;
         }
@@ -2049,9 +2106,13 @@
         ctx.fillRect(Math.round(orePos.x + w * 0.06),
                      Math.round((ya + yb) / 2 - Math.max(1, w * 0.22)), 1, 1);
       }
-      // 边梁亮线
-      linePath(ctx, [{ x: a.x + nx, y: ya + ny }, { x: b.x + nx, y: yb + ny }], 1, steelLight);
-      linePath(ctx, [{ x: a.x - nx, y: ya - ny }, { x: b.x - nx, y: yb - ny }], 1, steelLight);
+      // 边梁亮线；当前选中产线的传送带打亮引导色
+      var selRec = S.selectedKey && S.world && S.world.lines && S.world.lines.get(S.selectedKey);
+      var isSelBelt = !!(selRec && !bg && String(m.projectId) === String(selRec.project.id)
+        && (!m.spur || m.lineKey === S.selectedKey));
+      var rimCol = isSelBelt ? pal.glassGlow : steelLight;
+      linePath(ctx, [{ x: a.x + nx, y: ya + ny }, { x: b.x + nx, y: yb + ny }], 1, rimCol);
+      linePath(ctx, [{ x: a.x - nx, y: ya - ny }, { x: b.x - nx, y: yb - ny }], 1, rimCol);
     }
     // 流向高光：只在主干带面上跑两枚低密度像素，给「调度厅 → 厂区」的方向感。
     // flowStart / flowEnd 来自切片时的原始路径距离，保证拐弯处不会跳回起点。
@@ -2092,13 +2153,45 @@
     var hh = Math.max(1, Math.round(m.hh * z));
     var h = Math.max(4, Math.round(m.h * z));
     var line = m.line;
+    var stall = line.status === "running" ? lineStall(line) : "";
     var skid = Math.max(2, Math.round(2 * z));
+    var isSelected = !!(m.rec && S.selectedKey && S.selectedKey === m.rec.key);
+    // 选中框 / 在跑底晕：在滑撬底座下面先铺一层柔和状态环，全景下也能一眼定位
+    if (line.status === "running" && !stall) {
+      var runPulse = S.reduced ? 0.24 : 0.16 + 0.10 * Math.abs(Math.sin(S.ticks * 0.12 + (m.index || 0)));
+      ctx.globalAlpha = runPulse;
+      fillDiamond(ctx, base.x, baseY + 1, hw + vlen(4), hh + vlen(2), pal.ok);
+      ctx.globalAlpha = 1;
+    }
+    if (isSelected) {
+      var selPts = ringPts(base.x, baseY + 1, hw + vlen(4), hh + vlen(2.5));
+      linePath(ctx, selPts, Math.max(1, Math.round(1.5 * z)), pal.glassGlow);
+    }
     // 滑撬底座 + 主体
     fillDiamond(ctx, base.x, baseY, hw + Math.max(1, Math.round(z)), hh + 1, pal.ink);
     drawIsoBoxAt(ctx, base.x, baseY - skid, hw, hh, skid,
                  pal.steelLight, pal.metal, pal.metalDark);
     drawIsoBoxAt(ctx, base.x, baseY - skid, hw, hh, h,
                  pal.steelLight, pal.steel, pal.steelDark);
+    // 团队产线协同工位：按成员规模在机台前缘绘一排协作节点，AI 总管顶冠加金标
+    if (line.is_team) {
+      var tm = line.team_meta || {};
+      var seats = clamp(Number(tm.members) || 2, 1, 6);
+      for (var si = 0; si < seats; si += 1) {
+        var frac = seats === 1 ? 0.5 : si / (seats - 1);
+        var sx = Math.round(base.x - hw * 0.72 + hw * 1.44 * frac);
+        var sy = Math.round(baseY + hh * (1 - Math.abs(frac - 0.5) * 0.8) + Math.max(1, Math.round(z)));
+        var litSeat = line.status === "running" && !stall;
+        ctx.fillStyle = pal.ink;
+        ctx.fillRect(sx - 1, sy - 2, 3, 2);
+        ctx.fillStyle = litSeat ? (si % 2 ? pal.ok : pal.paintLight) : pal.steelMid;
+        ctx.fillRect(sx - 1, sy - 2, 2, 1);
+      }
+      if (tm.director_ai) {
+        ctx.fillStyle = pal.paintLight;
+        ctx.fillRect(base.x - 1, baseY - skid - h - Math.max(2, Math.round(2 * z)), 3, 2);
+      }
+    }
     // 侧板与散热格栅
     ctx.fillStyle = pal.steelMid;
     for (var gr = 1; gr <= 3; gr += 1) {
@@ -2188,7 +2281,7 @@
     ctx.fillRect(cabX + cabW - 2, cabY + cabH - 2, 1, 1);
     // 状态灯柱。运行中被判成停滞时灯从绿转暗黄：这是「在跑但不健康」，
     // 与「失败」（红）和「正常在跑」（绿）都不同——它还没失败，只是不动了。
-    var stall = line.status === "running" ? lineStall(line) : "";
+    stall = line.status === "running" ? lineStall(line) : "";
     var lamp = pal.idle;
     if (line.status === "paused" || line.status === "stopped") lamp = pal.warn;
     else if (line.status === "failed" || line.last_status === "error") lamp = pal.bad;
@@ -2351,16 +2444,16 @@
       ctx.fillStyle = pal.steelDark;
       ctx.fillRect(sx - Math.max(1, Math.round(z)), Math.round(y - Math.max(2, 3 * z)),
                    Math.max(2, Math.round(2 * z)), Math.max(2, Math.round(3 * z)));
-      // 工位料箱
-      var bw = Math.max(1, Math.round(2.2 * z));
+      // 工位料箱（略加高对比度，让各节点完成/阻塞一目了然）
+      var bw = Math.max(2, Math.round(2.6 * z));
       var boxY = y - Math.max(3, 4 * z);
       if (st === "done") {
-        drawIsoBoxAt(ctx, sx, boxY, bw, Math.max(1, Math.round(bw * 0.5)), bw,
-                     pal.product, pal.crate, pal.crateDark);
+        drawIsoBoxAt(ctx, sx, boxY, bw, Math.max(1, Math.round(bw * 0.5)), Math.max(2, Math.round(bw * 1.2)),
+                     pal.ok, pal.product, pal.crateDark);
       } else if (st === "running") {
         var shake = S.reduced ? 0 : Math.round(Math.sin(S.ticks * 0.9 + i) * Math.max(0.6, z * 0.7));
-        drawIsoBoxAt(ctx, sx, boxY + shake, bw, Math.max(1, Math.round(bw * 0.5)), bw,
-                     pal.crateLight, pal.crate, pal.crateDark);
+        drawIsoBoxAt(ctx, sx, boxY + shake, bw, Math.max(1, Math.round(bw * 0.5)), Math.max(2, Math.round(bw * 1.3)),
+                     pal.paintLight, pal.crateLight, pal.crateDark);
       } else if (st === "ready") {
         // 待料：空箱（只有框）
         linePath(ctx, ringPts(sx, boxY, bw, Math.max(1, Math.round(bw * 0.5))),
@@ -2495,6 +2588,13 @@
       ctx.fillStyle = pal.ok;
       ctx.fillRect(poleX + 1, baseY - h - poleH, Math.max(2, Math.round(3 * z)),
                    Math.max(1, Math.round(2 * z)));
+    }
+    if (S.hover && S.hover.type === "pallet" && String(S.hover.pid) === String(m.projectId)) {
+      drawHoverRing(ctx, pal, base.x, baseY, hw + vlen(3), hh + vlen(2));
+    }
+    if (Array.isArray(S.hits) && m.projectId != null) {
+      S.hits.push({ type: "pallet", pid: m.projectId, x: base.x, y: baseY - Math.round(h + 2),
+                    r: Math.max(8, hw + vlen(3)) });
     }
   }
 
@@ -4288,7 +4388,7 @@
   }
 
   // ---------- FX 导出（主文件转发目标 + 测试探针入口） ----------
-  FX.render = render; FX.viewPoint = viewPoint; FX.vlen = vlen;
+  FX.render = render; FX.vlen = vlen;
   FX.fillDiamond = fillDiamond; FX.fillOval = fillOval; FX.linePath = linePath;
   FX.drawIsoBoxAt = drawIsoBoxAt;   // 待发月台包裹与成品垛货箱共用一套立体建模
   FX.seeded = seeded; FX.isToday = isToday; FX.roleCols = roleCols;

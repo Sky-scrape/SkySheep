@@ -102,7 +102,7 @@ class ScheduleWriteTool(Tool):
                 k: v
                 for k, v in {
                     "title": args.title,
-                    "notes": args.notes if args.notes else None,
+                    "notes": args.notes,
                     "start_at": args.start_at,
                     "end_at": args.end_at,
                     "remind": args.remind,

@@ -242,6 +242,7 @@ async def test_permission_queue_returns_recovery_fields(home):
             PendingPermission,
             Safety,
         )
+        fut = asyncio.get_running_loop().create_future()
         pending = PendingPermission(
             request_id="req-1",
             tool_name="write_file",
@@ -254,9 +255,8 @@ async def test_permission_queue_returns_recovery_fields(home):
             scope="工作目录内：a.txt",
             reversible=True,
             revert_note="改动已进检查点",
-            _future=asyncio.get_running_loop().create_future(),
+            _future=fut,
         )
-        pending.resolve(Decision.ALLOW_ALWAYS)  # 只做字段断言，不真等决策
         agent._pending["req-1"] = pending
         try:
             r2 = _rpc(ws, "p2", "permission.queue")
@@ -272,7 +272,13 @@ async def test_permission_queue_returns_recovery_fields(home):
             assert item["diff"] == "--- a/a.txt\n+++ b/a.txt\n+x"
             assert item["note"] == "测试 note"
             assert item["rule_kind"] == ""
+            pending.resolve(Decision.ALLOW_ALWAYS)
+            r3 = _rpc(ws, "p2b", "permission.queue")
+            assert r3["ok"] is True
+            assert not any(x["request_id"] == "req-1" for x in r3["result"]["pending"])
         finally:
+            if not fut.done():
+                fut.cancel()
             agent._pending.pop("req-1", None)
 
 
@@ -296,17 +302,17 @@ async def test_permission_queue_scans_team_member_agents(home):
     with make_client(home, ["好的"]) as client, client.websocket_connect("/ws") as ws:
         backend = client.app.state.backend
 
-        from skysheep.security.gate import Decision, PendingPermission, Safety
+        from skysheep.security.gate import PendingPermission, Safety
 
+        fut = asyncio.get_running_loop().create_future()
         pending = PendingPermission(
             request_id="member-req-1",
             tool_name="write_file",
             arg_text="write_file path=b.txt content=x",
             safety=Safety.WRITE,
             detail="成员写入 b.txt",
-            _future=asyncio.get_running_loop().create_future(),
+            _future=fut,
         )
-        pending.resolve(Decision.ALLOW_ALWAYS)  # 只做字段断言，不真等决策
 
         class _MemberAgent:
             _pending = {"member-req-1": pending}
@@ -322,6 +328,8 @@ async def test_permission_queue_scans_team_member_agents(home):
             assert hit["tool_name"] == "write_file"
             assert hit["detail"] == "成员写入 b.txt"
         finally:
+            if not fut.done():
+                fut.cancel()
             backend._teams.pop("team-sid-1", None)
 
 

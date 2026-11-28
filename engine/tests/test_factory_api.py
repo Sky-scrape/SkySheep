@@ -544,7 +544,9 @@ def test_factory_methods_are_local_only_with_chinese_errors():
     from skysheep.server import app as server_app
 
     for method in ("state", "runs", "run_now", "toggle", "cancel", "ack", "line_add",
-                   "save", "run_mark", "grant_tools"):
+                   "save", "run_mark", "grant_tools",
+                   "workbench", "project_toggle", "cancel_all",
+                   "pipeline_start", "pipeline_cancel"):
         entry = server_app._WS_METHODS[f"factory.{method}"]
         assert entry.local_only is True, f"factory.{method} 必须本机专属"
         assert "本机" in entry.local_error, f"factory.{method} 的拒绝文案要用中文说清"
@@ -574,6 +576,11 @@ def test_factory_methods_rejected_for_remote_client(home, monkeypatch):
         "factory.save": {"demo": False},
         "factory.run_mark": {"run_id": 1, "outcome": "ok"},
         "factory.grant_tools": {"task_id": 1, "tools": ["write_file"]},
+        "factory.workbench": {},
+        "factory.project_toggle": {"project_id": 1, "enabled": False},
+        "factory.cancel_all": {},
+        "factory.pipeline_start": {"pipeline_id": 1},
+        "factory.pipeline_cancel": {"pipeline_id": 1},
     }
     with TestClient(app) as client, client.websocket_connect("/ws") as ws:
         boot = _call(ws, "boot")
@@ -1062,4 +1069,229 @@ def test_factory_state_waiting_excludes_in_memory_cron_running(home):
             assert f"cron:{tid}" not in wait_keys
         finally:
             backend._cron_running.pop(tid, None)
+
+
+def test_factory_workbench_inline_permission_teams_relays_and_inspect(home, monkeypatch):
+    """factory.workbench 聚合待确认权限、活跃团队/接力、会话归属与巡检，支持就地审批。"""
+    import asyncio
+    from types import SimpleNamespace
+
+    from skysheep.security.gate import PendingPermission
+    from skysheep.server.backend_parts import run_inspect
+    from skysheep.tools.base import Safety
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        boot = _call(ws, "boot")
+        assert boot["ok"]
+        proj = _call(ws, "project.list")["result"]["projects"][0]
+        backend = client.app.state.backend
+
+        async def _setup():
+            sess = await backend.store.create_session(proj["id"], "审批会话")
+            sid = sess.id
+            rt = await backend._get_runtime(sid)
+            fut = asyncio.get_running_loop().create_future()
+            rt.agent._pending["req-f1"] = PendingPermission(
+                request_id="req-f1",
+                tool_name="write_file",
+                arg_text="notes.md",
+                safety=Safety.WRITE,
+                detail="write notes.md",
+                _future=fut,
+            )
+            await backend.store.relay_create(
+                {
+                    "id": "rel-f1",
+                    "project_id": proj["id"],
+                    "session_id": sid,
+                    "state": "running",
+                    "current_node": "n1",
+                    "step": 2,
+                    "goal": "双模型接力审查",
+                },
+                [{"node_id": "n1", "slot": "A", "ordinal": 0, "prompt": "step 1"}],
+            )
+            return sid, fut
+
+        sid, fut = client.portal.call(_setup)
+
+        class _StubBoard:
+            @staticmethod
+            def tasks():
+                return [
+                    SimpleNamespace(status="done"),
+                    SimpleNamespace(status="in_progress"),
+                ]
+
+        stub_team = SimpleNamespace(
+            active=True,
+            team_id="team-f1",
+            source_template="审校团队",
+            director_mode="ai",
+            rounds_used=2,
+            _max_rounds=8,
+            roster=("dev", "reviewer"),
+            board=_StubBoard(),
+            agents=lambda: [],
+            respond_permission=lambda *_args: False,
+        )
+        monkeypatch.setattr(backend, "team_orchestrators", lambda: {sid: stub_team})
+        report_file = home / "inspect-report.md"
+        report_file.write_text("# 巡检\n- 失败", encoding="utf-8")
+        run_inspect.save_state({
+            "enabled": True,
+            "last_at": time.time(),
+            "last_summary": "夜间检查连续报错",
+            "last_report": str(report_file),
+        })
+
+        wb_resp = _call(ws, "factory.workbench")
+        assert wb_resp["ok"], wb_resp
+        wb = wb_resp["result"]
+        assert wb["session_projects"].get(sid) == proj["id"]
+        assert len(wb["pending_permissions"]) == 1
+        perm = wb["pending_permissions"][0]
+        assert perm["request_id"] == "req-f1"
+        assert perm["project_id"] == proj["id"]
+        assert perm["project_name"] == proj["name"]
+        assert len(wb["teams"]) == 1
+        assert wb["teams"][0]["tasks_done"] == 1 and wb["teams"][0]["tasks_total"] == 2
+        assert len(wb["relays"]) == 1 and wb["relays"][0]["goal"] == "双模型接力审查"
+        assert wb["inspect"]["last_summary"] == "夜间检查连续报错"
+        assert wb["inspect"]["last_report"] == str(report_file)
+
+        # 直接在工厂调 permission.respond 审批通过后，future.done() 项不再鬼影回流
+        resp = _call(ws, "permission.respond", {"request_id": "req-f1", "decision": "allow_once"})
+        assert resp["ok"] and resp["result"]["delivered"] is True
+        assert fut.done() and fut.result() == "allow_once"
+        wb_after = _call(ws, "factory.workbench")["result"]
+        assert wb_after["pending_permissions"] == []
+
+        # 清理挂起的权限项
+        async def _cleanup():
+            rt = await backend._get_runtime(sid)
+            rt.agent._pending.pop("req-f1", None)
+
+        client.portal.call(_cleanup)
+
+
+def test_factory_project_toggle_cancel_all_tokens_and_prefs(home):
+    """整区批量启停、全部叫停、7 天用量字段与工厂 UI 偏好持久化。"""
+    import asyncio
+    import functools
+
+    from skysheep.bgtasks import spawn_bg
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        assert _call(ws, "boot")["ok"]
+        backend = client.app.state.backend
+        store = backend.store
+        pid1 = _call(ws, "project.list")["result"]["projects"][0]["id"]
+        p2dir = home / "proj2"
+        p2dir.mkdir()
+        proj2 = client.portal.call(store.get_or_create_project, str(p2dir), "二号厂")
+
+        t1 = _call(ws, "cron.add", {
+            "name": "任务甲", "prompt": "p1", "schedule_type": "interval", "interval_minutes": 10,
+        })["result"]["id"]
+        t2 = _call(ws, "cron.add", {
+            "name": "任务乙", "prompt": "p2", "schedule_type": "interval", "interval_minutes": 15,
+        })["result"]["id"]
+        t3 = client.portal.call(
+            store.add_cron_task, proj2.id, "别厂任务", "p3", "interval", 10, "", -1, []
+        )["id"]
+
+        # 1) 整区批量暂停 & 恢复：只动 proj1，不连坐 proj2
+        paused = _call(ws, "factory.project_toggle", {"project_id": pid1, "enabled": False})["result"]
+        assert paused["updated"] == 2 and paused["enabled"] is False
+        assert client.portal.call(store.get_cron_task, t3)["enabled"] is True
+
+        resumed = _call(ws, "factory.project_toggle", {"project_id": pid1, "enabled": True})["result"]
+        assert resumed["updated"] == 2 and resumed["enabled"] is True
+
+        # 2) 按项目叫停全部在跑后台定时任务
+        async def _spawn_dummy():
+            return spawn_bg(asyncio.sleep(30))
+
+        bg_task = client.portal.call(_spawn_dummy)
+        backend._cron_running[t1] = bg_task
+        cancelled = _call(ws, "factory.cancel_all", {"project_id": pid1})["result"]
+        assert cancelled["cancelled"] == 1
+        assert bg_task.cancelled() or bg_task.cancelling() > 0
+        backend._cron_running.pop(t1, None)
+
+        # 3) 7 天用量与浪费计数进产线 health
+        now = time.time()
+        r1 = client.portal.call(functools.partial(
+            store.add_automation_run, kind="cron", task_id=t2, project_id=pid1, started_at=now - 100))
+        client.portal.call(functools.partial(
+            store.finish_automation_run,
+            r1["id"], status="error", finished_at=now - 80, duration_s=20.0,
+            in_tokens=12000, out_tokens=6000, outcome="failed",
+        ))
+        r2 = client.portal.call(functools.partial(
+            store.add_automation_run, kind="cron", task_id=t2, project_id=pid1, started_at=now - 50))
+        client.portal.call(functools.partial(
+            store.finish_automation_run,
+            r2["id"], status="done", finished_at=now - 40, duration_s=10.0,
+            in_tokens=600, out_tokens=400, outcome="ok",
+        ))
+        st = _call(ws, "factory.state")["result"]
+        p1_view = next(p for p in st["projects"] if p["id"] == pid1)
+        line2 = next(ln for ln in p1_view["lines"] if ln["key"] == f"cron:{t2}")
+        assert line2["health"]["tokens_7d"] == 19000
+        assert line2["health"]["wasted_7d"] == 1
+
+        # 4) 工厂视图 / 镜头 / 面板折叠偏好读写闭环
+        saved = _call(ws, "ui.save", {
+            "prefs": {
+                "factory_view": "board",
+                "factory_cam": "panorama",
+                "factory_panel_folded": 1,
+            },
+        })
+        assert saved["ok"], saved
+        prefs = _call(ws, "ui.get")["result"]["prefs"]
+        assert prefs["factory_view"] == "board"
+        assert prefs["factory_cam"] == "panorama"
+        assert prefs["factory_panel_folded"] == 1
+
+
+def test_factory_pipeline_start_and_cancel_cross_project(home):
+    """factory.pipeline_start / cancel 允许跨项目调度或停止流水线，目录缺失时拒绝启动。"""
+    with make_client(home, ["阶段产出"]) as client, client.websocket_connect("/ws") as ws:
+        assert _call(ws, "boot")["ok"]
+        backend = client.app.state.backend
+        store = backend.store
+        p2dir = home / "proj2"
+        p2dir.mkdir()
+        proj2 = client.portal.call(store.get_or_create_project, str(p2dir), "二号厂")
+        pipe = client.portal.call(
+            store.add_pipeline,
+            proj2.id,
+            "跨厂发布流",
+            [
+                {"title": "一", "prompt": "step 1"},
+                {"title": "二", "prompt": "step 2", "depends_on": [0]},
+            ],
+        )
+        # 停工项目不允许启动；正常跨项目流水线允许启动与叫停
+        ghost = client.portal.call(
+            store.get_or_create_project, str(home / "missing_dir"), "离线厂",
+        )
+        gpipe = client.portal.call(
+            store.add_pipeline, ghost.id, "离线流", [{"title": "x", "prompt": "x"}],
+        )
+        denied = _call(ws, "factory.pipeline_start", {"pipeline_id": gpipe["id"]})
+        assert denied["ok"] is False and "不可用" in denied["error"]
+
+        started = _call(ws, "factory.pipeline_start", {"pipeline_id": pipe["id"]})
+        assert started["ok"] and started["result"]["started"] is True
+        # 若仍处于 running，可用 factory.pipeline_cancel 叫停
+        cur = client.portal.call(store.get_pipeline, pipe["id"])
+        if cur["status"] == "running":
+            cancelled = _call(ws, "factory.pipeline_cancel", {"pipeline_id": pipe["id"]})
+            assert cancelled["ok"] and cancelled["result"]["cancelled"] is True
+
+
 

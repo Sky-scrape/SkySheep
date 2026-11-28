@@ -96,7 +96,9 @@ class HookRunner:
         for rule in self.pre_rules:
             if not rule.enabled or not rule.matches(tool_name):
                 continue
-            code, stdout, stderr, dur = await self._exec(rule, "pre", tool_name, input_dict, session_id)
+            code, stdout, stderr, dur = await self._exec(
+                rule, "pre", tool_name, input_dict, session_id, record=False,
+            )
             if code == 2:
                 reason = (stderr or stdout or "blocked by hook").strip()
                 reasons.append(reason[:300])
@@ -127,7 +129,9 @@ class HookRunner:
         for rule in self.post_rules:
             if not rule.enabled or not rule.matches(tool_name):
                 continue
-            code, stdout, stderr, dur = await self._exec(rule, "post", tool_name, input_dict, session_id)
+            code, stdout, stderr, dur = await self._exec(
+                rule, "post", tool_name, input_dict, session_id, record=False,
+            )
             text = (stderr if code else stdout or stderr).strip()
             if text:
                 notes.append(f"[hook:{rule.match}] {text[:200]}")
@@ -141,7 +145,9 @@ class HookRunner:
         for rule in self.stop_rules:
             if not rule.enabled:
                 continue
-            code, stdout, stderr, dur = await self._exec(rule, "stop", "", {}, session_id)
+            code, stdout, stderr, dur = await self._exec(
+                rule, "stop", "", {}, session_id, record=False,
+            )
             text = (stderr if code else stdout or stderr).strip()
             if text:
                 notes.append(f"[hook:stop] {text[:200]}")

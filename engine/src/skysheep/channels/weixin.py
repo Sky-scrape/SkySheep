@@ -117,6 +117,7 @@ class WeixinChannel(Channel):
             self._client = httpx.AsyncClient(
                 timeout=httpx.Timeout(POLL_TIMEOUT + 15.0, connect=10.0),
                 transport=self._transport,
+                trust_env=False,
             )
         return self._client
 

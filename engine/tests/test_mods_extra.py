@@ -328,7 +328,8 @@ async def test_hook_block_prevents_mod_tool_pre(home, monkeypatch):
     mgr = ModManager(enabled=True, enabled_ids=["order-mod"])
     runner = HookRunner(pre_rules=[HookRule(match="write_file", command="echo")])
 
-    async def fake_exec(rule, phase, tool_name, input_dict, session_id=""):
+    async def fake_exec(rule, phase, tool_name, input_dict, session_id="", record=True):
+        # _exec 的 record 参数（pre 阻止后由 run_pre 单独记 blocked）本用例不关心
         return 2, "", "hook-says-block", 0  # 退出码 2 = 阻止
 
     monkeypatch.setattr(runner, "_exec", fake_exec)

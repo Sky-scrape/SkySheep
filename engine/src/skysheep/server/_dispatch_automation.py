@@ -7,7 +7,7 @@ run_center / factory。自 app.py 逐字迁入，行为零变化。
 
 from __future__ import annotations
 
-from ._dispatch_common import _WsMethod
+from ._dispatch_common import _param_int, _WsMethod
 from .backend import ServerBackend
 
 
@@ -26,7 +26,7 @@ async def _h_schedule_update(backend: ServerBackend, params: dict, emit, local: 
 
 
 async def _h_schedule_delete(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
-    return await backend.schedule_delete(int(params.get("id", 0)))
+    return await backend.schedule_delete(_param_int(params, "id", 0))
 
 
 async def _h_schedule_due(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
@@ -216,6 +216,34 @@ async def _h_factory_run_mark(backend: ServerBackend, params: dict, emit, local:
     return await backend.factory_run_mark(params)
 
 
+async def _h_factory_workbench(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.factory_workbench()
+
+
+async def _h_factory_project_toggle(
+    backend: ServerBackend, params: dict, emit, local: bool,
+) -> dict:
+    return await backend.factory_project_toggle(params)
+
+
+async def _h_factory_cancel_all(
+    backend: ServerBackend, params: dict, emit, local: bool,
+) -> dict:
+    return await backend.factory_cancel_all(params)
+
+
+async def _h_factory_pipeline_start(
+    backend: ServerBackend, params: dict, emit, local: bool,
+) -> dict:
+    return await backend.factory_pipeline_start(params)
+
+
+async def _h_factory_pipeline_cancel(
+    backend: ServerBackend, params: dict, emit, local: bool,
+) -> dict:
+    return await backend.factory_pipeline_cancel(params)
+
+
 # ---- 远程观战（T4，docs/远程观战设计.md）：只读摘要与渠道推送，均本机专属 ----
 
 
@@ -329,5 +357,25 @@ METHODS: dict[str, _WsMethod] = {
     "factory.run_mark": _WsMethod(
         _h_factory_run_mark, local_only=True,
         local_error="运行判定只能在本机修改",
+    ),
+    "factory.workbench": _WsMethod(
+        _h_factory_workbench, local_only=True,
+        local_error="工厂工作台只能在本机查看",
+    ),
+    "factory.project_toggle": _WsMethod(
+        _h_factory_project_toggle, local_only=True,
+        local_error="厂区批量启停只能在桌面端本机操作",
+    ),
+    "factory.cancel_all": _WsMethod(
+        _h_factory_cancel_all, local_only=True,
+        local_error="叫停在跑产线只能在桌面端本机操作",
+    ),
+    "factory.pipeline_start": _WsMethod(
+        _h_factory_pipeline_start, local_only=True,
+        local_error="工厂启动装配线只能在桌面端本机操作",
+    ),
+    "factory.pipeline_cancel": _WsMethod(
+        _h_factory_pipeline_cancel, local_only=True,
+        local_error="工厂叫停装配线只能在桌面端本机操作",
     ),
 }

@@ -495,7 +495,10 @@ def install(
     """按来源类型分派：.zip 解压，其余按文件夹处理（来源元数据透传）。"""
     src_path = Path(src).expanduser()
     if src_path.is_file() and src_path.suffix.lower() == ".zip":
-        return install_from_zip(src_path, dest_root, existing=existing, overwrite=overwrite)
+        return install_from_zip(
+            src_path, dest_root, existing=existing, overwrite=overwrite,
+            origin_label=origin_label, origin_url=origin_url,
+        )
     return install_from_dir(
         src_path, dest_root, existing=existing, overwrite=overwrite,
         origin_label=origin_label, origin_url=origin_url,
@@ -673,6 +676,11 @@ def resolve_url(url: str) -> tuple[list[str], str | None]:
             return f"https://gitee.com/{user}/{repo}/repository/archive/{branch}.zip"
 
     if rest:  # tree/<分支>[/<子目录>]
+        if len(rest) < 2 or not rest[1]:
+            site = "GitHub" if is_github else "Gitee"
+            raise SkillInstallError(
+                f"这种 {site} 链接缺少分支名：请粘贴仓库主页或完整的 tree/<分支> 链接"
+            )
         branch = rest[1]
         sub = "/".join(rest[2:]) or None
         return [archive(branch)], sub
@@ -703,6 +711,7 @@ def download_to(url: str) -> Path:
             with tempfile.NamedTemporaryFile(
                 prefix="skysheep-skill-", suffix=".zip", delete=False
             ) as fh:
+                tmp = Path(fh.name)
                 while True:
                     chunk = resp.read(65536)
                     if not chunk:
@@ -714,7 +723,6 @@ def download_to(url: str) -> Path:
                             "（如确需安装请手动下载后从本地导入）"
                         )
                     fh.write(chunk)
-                tmp = Path(fh.name)
     except Exception as e:
         if tmp is not None:
             tmp.unlink(missing_ok=True)

@@ -476,16 +476,23 @@ class TeamIsolatedGate:
         # _write_target_inside_workdir），只是组合顺序不同
         object.__setattr__(self, "_probe", IsolatedGate(working_dir=workdir))
 
+    @property
+    def working_dir(self) -> Path | None:
+        return self._probe.working_dir
+
     async def authorize(self, tool, input_dict, **kwargs):
         blocked = self._probe._egress_pre_deny(tool, input_dict)
         if blocked is not None:
             return blocked
         if self._probe._write_hits_engine_home(tool, input_dict):
             return await self._inner.authorize(tool, input_dict, **kwargs)
-        if tool.safety == Safety.READONLY:
+        extra_fn = getattr(self._inner, "_extra_confirm_required", None)
+        extra_req = bool(extra_fn(tool, input_dict)) if callable(extra_fn) else False
+        force_pending = bool(kwargs.get("force_pending", False))
+        if tool.safety == Safety.READONLY and not extra_req and not force_pending:
             return await self._inner.authorize(tool, input_dict, **kwargs)
-        if tool.safety == Safety.WRITE and self._probe._write_target_inside_workdir(
-            tool, input_dict
+        if self._probe._isolated_write_allowed(
+            tool, input_dict, confirm_gate=self._inner, force_pending=force_pending
         ):
             return None  # 隔离工作区内写入 = 隔离本身的确认
         return await self._inner.authorize(tool, input_dict, **kwargs)
@@ -1863,10 +1870,13 @@ class TeamOrchestrator:
                     huddle_ran = await self._run_pending_huddles()
                     if self._finished is not None:
                         break
-                    if self._deliver_requested:
-                        self._deliver_requested = False
-                        await self.finish(status="done")
-                        break
+                if self._deliver_requested:
+                    self._deliver_requested = False
+                    await self.finish(status="done")
+                    break
+                if turn.status != "done":
+                    idle_reason = "总管本轮未能完成，已暂停自动推进；发送消息可重试，或接管团队。"
+                    break
                 dispatched = await self._dispatch_ready()
                 round_woke = await self._wake_actionable()
                 woke.extend(round_woke)
@@ -1876,9 +1886,6 @@ class TeamOrchestrator:
                 # 下一轮必须看到失败工单好改派/放弃——既有 error→重派路径照用，
                 # 不靠「依赖失败」的强制裁定才醒来（失败工单没有下游时不触发它）
                 error_landed = any(w.get("status") == "error" for w in round_woke)
-                if turn.status != "done":
-                    idle_reason = "总管本轮未能完成，已暂停自动推进；发送消息可重试，或接管团队。"
-                    break
                 progressed = bool(dispatched or round_woke or turn.tool_calls or huddle_ran)
                 reviews = [t for t in self.board.tasks() if t.status == "review"]
                 if reviews:

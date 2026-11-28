@@ -523,6 +523,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         self._trust: WorkspaceTrust | None = None
         # 会话运行时池（OrderedDict：访问即移到末尾，最旧的在前面淘汰）
         self.runtimes: OrderedDict[str, SessionRuntime] = OrderedDict()
+        self._runtime_locks: dict[str, asyncio.Lock] = {}
         self.gate: PermissionGate | None = None
         self.mcp: MCPManager | None = None
         self.mcp_configs: dict = {}
@@ -1036,59 +1037,61 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         runtime 按会话所属项目绑定上下文（_project_ctx_for）：跨项目分屏列
         的会话在自己的项目里干活，不挂在引擎当前项目下。
         """
-        rt = self.runtimes.get(session_id)
-        if rt is not None:
-            self.runtimes.move_to_end(session_id)
-        else:
-            ctx = await self._project_ctx_for(session_id)
-            recorder = ChangeRecorder()
-            rt = SessionRuntime(
-                sid=session_id,
-                agent=self._build_agent(
-                    provider=self._runtime_provider(session_id),
-                    gate=ctx.gate,
-                    working_dir=ctx.workdir,
-                    session_id=session_id,
-                    mods=self.mods,
-                    mods_claude=self.mods_claude,
+        lock = self._runtime_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            rt = self.runtimes.get(session_id)
+            if rt is not None:
+                self.runtimes.move_to_end(session_id)
+            else:
+                ctx = await self._project_ctx_for(session_id)
+                recorder = ChangeRecorder()
+                rt = SessionRuntime(
+                    sid=session_id,
+                    agent=self._build_agent(
+                        provider=self._runtime_provider(session_id),
+                        gate=ctx.gate,
+                        working_dir=ctx.workdir,
+                        session_id=session_id,
+                        mods=self.mods,
+                        mods_claude=self.mods_claude,
+                        recorder=recorder,
+                        ctx=ctx,
+                    ),
                     recorder=recorder,
                     ctx=ctx,
-                ),
-                recorder=recorder,
-                ctx=ctx,
-            )
-            rt.agent.set_system(
-                self.compose_system_for(ctx.workdir) if ctx.own else self.compose_system()
-            )
-            # 会话级思考档位恢复：runtime 被淘汰重建后，把档位重新挂回
-            # （重建的）provider。恢复前重验能力：新 provider 不支持思考则
-            # 跳过并清除该条目（不报错——能力以当前生效服务为准）。
-            # 档位是会话私有状态：无覆盖会话重建出的 provider 可能仍是全局
-            # 共享对象（_runtime_provider 的全局腿），直接在共享对象上调档会
-            # 把所有会话一起改掉——先换 detached 私有副本再回放（与
-            # session_reasoning_set 同款处理）。
-            saved_effort = self._session_efforts.get(session_id)
-            if saved_effort is not None:
-                if getattr(rt.agent.provider, "supports_reasoning", False):
-                    if rt.agent.provider is self.provider:
-                        name, model = self._session_effective_model(session_id)
-                        try:
-                            rt.agent.provider = self._build_detached_provider(name, model or None)
-                        except Exception:  # noqa: BLE001 - 私有化失败宁可弃档位也不能污染全局
-                            self._session_efforts.pop(session_id, None)
-                            saved_effort = None
-                    if saved_effort is not None:
-                        rt.agent.provider.set_reasoning_effort(saved_effort)
-                else:
-                    self._session_efforts.pop(session_id, None)
-            self.runtimes[session_id] = rt
-        while len(self.runtimes) > self.MAX_RUNTIMES:
-            victim = self._evictable_runtime()
-            if victim is None:
-                break
-            self.runtimes.pop(victim.sid)
-            self._forget_runtime(victim)
-        return rt
+                )
+                rt.agent.set_system(
+                    self.compose_system_for(ctx.workdir) if ctx.own else self.compose_system()
+                )
+                # 会话级思考档位恢复：runtime 被淘汰重建后，把档位重新挂回
+                # （重建的）provider。恢复前重验能力：新 provider 不支持思考则
+                # 跳过并清除该条目（不报错——能力以当前生效服务为准）。
+                # 档位是会话私有状态：无覆盖会话重建出的 provider 可能仍是全局
+                # 共享对象（_runtime_provider 的全局腿），直接在共享对象上调档会
+                # 把所有会话一起改掉——先换 detached 私有副本再回放（与
+                # session_reasoning_set 同款处理）。
+                saved_effort = self._session_efforts.get(session_id)
+                if saved_effort is not None:
+                    if getattr(rt.agent.provider, "supports_reasoning", False):
+                        if rt.agent.provider is self.provider:
+                            name, model = self._session_effective_model(session_id)
+                            try:
+                                rt.agent.provider = self._build_detached_provider(name, model or None)
+                            except Exception:  # noqa: BLE001 - 私有化失败宁可弃档位也不能污染全局
+                                self._session_efforts.pop(session_id, None)
+                                saved_effort = None
+                        if saved_effort is not None:
+                            rt.agent.provider.set_reasoning_effort(saved_effort)
+                    else:
+                        self._session_efforts.pop(session_id, None)
+                self.runtimes[session_id] = rt
+            while len(self.runtimes) > self.MAX_RUNTIMES:
+                victim = self._evictable_runtime()
+                if victim is None:
+                    break
+                self.runtimes.pop(victim.sid)
+                self._forget_runtime(victim)
+            return rt
 
     def _evictable_runtime(self) -> SessionRuntime | None:
         """最旧的空闲 runtime：非当前会话、没在跑的轮、没排队消息、
@@ -1228,6 +1231,56 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             if orch.respond_permission(request_id, decision):
                 return True
         return False
+
+    def list_pending_permissions(self, only_sid: str | None = None) -> list[dict]:
+        """聚合当前未决权限请求（跨主会话 runtime、基础 agent 与团队成员 agent）。
+
+        `only_sid` 为非空串时只返回该会话归属（远程绑定会话范围收窄）；
+        `only_sid == ""` 返回空表（未绑定的远程连接不跨会话枚举）；
+        `only_sid is None` 返回本机全部活跃会话的未决确认。
+        """
+        if only_sid == "":
+            return []
+
+        def _drain(pending_map: dict, sid: str = "") -> list[dict]:
+            out: list[dict] = []
+            for rid, pending in list(pending_map.items()):
+                fut = getattr(pending, "_future", None)
+                done_fn = getattr(fut, "done", None)
+                if callable(done_fn) and done_fn():
+                    continue
+                rule = getattr(pending, "always_rule", None)
+                out.append({
+                    "request_id": rid,
+                    "session_id": sid,
+                    "tool_name": getattr(pending, "tool_name", "") or "",
+                    "detail": (getattr(pending, "detail", "") or "")[:200],
+                    "safety": getattr(getattr(pending, "safety", None), "value", ""),
+                    "origin": getattr(pending, "origin", "") or "",
+                    "scope": getattr(pending, "scope", "") or "",
+                    "reversible": bool(getattr(pending, "reversible", False)),
+                    "revert_note": getattr(pending, "revert_note", "") or "",
+                    "diff": getattr(pending, "diff", "") or "",
+                    "note": getattr(pending, "note", "") or "",
+                    "rule_kind": getattr(rule, "kind", "") or "",
+                    "rule_pattern": getattr(rule, "pattern", "") or "",
+                })
+            return out
+
+        items: list[dict] = []
+        for rt in self.runtimes.values():
+            if only_sid is not None and rt.sid != only_sid:
+                continue
+            items.extend(_drain(getattr(rt.agent, "_pending", {}) or {}, rt.sid))
+        base = getattr(self, "_base_agent", None)
+        if base is not None and only_sid is None:
+            items.extend(_drain(getattr(base, "_pending", {}) or {}))
+        for team_sid, orch in self.team_orchestrators().items():
+            if only_sid is not None and team_sid != only_sid:
+                continue
+            for member in orch.agents():
+                items.extend(_drain(getattr(member, "_pending", {}) or {}, team_sid))
+        return items
 
     # ---- 会话事件回放（断线重连补帧） ----
 
@@ -1641,7 +1694,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         """把按当前配置重建的工具集发给基础 Agent 与所有会话运行时。"""
         if self._base_agent is None:
             return  # 启动早期（MCP connect_all 触发工具变更回调时）基础 Agent 还没建
-        self._base_agent.registry = self._build_full_registry()
+        self._base_agent.registry = self._build_full_registry(self._base_recorder)
         for rt in self.runtimes.values():
             rt.agent.registry = self._build_full_registry(rt.recorder, ctx=rt.ctx)
 
@@ -1957,6 +2010,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         "code_theme_dark": (
             "auto", "github-dark", "solarized-dark", "one-dark",
         ),
+        # 工厂偏好（记住用户常用入口：场景 vs 看板、作业区 vs 全景）
+        "factory_view": ("scene", "board"),
+        "factory_cam": ("work", "panorama"),
     }
 
     # ---- 快照 ----

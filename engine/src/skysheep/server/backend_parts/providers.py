@@ -61,6 +61,26 @@ class ProvidersMixin:
     方法自 backend.py 按职责注释逐字搬入。
     """
 
+    def _sync_or_fallback(
+        self, name: str, *, limit: int | None = None, old_provider=None
+    ) -> None:
+        sync = getattr(self, "_sync_global_provider_agents", None)
+        if callable(sync):
+            sync(name, limit=limit, old_provider=old_provider)
+            return
+        for ag in self._for_each_agent():
+            ag.provider = self.provider
+            if limit is not None:
+                ag.context_limit_tokens = limit
+
+    def _detach_or_fallback(self, old_provider=None) -> None:
+        detach = getattr(self, "_detach_global_provider_agents", None)
+        if callable(detach):
+            detach(old_provider)
+            return
+        for ag in self._for_each_agent():
+            ag.provider = None
+
     @staticmethod
     def _mask_key(key: str | None) -> str:
         if not key:
@@ -157,8 +177,7 @@ class ProvidersMixin:
             try:
                 self.provider = self._build_provider(clean)
                 self.provider_error = None
-                for ag in self._for_each_agent():
-                    ag.provider = self.provider
+                self._sync_or_fallback(clean, limit=self._context_limit())
                 activated = True
             except RuntimeError as e:
                 self.provider_error = str(e)
@@ -178,8 +197,10 @@ class ProvidersMixin:
         self.cfg = load_config()
         was_active = name == self.provider_name
         if was_active:
+            old_provider = self.provider
             self.provider = None
             self.provider_name = ""
+            self._detach_or_fallback(old_provider)
             # 让界面说明白"为什么现在没有模型可用"，而不是显示空的 provider/model
             self.provider_error = f"已删除正在使用的模型服务「{name}」，请重新选择一个"
         return {
@@ -210,8 +231,10 @@ class ProvidersMixin:
         self.cfg = load_config()
         was_active = not enabled and name == self.provider_name
         if was_active:
+            old_provider = self.provider
             self.provider = None
             self.provider_name = ""
+            self._detach_or_fallback(old_provider)
             self.provider_error = f"已停用正在使用的模型服务「{name}」，请重新选择一个"
         return {"name": name, "enabled": enabled, "was_active": was_active}
 
@@ -317,19 +340,23 @@ class ProvidersMixin:
         )
         self.cfg = load_config()
         rebuilt = False
+        limit = self._context_limit()
         if name == self.provider_name or self.provider is None:
             try:
+                old_provider = self.provider
                 self.provider = self._build_provider(name)
                 self.provider_error = None
-                for ag in self._for_each_agent():
-                    ag.provider = self.provider
+                self._sync_or_fallback(name, limit=limit, old_provider=old_provider)
                 rebuilt = True
             except RuntimeError as e:
                 self.provider_error = str(e)
-        # 上下文上限跟服务走：改了当前服务的上限要立刻作用到活着的 Agent
-        limit = self._context_limit()
-        for ag in self._for_each_agent():
-            ag.context_limit_tokens = limit
+        # 若服务被编辑前未走全局同步（如全局指针未重建），也刷新非私有会话上限
+        if not rebuilt:
+            private_fn = getattr(self, "_model_private_sessions", None)
+            private = private_fn() if callable(private_fn) else set()
+            for ag in self._for_each_agent():
+                if getattr(ag, "session_id", None) not in private:
+                    ag.context_limit_tokens = limit
         return {
             "saved": name,
             "rebuilt": rebuilt,

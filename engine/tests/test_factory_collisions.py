@@ -337,7 +337,8 @@ def test_factory_dynamic_routes_and_footprints(tmp_path):
         pytest.skip("需要 Node.js 运行时")
     shim = "var window = {}; var document = {getElementById: function(){return null;}};\n"
     source = "\n".join((STATIC / name).read_text(encoding="utf-8") for name in (
-        "app-factory.js", "app-factory-scene.js", "app-factory-drawer.js", "app-factory-draw.js",
+        "app-factory.js", "app-factory-camera.js", "app-factory-scene.js",
+        "app-factory-drawer.js", "app-factory-draw.js",
     ))
     script = tmp_path / "collisions.cjs"
     script.write_text(shim + source + "\n" + DRIVER, encoding="utf-8")

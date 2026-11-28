@@ -8,7 +8,7 @@ tasks / aux / model / runs / probe。自 app.py 逐字迁入，行为零变化�
 from __future__ import annotations
 
 from ..config import resolve_api_key
-from ._dispatch_common import _remote_scope, _WsMethod
+from ._dispatch_common import _param_int, _remote_scope, _WsMethod
 from .backend import ServerBackend
 
 
@@ -259,7 +259,7 @@ async def _h_runs_list(backend: ServerBackend, params: dict, emit, local: bool) 
     if only == "":
         return {"runs": []}  # 远程尚未绑定会话：fail closed，不回退到全局活动会话
     include_terminal = bool(params.get("include_terminal", True))
-    limit = min(200, max(1, int(params.get("limit", 100))))
+    limit = _param_int(params, "limit", 100, lo=1, hi=200) or 100
     # 只查一次：旧实现把 list_runs 在布尔与三元里各调一遍，非空列表时会
     # 重复 I/O，两次快照还可能不一致。
     return {"runs": backend.runs.list_runs(
@@ -354,64 +354,9 @@ async def _h_model_providers_health(backend: ServerBackend, params: dict, emit, 
 
 
 async def _h_permission_queue(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
-    """当前未决权限请求队列（本机跨会话聚合，运行中心「等待确认」分区用）。
-
-    返回与 permission_request 事件同构的字段（request_id / session_id / tool_name /
-    detail / safety / origin / scope / reversible / revert_note / diff / note /
-    rule_kind / rule_pattern），前端断线重连或刷新后可据此重建确认卡——
-    后端那一轮还挂在等决策上，卡片丢了等于「假死」（安全审查 M12 同源问题）。
-    决策仍走 permission.respond。
-
-    远程连接只能看到自己绑定会话的未决请求：队列里含工具名、影响面与文件
-    diff，跨会话聚合会泄露其他会话在做什么（B 族）。
-    """
-
-    def _drain(pending_map: dict, sid: str = "") -> list[dict]:
-        out: list[dict] = []
-        for rid, pending in pending_map.items():
-            rule = getattr(pending, "always_rule", None)
-            out.append({
-                "request_id": rid,
-                "session_id": sid,
-                "tool_name": getattr(pending, "tool_name", "") or "",
-                "detail": (getattr(pending, "detail", "") or "")[:200],
-                "safety": getattr(getattr(pending, "safety", None), "value", ""),
-                "origin": getattr(pending, "origin", "") or "",
-                "scope": getattr(pending, "scope", "") or "",
-                "reversible": bool(getattr(pending, "reversible", False)),
-                "revert_note": getattr(pending, "revert_note", "") or "",
-                "diff": getattr(pending, "diff", "") or "",
-                "note": getattr(pending, "note", "") or "",
-                "rule_kind": getattr(rule, "kind", "") or "",
-                "rule_pattern": getattr(rule, "pattern", "") or "",
-            })
-        return out
-
+    """当前未决权限请求队列（本机跨会话聚合，运行中心「等待确认」分区与工厂共用）。"""
     only = _remote_scope(local)
-    if only == "":
-        return {"pending": []}  # 远程尚未绑定会话：不回退到全局跨会话聚合
-    out: list[dict] = []
-    for rt in backend.runtimes.values():
-        if only is not None and rt.sid != only:
-            continue
-        out.extend(_drain(getattr(rt.agent, "_pending", {}) or {}, rt.sid))
-    base = getattr(backend, "_base_agent", None)
-    if base is not None and only is None:
-        # 基础 agent 不属于具体会话：只向本机公开（远程需要明确的会话归属）
-        out.extend(_drain(getattr(base, "_pending", {}) or {}))
-    # 团队成员 Agent 挂在各自编排器（team.py 的 _MemberRuntime），不在 runtimes
-    # 里——决策路由（respond_permission）已经覆盖他们，队列枚举也得跟上：
-    # 否则成员的未决确认卡刷新/断线后无法重建，后端那轮挂在等决策上＝假死。
-    # 请求归属按建队会话的 sid（成员权限事件也走该会话的通道）。
-    # 批 6 收敛：分发层没有 self，经 D2 CollabBodyMixin 的只读 accessor
-    # team_orchestrators() 取 dict 本体（与 D2 域内是同一对象，.items() 语义
-    # 不变）——只许这样遍历读，不许在此增删 _teams。
-    for team_sid, orch in backend.team_orchestrators().items():
-        if only is not None and team_sid != only:
-            continue
-        for member in orch.agents():
-            out.extend(_drain(getattr(member, "_pending", {}) or {}, team_sid))
-    return {"pending": out}
+    return {"pending": backend.list_pending_permissions(only_sid=only)}
 
 
 async def _h_config_probe_models(backend: ServerBackend, params: dict, emit, local: bool) -> dict:

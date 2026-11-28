@@ -115,23 +115,24 @@ class _MCPPinnedBackend:
     ):
         import httpcore2  # noqa: PLC0415
 
+        from ..tools._netpin import connect_pinned_tcp_async
+
         if host.lower() != self._host:
             return await self._inner.connect_tcp(
                 host, port, timeout=timeout, local_address=local_address,
                 socket_options=socket_options,
             )
-        last: Exception | None = None
-        for ip in self._ips:
-            try:
-                return await self._inner.connect_tcp(
-                    ip, port, timeout=timeout, local_address=local_address,
-                    socket_options=socket_options,
-                )
-            except (httpcore2.ConnectError, httpcore2.ConnectTimeout) as e:
-                last = e
-        if last is not None:
-            raise last
-        raise httpcore2.ConnectError(f"没有可用的已校验地址: {host}")
+        return await connect_pinned_tcp_async(
+            self._inner,
+            self._ips,
+            host,
+            port,
+            timeout=timeout,
+            local_address=local_address,
+            socket_options=socket_options,
+            connect_errors=(httpcore2.ConnectError, httpcore2.ConnectTimeout),
+            error_cls=httpcore2.ConnectError,
+        )
 
     async def connect_unix_socket(self, *args, **kwargs):
         return await self._inner.connect_unix_socket(*args, **kwargs)
@@ -212,7 +213,7 @@ async def _preflight_with_pins(cfg: MCPServerConfig) -> tuple[str | None, list[s
                 infos = await asyncio.to_thread(
                     socket.getaddrinfo, host, None, proto=socket.IPPROTO_TCP
                 )
-                loopback = all(
+                loopback = bool(infos) and all(
                     ipaddress.ip_address(info[4][0]).is_loopback for info in infos
                 )
                 # 回环目标钉到刚解析出的同一批地址（去重保序）
@@ -620,6 +621,8 @@ class MCPManager:
         self._sessions: dict[str, ClientSession] = {}
         self._keepers: dict[str, asyncio.Task] = {}
         self._stops: dict[str, asyncio.Event] = {}
+        self._conn_locks: dict[str, asyncio.Lock] = {}
+        self._closing_tasks: dict[str, asyncio.Task] = {}
         # 每台服务器当前的工具包装（连接/工具列表变化时更新，backend 据此重建注册表）
         self._tools: dict[str, list[Tool]] = {}
         self.statuses: dict[str, MCPServerStatus] = {n: MCPServerStatus(n) for n in servers}
@@ -652,6 +655,13 @@ class MCPManager:
         """该服务器当前注册的工具包装（连接后才有；工具列表变化时更新）。"""
         return list(self._tools.get(name, []))
 
+    def _conn_lock(self, name: str) -> asyncio.Lock:
+        lock = self._conn_locks.get(name)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._conn_locks[name] = lock
+        return lock
+
     def note_call_failure(self, name: str) -> None:
         """调用失败（超时/连接错）：标记断线、关掉连接并预约后台重连。
 
@@ -663,13 +673,23 @@ class MCPManager:
             return
         status.connected = False
         status.error = status.error or "连接已断开，正在尝试重连"
-        if name in self._keepers:
+        if name in self._keepers or name in self._stops:
             # 旧连接要真正关掉：不关会积累子进程与 socket 句柄
-            spawn_bg(self._close_connection(name))
+            self._closing_tasks[name] = spawn_bg(self._close_connection(name))
         self.request_reconnect(name)
 
     async def _close_connection(self, name: str) -> None:
-        """关掉一台服务器的连接：通知 keeper 退出，由它在自己任务里展开作用域。
+        """加锁串行关闭单台服务器的连接，避免与 _connect_one 竞态。"""
+        current = asyncio.current_task()
+        try:
+            async with self._conn_lock(name):
+                await self._close_connection_locked(name)
+        finally:
+            if current is not None and self._closing_tasks.get(name) is current:
+                self._closing_tasks.pop(name, None)
+
+    async def _close_connection_locked(self, name: str) -> None:
+        """关掉一台服务器的连接（调用方已持有 _conn_lock(name)）：通知 keeper 退出。
 
         绝不能从别的任务直接 aclose 栈——anyio 的 cancel scope 被跨任务退出时
         取消会打偏（曾把无辜调用方的 await 点一起取消掉）。宽限期内没退完就
@@ -863,13 +883,27 @@ class MCPManager:
         if cfg.transport == "invalid":
             status.error = "config needs either 'command' (stdio) or 'url' (http)"
             return []
+        pending_close = self._closing_tasks.get(name)
+        if pending_close is not None and not pending_close.done():
+            try:
+                await asyncio.shield(pending_close)
+            except BaseException:  # noqa: BLE001
+                pass
+        async with self._conn_lock(name):
+            # 同名旧 keeper 还在（重连竞态）：先关掉，保证一台服务器同时只有一条连接
+            if name in self._keepers or name in self._stops:
+                await self._close_connection_locked(name)
+            return await self._connect_one_locked(name, cfg, connect_timeout=connect_timeout)
+
+    async def _connect_one_locked(
+        self, name: str, cfg: MCPServerConfig, connect_timeout: float | None = None
+    ) -> list[Tool]:
+        """持锁执行单台服务器建连与 keeper 启动（由 _connect_one 调用）。"""
+        status = self.statuses[name]
         problem, preflight_pins = await _preflight_with_pins(cfg)
         if problem:
             status.error = problem
             return []
-        # 同名旧 keeper 还在（重连竞态）：先关掉，保证一台服务器同时只有一条连接
-        if name in self._keepers or name in self._stops:
-            await self._close_connection(name)
         ready: asyncio.Event = asyncio.Event()
         outcome: dict = {}
         # 远程 MCP 的 DNS 钉连目标：直接复用 preflight 解析并探测过的那批已校验
@@ -1033,10 +1067,10 @@ class MCPManager:
             await ready.wait()
         except BaseException:
             # 调用方超时/取消：只 set stop 事件对卡在 initialize/list_tools 里的
-            # keeper 无效（它没在等这个事件）——必须走 _close_connection 把 keeper
+            # keeper 无效（它没在等这个事件）——必须走 _close_connection_locked 把 keeper
             # 收割掉（宽限 → cancel），否则半开的连接与 stdio 子进程会泄漏
             # （安全审查 M11：挂死服务器泄漏 keeper 任务与子进程）
-            await self._close_connection(name)
+            await self._close_connection_locked(name)
             raise
         if "error" in outcome:
             # keeper 已退出（失败路径）：引用清掉

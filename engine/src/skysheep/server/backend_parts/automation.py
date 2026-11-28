@@ -2220,6 +2220,10 @@ class AutomationMixin:
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=self.SCHTASK_TIMEOUT_S)
         except TimeoutError:
             proc.kill()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except Exception:  # noqa: BLE001
+                pass
             return 1, "schtasks 执行超时"
         raw = out or b""
         try:
@@ -3498,11 +3502,7 @@ class AutomationMixin:
         if pipe.get("project_id") != self._cur_project_id():
             raise RuntimeError("流水线不存在: " + str(pipe.get("id")))
 
-    async def pipeline_start(self, params: dict) -> dict:
-        pipe = await self.store.get_pipeline(int(params.get("id", 0)))
-        if pipe is None:
-            raise RuntimeError("流水线不存在: " + str(params.get("id")))
-        self._check_pipeline_ownership(pipe)
+    async def _pipeline_start_core(self, pipe: dict) -> dict:
         if pipe["status"] == "running":
             raise RuntimeError("流水线已在运行中")
         if not pipe["nodes"]:
@@ -3522,11 +3522,7 @@ class AutomationMixin:
         spawn_bg(self._pipeline_pass())
         return {"pipeline": pipe, "started": True}
 
-    async def pipeline_cancel(self, params: dict) -> dict:
-        pipe = await self.store.get_pipeline(int(params.get("id", 0)))
-        if pipe is None:
-            raise RuntimeError("流水线不存在: " + str(params.get("id")))
-        self._check_pipeline_ownership(pipe)
+    async def _pipeline_cancel_core(self, pipe: dict) -> dict:
         if pipe["status"] != "running":
             raise RuntimeError("流水线不在运行中")
         pipe = await self.store.update_pipeline(pipe["id"], status="cancelled",
@@ -3544,6 +3540,20 @@ class AutomationMixin:
                     t.cancel()  # 协程收尾会把节点标为 cancelled
         self._broadcast_pipeline(pipe)
         return {"pipeline": pipe, "cancelled": True}
+
+    async def pipeline_start(self, params: dict) -> dict:
+        pipe = await self.store.get_pipeline(int(params.get("id", 0)))
+        if pipe is None:
+            raise RuntimeError("流水线不存在: " + str(params.get("id")))
+        self._check_pipeline_ownership(pipe)
+        return await self._pipeline_start_core(pipe)
+
+    async def pipeline_cancel(self, params: dict) -> dict:
+        pipe = await self.store.get_pipeline(int(params.get("id", 0)))
+        if pipe is None:
+            raise RuntimeError("流水线不存在: " + str(params.get("id")))
+        self._check_pipeline_ownership(pipe)
+        return await self._pipeline_cancel_core(pipe)
 
     async def pipeline_delete(self, params: dict) -> dict:
         pid = int(params.get("id", 0))

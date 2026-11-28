@@ -17,14 +17,19 @@ import base64
 import io
 import sys
 import time
-import uuid
-from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
 from ..config import skysheep_home
 from ..messages import ImageBlock
+from ._screenshots import (
+    KEEP_SCREENSHOTS as KEEP_SCREENSHOTS,
+)
+from ._screenshots import (
+    _prune_screenshots as _prune_screenshots,
+)
+from ._screenshots import save_screenshot_copy
 from .base import Safety, Tool, ToolContext, ToolError, truncate_output
 
 IS_WINDOWS = sys.platform == "win32"
@@ -33,11 +38,6 @@ IS_WINDOWS = sys.platform == "win32"
 MAX_TYPE_CHARS = 2000
 # 附加图像超过该宽度时等比缩小（控制 base 体积；缩放比会在返回文本中声明）
 MAX_IMAGE_WIDTH = 2400
-
-# 截图副本保留上限（~/.skysheep/screenshots）：每次截屏都会存一份，
-# 但没有上限时它会无声涨下去（与检查点不同，那里有 MAX_CHECKPOINTS 淘汰）。
-# 副本只用于事后回看，保留最近若干张足够用。
-KEEP_SCREENSHOTS = 60
 
 
 def _require_windows(what: str) -> None:
@@ -272,6 +272,7 @@ def _mouse_action_sync(
 
     down, up = {
         "click": (_MOUSEEVENTF_LEFTDOWN, _MOUSEEVENTF_LEFTUP),
+        "double_click": (_MOUSEEVENTF_LEFTDOWN, _MOUSEEVENTF_LEFTUP),
         "right_click": (_MOUSEEVENTF_RIGHTDOWN, _MOUSEEVENTF_RIGHTUP),
         "middle_click": (_MOUSEEVENTF_MIDDLEDOWN, _MOUSEEVENTF_MIDDLEUP),
     }[action]
@@ -334,7 +335,7 @@ def _hotkey_sync(vks: list[int]) -> str:
     ev = [_key_event(vk=v, flags=_KEYEVENTF_KEYUP) for v in reversed(mods)]
     if ev:
         _send(ev)
-    return "已按下组合键 " + "+".join(names)
+    return f"已按下组合键 {names}"
 
 
 # ---- 窗口 / 剪贴板 的 Win32 同步实现 ----
@@ -500,29 +501,6 @@ def _encode_png(img: Any) -> bytes:
     return buf.getvalue()
 
 
-def _prune_screenshots(shots: Path) -> None:
-    """截图副本保留策略：超过 KEEP_SCREENSHOTS 时删最旧的。
-
-    只处理 .png 文件（不动用户自己丢进来的其它东西），删除失败静默——
-    清目录是附带的维护动作，不该让截图本身报错。
-    """
-    try:
-        files = [f for f in shots.glob("*.png") if f.is_file()]
-    except OSError:
-        return
-    if len(files) <= KEEP_SCREENSHOTS:
-        return
-    try:
-        files.sort(key=lambda f: f.stat().st_mtime)
-    except OSError:
-        return
-    for old in files[: len(files) - KEEP_SCREENSHOTS]:
-        try:
-            old.unlink()
-        except OSError:
-            pass
-
-
 def _capture(screen: str) -> tuple[Any, tuple[int, int], tuple[int, int]]:
     """抓屏，返回 (图像, 覆盖区域原点, 虚拟屏幕尺寸)。"""
     if IS_WINDOWS:
@@ -591,23 +569,12 @@ class ScreenshotTool(Tool):
         ctx.images.append(ImageBlock(media_type="image/png", data=base64.b64encode(png).decode()))
 
         shots = skysheep_home() / "screenshots"
-        path = shots / f"{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}.png"
-        saved = False
-        try:
-            # mkdir 与写副本同一容错级别（审查 P-40）：图像此时已附加进对话，
-            # 副本目录建不出来（权限/杀软/被同名文件占用）不该让整个工具报错，
-            # 与注释「副本保存失败不影响主流程」保持一致。
-            shots.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(png)
-            _prune_screenshots(shots)
-            saved = True
-        except OSError:
-            pass  # 副本保存失败不影响主流程
+        path = await asyncio.to_thread(save_screenshot_copy, shots, png)
 
         lines = [
             f"截图完成（{args.screen}）: {w}x{h} px，图像已附加在本条消息之后（模型可直接查看）",
         ]
-        if saved:
+        if path is not None:
             lines.append(f"- 副本已保存: {path}")
         else:
             lines.append("- 副本保存失败（不影响本次截图）")

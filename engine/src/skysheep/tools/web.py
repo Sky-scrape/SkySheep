@@ -32,7 +32,6 @@ import socket
 from pathlib import Path
 from urllib.parse import urljoin, urlparse, urlunparse
 
-import httpcore
 import httpx
 from pydantic import BaseModel, Field
 
@@ -53,6 +52,15 @@ from ..sanitize import (
 )
 from ..sources import register_source
 from ..textio import write_text_atomic
+from ._netpin import (
+    PinnedAsyncBackend as _PinnedBackend,
+)
+from ._netpin import (
+    install_pinned_backend as _install_pinned_backend,
+)
+from ._netpin import (
+    resolve_public_ips as _resolve_public_ips,
+)
 from .base import Safety, Tool, ToolContext, ToolError, truncate_output
 
 MAX_REDIRECTS = 5
@@ -60,13 +68,6 @@ MAX_RESPONSE_BYTES = 2_000_000
 DEFAULT_MAX_CHARS = 20_000
 TIMEOUT_S = 20.0
 USER_AGENT = "SkySheep-web-fetch/0.4 (+open-source agent workbench)"
-
-# NAT64/DNS64、6to4、Teredo：这些 IPv6 段内嵌着 IPv4 地址，经翻译网关可达
-# 内网——`is_global` 认它们是公网（地址段本身注册在公网），但语义上等价于
-# 访问被内嵌的那个 IPv4（如 64:ff9b::7f00:1 → 127.0.0.1）。显式排除（审查 C-1）。
-_TRANSLATION_NETS = tuple(
-    ipaddress.ip_network(n) for n in ("64:ff9b::/96", "2002::/16", "2001::/32")
-)
 
 
 class WebFetchArgs(BaseModel):
@@ -103,106 +104,6 @@ def _safe_charset(name: str | None) -> str:
     if not getattr(info, "_is_text_encoding", True):
         return "utf-8"
     return name
-
-
-def _resolve_public_ips(host: str) -> list[str]:
-    """解析主机并校验**全部**结果为公网地址，返回可用的 IP 列表（防 SSRF）。
-
-    返回已解析并通过校验的 IP，供建连阶段直接复用（配合 _PinnedBackend 防
-    DNS rebinding）。任何一个结果落在非公网段都直接拒绝：一个域名同时答出
-    公网与内网地址时，不能只挑好听的用。
-    """
-    # 畸形 URL 的 hostname 可能是 None / 空串（如 userinfo + IPv6 字面量剥凭据后
-    # 再解析的形态）：显式拒绝而不是让它炸成 AttributeError（审查 P2-8）。
-    host = str(host or "").strip()
-    if not host:
-        raise ToolError("web_fetch：URL 缺少主机名，无法定位目标")
-    if host.lower() in ("localhost", "0.0.0.0", "::", "[::]"):
-        raise ToolError(f"web_fetch 拒绝内网地址: {host}")
-    try:
-        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
-    except OSError as e:
-        raise ToolError(f"无法解析主机 {host}: {e}") from e
-    ips: list[str] = []
-    for info in infos:
-        raw = info[4][0]
-        try:
-            ip = ipaddress.ip_address(raw)
-        except ValueError:
-            raise ToolError(f"解析结果不是合法 IP（{host} → {raw}）") from None
-        if not ip.is_global:
-            raise ToolError(
-                f"web_fetch 拒绝非公网地址（{host} → {ip}）：内网/回环地址不允许访问"
-            )
-        if isinstance(ip, ipaddress.IPv6Address):
-            v4 = ip.ipv4_mapped
-            if v4 is not None and not v4.is_global:
-                raise ToolError(
-                    f"web_fetch 拒绝 IPv4 映射地址（{host} → {ip}）：内嵌非公网 IPv4"
-                )
-            if any(ip in net for net in _TRANSLATION_NETS):
-                raise ToolError(
-                    f"web_fetch 拒绝翻译段地址（{host} → {ip}）："
-                    "NAT64/6to4/Teredo 可翻译到内网 IPv4"
-                )
-        text = str(ip)
-        if text not in ips:
-            ips.append(text)
-    if not ips:
-        raise ToolError(f"无法解析主机 {host}")
-    return ips
-
-
-class _PinnedBackend(httpcore.AsyncNetworkBackend):
-    """把指定主机的 TCP 连接固定到已校验的 IP 列表（防 DNS rebinding / TOCTOU）。
-
-    背景：只做「先 getaddrinfo 校验、再交给 httpx 连接」是不够的——httpx 建连时会
-    自己再解析一次 DNS，两次解析之间是攻击窗口：攻击者控制的域名把 TTL 设得很低，
-    校验那一次答公网 IP 通过检查，建连那一次改答 127.0.0.1 或云 metadata 地址。
-    这里在校验之后接手网络层：命中被固定的主机名时直接连已校验的 IP，不再走 DNS。
-
-    Host 头与 TLS SNI 仍由 httpcore 用 URL 里的原主机名生成（见 AsyncHTTPConnection
-    的 server_hostname），所以虚拟主机与证书校验照常生效——固定的只是「连到哪台机器」。
-    """
-
-    def __init__(self, pinned: dict[str, list[str]]) -> None:
-        self._pinned = {h.lower(): ips for h, ips in pinned.items()}
-        # AnyIOBackend 是 httpcore 公开导出的后端（httpx 的 AutoBackend 在 asyncio 下
-        # 最终也是它）；SkySheep 全栈 asyncio，不存在 trio 分支。
-        self._inner = httpcore.AnyIOBackend()
-
-    async def connect_tcp(
-        self,
-        host: str,
-        port: int,
-        timeout: float | None = None,
-        local_address: str | None = None,
-        socket_options=None,
-    ) -> httpcore.AsyncNetworkStream:
-        targets = self._pinned.get(host.lower())
-        if not targets:
-            return await self._inner.connect_tcp(
-                host, port, timeout=timeout, local_address=local_address,
-                socket_options=socket_options,
-            )
-        last: Exception | None = None
-        for ip in targets:  # 多个 IP 依次尝试，首个能连上的即用
-            try:
-                return await self._inner.connect_tcp(
-                    ip, port, timeout=timeout, local_address=local_address,
-                    socket_options=socket_options,
-                )
-            except (httpcore.ConnectError, httpcore.ConnectTimeout) as e:
-                last = e
-        raise last if last is not None else httpcore.ConnectError(
-            f"没有可用的已校验地址: {host}"
-        )
-
-    async def connect_unix_socket(self, *args, **kwargs):
-        return await self._inner.connect_unix_socket(*args, **kwargs)
-
-    async def sleep(self, seconds: float) -> None:
-        await self._inner.sleep(seconds)
 
 
 # 内容整体丢弃的标签（旧正则实现同一清单）。script/style 是 HTMLParser 的
@@ -304,34 +205,6 @@ class _HTMLTextExtractor(html.parser.HTMLParser):
 
     def text(self) -> str:
         return "".join(self._chunks)
-
-
-def _install_pinned_backend(transport, backend, label: str) -> None:
-    """把自研钉连后端装进 httpx transport（防 DNS rebinding 的关键一步）。
-
-    ``transport._pool`` 是 httpx 的私有字段、``_network_backend`` 是 httpcore
-    连接池的私有字段——都在公开 API 之外，上游升级可能改名。两种失效模式必须
-    区分对待：
-
-    - ``_pool`` 整个没了 → 旧代码会 AttributeError 响亮失败（fail closed），
-      保持这一取向：装不上就拒绝发请求；
-    - 仅 ``_network_backend`` 改名 → 普通属性赋值会**静默**变成死属性，
-      钉连失效后整条 SSRF 防线只剩 getaddrinfo 那一次校验——这种静默退化
-      必须显式 getattr 检查防住（审查 P-17）。
-
-    版本锚点（2026-09，uv.lock 锁定）：httpx 0.28.1 / httpcore 1.0.9；
-    pyproject 对 httpx 只约束 ``>=0.27`` 无上界，升级时先跑
-    tests/test_web_fetch_hardening.py——钉连结构变化会让那里的端到端用例
-    与本检查一起红。
-    """
-    pool = getattr(transport, "_pool", None)
-    if pool is None or not hasattr(pool, "_network_backend"):
-        raise RuntimeError(
-            f"{label}：当前 httpx/httpcore 版本的私有结构已变化，"
-            "DNS 钉连（防 rebinding）无法安装；拒绝在不设防的情况下发请求"
-            "（请按 tools/web.py 的版本锚点注释核对 httpx/httpcore 版本）"
-        )
-    pool._network_backend = backend
 
 
 def html_to_text(html: str) -> str:

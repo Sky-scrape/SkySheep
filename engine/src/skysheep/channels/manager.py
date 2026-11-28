@@ -139,6 +139,7 @@ class ChannelManager:
         # 当前在跑的那一批属于哪个绑定键：/stop 要停在跑的轮次，而不是停在
         # 发送者自己那个键上（话题分会话后两者可能不是同一个）
         self._running_key = ""
+        self._drain_task: asyncio.Task | None = None
 
     # ---- 生命周期 ----
 
@@ -146,7 +147,7 @@ class ChannelManager:
         """按最新配置重建渠道（设置页保存后调用；应用启动时也走这里）。"""
         await self.stop()
         cfg = self.config_provider() or {}
-        for name, channel in build_channels(cfg, self._on_message).items():
+        for name, channel in build_channels(cfg, self._on_adapter_message).items():
             # 适配器可把运行时状态（微信的 bot_token / 游标）交回宿主持久化
             channel.on_state = self._make_state_sink(name)
             self.channels[name] = channel
@@ -164,6 +165,13 @@ class ChannelManager:
         return self.status()
 
     async def stop(self) -> None:
+        if self._drain_task is not None and not self._drain_task.done():
+            self._drain_task.cancel()
+            try:
+                await self._drain_task
+            except BaseException:  # noqa: BLE001
+                pass
+        self._drain_task = None
         for name, channel in self.channels.items():
             try:
                 await channel.stop()
@@ -239,7 +247,21 @@ class ChannelManager:
 
     # ---- 入站路由 ----
 
+    async def _on_adapter_message(self, msg: ChannelMessage) -> None:
+        """适配器入站回调：决策/指令/入队立刻返回，真正跑模型放后台 _drain_task。
+
+        避免长轮询 / 事件泵（微信 getupdates、飞书 stdout）在一轮等用户审批或
+        运行期间被阻塞，导致「允许 / 拒绝 / /stop」进不来形成死锁。
+        """
+        await self._on_message_impl(msg, background_drain=True)
+
     async def _on_message(self, msg: ChannelMessage) -> None:
+        """兼容直调入口（含单元测试）：按原语义在调用内完成本批消费。"""
+        await self._on_message_impl(msg, background_drain=False)
+
+    async def _on_message_impl(
+        self, msg: ChannelMessage, *, background_drain: bool
+    ) -> None:
         """适配器收到的每条消息都到这里。
 
         顶层兜底：路由里任何宿主调用抛异常都不能冒回适配器——飞书会把它记成
@@ -248,7 +270,7 @@ class ChannelManager:
         （回复等于向陌生人确认这个 bot 是活的）。
         """
         try:
-            await self._route_message(msg)
+            await self._route_message(msg, background_drain=background_drain)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
@@ -257,7 +279,21 @@ class ChannelManager:
             if channel is not None and msg.approved:
                 await self._reply(channel, msg, f"处理这条消息时出错了：{e}")
 
-    async def _route_message(self, msg: ChannelMessage) -> None:
+    async def _drain_runner(self) -> None:
+        """后台消费循环容器：保证退出时清理状态与任务句柄。"""
+        try:
+            await self._drain()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("渠道后台消费循环意外退出")
+        finally:
+            self._running = False
+            self._drain_task = None
+
+    async def _route_message(
+        self, msg: ChannelMessage, *, background_drain: bool = False
+    ) -> None:
         """入站路由的主体：审批应答 → 斜杠命令 → 排队跑一轮。"""
         channel = self.channels.get(msg.channel)
         if channel is None:
@@ -377,6 +413,10 @@ class ChannelManager:
             )
             # 有 drain 在跑：它会顺手取走箱里的消息，这里直接返回（适配器不必
             # 跟着等，用户已经收到回执）。
+            return
+        if background_drain:
+            self._running = True
+            self._drain_task = asyncio.create_task(self._drain_runner())
             return
         self._running = True
         try:

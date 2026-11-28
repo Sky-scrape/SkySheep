@@ -441,18 +441,22 @@ class WorkspaceTrust:
                     self.project_root.resolve()
                 ).as_posix()
             except (OSError, RuntimeError, ValueError):
-                rel = Path(str(touched)).name
+                rel = ""
             now_sources = source_hashes(self.project_root)
             changed = {
                 name for name, digest in now_sources.items()
                 if prev_sources.get(name) != digest
             }
-            # touched 可能是目录（技能目录）：按前缀判定「这一来源下的文件」
-            prefix = rel.rstrip("/") + "/"
-            stray = sorted(
-                name for name in changed
-                if name != rel and not name.startswith(prefix)
-            )
+            if rel:
+                # touched 可能是目录（技能目录）：按前缀判定「这一来源下的文件」
+                prefix = rel.rstrip("/") + "/"
+                stray = sorted(
+                    name for name in changed
+                    if name != rel and not name.startswith(prefix)
+                )
+            else:
+                # 改动来源不在本项目根内：项目中任何来源变化都视作外部篡改
+                stray = sorted(changed)
             if stray:
                 # 别的来源也变了：不延续信任（可能正是被第三方塞进来的改动）
                 return self.state()

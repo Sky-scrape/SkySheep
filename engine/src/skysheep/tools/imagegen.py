@@ -19,12 +19,14 @@ import json
 import time
 from urllib.parse import urljoin, urlparse
 
-import httpcore
 import httpx
 from pydantic import BaseModel, Field
 
+from ..network import NetworkConfig, make_httpx_client, make_transport
+from ._netpin import PinnedSyncBackend as _SyncPinnedBackend
+from ._netpin import install_pinned_backend as _install_pinned_backend
+from ._netpin import resolve_public_ips as _resolve_public_ips
 from .base import ChangeRecorder, Safety, Tool, ToolContext, ToolError, rel_path, resolve_path
-from .web import _install_pinned_backend, _resolve_public_ips
 
 TIMEOUT_S = 60.0
 MAX_IMAGE_BYTES = 8_000_000
@@ -40,54 +42,22 @@ AUTO_PROVIDERS = (
 )
 
 
-class _SyncPinnedBackend(httpcore.SyncBackend):
-    """把指定主机的 TCP 连接固定到已校验 IP（web.py _PinnedBackend 的同步镜像）。
-
-    imagegen 在线程里用同步 httpx.Client，复用不了 web_fetch 的 Async 版；
-    语义完全一致：命中被固定主机时直连已校验 IP、不再走 DNS（防 rebinding 的
-    TOCTOU 窗口），Host 头与 TLS SNI 仍用原主机名（httpcore 生成）。
-    """
-
-    def __init__(self, pinned: dict[str, list[str]]) -> None:
-        self._pinned = {h.lower(): ips for h, ips in pinned.items()}
-        self._inner = httpcore.SyncBackend()
-
-    def connect_tcp(
-        self,
-        host: str,
-        port: int,
-        timeout: float | None = None,
-        local_address: str | None = None,
-        socket_options=None,
-    ):
-        targets = self._pinned.get(host.lower())
-        if not targets:
-            return self._inner.connect_tcp(
-                host, port, timeout=timeout, local_address=local_address,
-                socket_options=socket_options,
-            )
-        last: Exception | None = None
-        for ip in targets:
-            try:
-                return self._inner.connect_tcp(
-                    ip, port, timeout=timeout, local_address=local_address,
-                    socket_options=socket_options,
-                )
-            except (httpcore.ConnectError, httpcore.ConnectTimeout) as e:
-                last = e
-        raise last if last is not None else httpcore.ConnectError(
-            f"没有可用的已校验地址: {host}"
-        )
-
-
-def _pinned_transport(host: str, ips: list[str] | None = None) -> httpx.HTTPTransport:
+def _pinned_transport(
+    host: str,
+    ips: list[str] | None = None,
+    network: NetworkConfig | None = None,
+) -> httpx.HTTPTransport:
     """返回把连接固定到已校验 IP 的同步 transport。
 
     ips 不传时先解析校验（必须全部公网）。校验与建连分开做：调用方总是先
     _resolve_public_ips 校验，这里只负责固定——测试注入 transport 接管网络层时
     公网校验也照常发生（M9：校验不能随网络层注入一起被跳过）。
     """
-    transport = httpx.HTTPTransport(trust_env=False)
+    transport = (
+        make_transport(network)
+        if network is not None
+        else httpx.HTTPTransport(trust_env=False)
+    )
     # 与 web_fetch 同一 fail-closed 检查：私有结构变化时响亮失败，
     # 不允许钉连静默退化成「只剩一次 getaddrinfo 校验」（审查 P-17）
     _install_pinned_backend(
@@ -126,6 +96,7 @@ class GenerateImageTool(Tool):
         model: str = "",
         recorder: ChangeRecorder | None = None,
         transport=None,
+        network: NetworkConfig | None = None,
     ) -> None:
         self.provider = provider  # zhipu / siliconflow / custom；空 = 未配置
         self.api_key = api_key
@@ -133,6 +104,24 @@ class GenerateImageTool(Tool):
         self.model = model
         self.recorder = recorder
         self._transport = transport  # 仅测试注入
+        self._network = network
+
+    def _sync_client(self, url: str, host: str, ips: list[str]) -> httpx.Client:
+        if self._transport is not None:
+            return httpx.Client(
+                timeout=TIMEOUT_S, trust_env=False, transport=self._transport,
+                follow_redirects=False,
+            )
+        pinned = _pinned_transport(host, ips, network=self._network)
+        if self._network is not None:
+            return make_httpx_client(
+                self._network, url=url, transport=pinned, timeout=TIMEOUT_S,
+                follow_redirects=False,
+            )
+        return httpx.Client(
+            timeout=TIMEOUT_S, trust_env=False, transport=pinned,
+            follow_redirects=False,
+        )
 
     @property
     def configured(self) -> bool:
@@ -163,9 +152,13 @@ class GenerateImageTool(Tool):
         shown = rel_path(ctx, p)
         if self.recorder is not None:
             await self.recorder.record(p)  # 检查点：改前不存在 → 回滚时删除
-        try:
+
+        def _write_image_sync() -> None:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_bytes(image_bytes)
+
+        try:
+            await asyncio.to_thread(_write_image_sync)
         except OSError as e:
             raise ToolError(f"cannot save image {shown}: {e}") from e
         return f"image saved: {shown}（{len(image_bytes) / 1024:.0f}KB，来自 {self.provider}）"
@@ -200,24 +193,35 @@ class GenerateImageTool(Tool):
 
         # 生成接口：base_url 是本机设置页（LOCAL_ONLY）配的，默认值是公网官方端点；
         # 但可手填任意值——公网校验无条件做，注入 transport（测试桩）也不例外
+        gen_url = base + "/images/generations"
         gen_host = urlparse(base).hostname or ""
         gen_ips = _resolve_public_ips(gen_host)
-        gen_transport = (
-            self._transport if self._transport is not None else _pinned_transport(gen_host, gen_ips)
-        )
-        with httpx.Client(timeout=TIMEOUT_S, trust_env=False, transport=gen_transport) as client:
+        with self._sync_client(gen_url, gen_host, gen_ips) as client:
             with client.stream(
-                "POST", base + "/images/generations",
+                "POST", gen_url,
                 json={"model": model, "prompt": prompt}, headers=headers,
             ) as resp:
                 if resp.status_code >= 400:
                     snippet = resp.read()[:200].decode("utf-8", errors="replace")
                     raise ToolError(f"画图接口返回 HTTP {resp.status_code}: {snippet}")
-                data = json.loads(_capped(resp, MAX_API_JSON_BYTES))
-            item = ((data.get("data") or data.get("images")) or [{}])[0] or {}
+                raw_json = _capped(resp, MAX_API_JSON_BYTES)
+                try:
+                    data = json.loads(raw_json)
+                except ValueError as e:
+                    raise ToolError(f"画图接口返回的不是有效 JSON：{e}") from e
+            if not isinstance(data, dict):
+                raise ToolError("画图接口返回格式无效（非 JSON 对象）")
+            items = data.get("data") or data.get("images") or []
+            item = items[0] if isinstance(items, list) and items and isinstance(items[0], dict) else {}
             b64 = item.get("b64_json")
             if b64:
-                return "(inline)", base64.b64decode(b64), "image/png"
+                import binascii
+
+                try:
+                    img_bytes = base64.b64decode(b64, validate=True)
+                except (ValueError, binascii.Error) as e:
+                    raise ToolError(f"画图接口返回的 base64 图片数据无效：{e}") from e
+                return "(inline)", img_bytes, "image/png"
             image_url = item.get("url") or ""
             if not image_url:
                 raise ToolError(f"画图接口没有返回图片地址：{str(data)[:200]}")
@@ -231,14 +235,7 @@ class GenerateImageTool(Tool):
             if parsed.scheme not in ("http", "https") or not parsed.hostname:
                 raise ToolError(f"图片地址协议不支持: {current}")
             dl_ips = _resolve_public_ips(parsed.hostname)  # 内网地址在这里就被拒绝
-            dl_transport = (
-                self._transport if self._transport is not None
-                else _pinned_transport(parsed.hostname, dl_ips)
-            )
-            with httpx.Client(
-                timeout=TIMEOUT_S, trust_env=False, transport=dl_transport,
-                follow_redirects=False,
-            ) as dl_client:
+            with self._sync_client(current, parsed.hostname, dl_ips) as dl_client:
                 with dl_client.stream(
                     "GET", current, headers={"User-Agent": "SkySheep-imagegen/0.7"}
                 ) as dl:

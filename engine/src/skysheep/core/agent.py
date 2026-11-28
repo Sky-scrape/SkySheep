@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import itertools
 import time
 from collections.abc import AsyncIterator
@@ -871,7 +872,9 @@ class Agent:
                         always_rule = None
                     else:
                         always_rule = pending.always_rule or self.gate.rule_for(
-                            tool, tu.input, self.gate.working_dir)
+                            tool, tu.input, self.gate.working_dir,
+                            narrow_exec_families=True,
+                        )
                     yield PermissionRequest(
                         request_id=pending.request_id,
                         tool_name=tu.name,
@@ -1283,13 +1286,17 @@ class Agent:
         降级，不兜异常也不挡执行。
         """
         t0 = time.monotonic()
-        ctx.last_diff = ""
-        images_before = len(ctx.images)
+        # 每次调用使用独立浅拷贝承载本轮临时输出（last_diff / images），
+        # 避免只读并发批（asyncio.gather）互相清空 last_diff 或截取/删除对方追加的截图；
+        # 其余共享上下文状态（working_dir / aborted / sources / record_change 等）维持原引用。
+        call_ctx = copy.copy(ctx)
+        call_ctx.last_diff = ""
+        call_ctx.images = []
         egress_note = self.gate.egress_note(tool, tu.input)
         lease = None
         if tool.safety != Safety.READONLY:
             try:
-                lease = await self.gate.claim_write(tool, tu.input, owner=ctx.session_id)
+                lease = await self.gate.claim_write(tool, tu.input, owner=call_ctx.session_id)
             except Exception as e:  # noqa: BLE001 - 租约是协调不是闸门，故障不挡执行
                 # fail-open 但 fail-visible：领租约失败时并行写同文件的冲突协调
                 # 本次缺席（覆盖不再带注记，权限确认不受影响），留一条结构化
@@ -1300,14 +1307,14 @@ class Agent:
                     "写租约领取失败：本次写入失去并行冲突协调（照常执行）",
                     tool=tool.name,
                     target=str(target) if target else None,
-                    session=ctx.session_id,
+                    session=call_ctx.session_id,
                     error=f"{type(e).__name__}: {e}",
                 )
                 lease = None
         try:
             try:
                 args = tool.args_model.model_validate(tu.input)
-                result = await tool.run(args, ctx)
+                result = await tool.run(args, call_ctx)
                 is_error = False
             except ToolError as e:
                 result = str(e)
@@ -1322,9 +1329,5 @@ class Agent:
         if note and not is_error:
             result = result + "\n\n" + note
         duration_ms = int((time.monotonic() - t0) * 1000)
-        # 无论成败都把本次新增摘走：失败的调用不把图留给下一个调用冒领
-        # （历史上错误结果的图会一直滞留在 ctx.images，附到之后随便哪次
-        # 成功调用上）。附不附给本条结果由调用方按 is_error 决定。
-        images = list(ctx.images[images_before:])
-        del ctx.images[images_before:]
-        return result, is_error, duration_ms, ("" if is_error else ctx.last_diff), images
+        images = list(call_ctx.images)
+        return result, is_error, duration_ms, ("" if is_error else call_ctx.last_diff), images

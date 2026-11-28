@@ -264,7 +264,7 @@ class SkillsMixin:
         if scope == "project":
             roots.reverse()
         try:
-            result = remove_skill(name, roots)
+            result = await asyncio.to_thread(remove_skill, name, roots)
         except SkillInstallError as e:
             raise RuntimeError(str(e)) from e
         # 顺手抹掉该技能的遗留状态（停用名单 / 使用范围）：不清理的话，

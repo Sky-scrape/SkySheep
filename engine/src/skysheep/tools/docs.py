@@ -199,15 +199,24 @@ def _extract_xlsx(p: Path, max_chars: int) -> str:
 
     wb = openpyxl.load_workbook(str(p), read_only=True, data_only=True)
     parts: list[str] = []
+    total_chars = 0
+    truncated = False
     try:
         for ws in wb.worksheets:
-            parts.append(f"=== 工作表: {ws.title} ===")
+            if truncated:
+                break
+            header = f"=== 工作表: {ws.title} ==="
+            parts.append(header)
+            total_chars += len(header)
             for row in ws.iter_rows(values_only=True):
                 cells = ["" if v is None else str(v) for v in row]
                 if any(c.strip() for c in cells):
-                    parts.append(" | ".join(cells).rstrip(" |"))
-                if sum(len(x) for x in parts[-10:]) > max_chars * 2:
-                    parts.append("(行数过多，已截断)")
+                    line = " | ".join(cells).rstrip(" |")
+                    parts.append(line)
+                    total_chars += len(line) + 1
+                if total_chars > max_chars:
+                    parts.append("(内容过多，已截断)")
+                    truncated = True
                     break
     finally:
         wb.close()

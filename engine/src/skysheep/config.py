@@ -10,6 +10,7 @@ import copy
 import logging
 import os
 import re
+import threading
 import tomllib
 from pathlib import Path
 from typing import Literal
@@ -702,6 +703,8 @@ def load_config() -> SkySheepConfig:
     team = TeamConfig()
     adversarial = AdversarialConfig()
     routing = RoutingConfig()
+    relay = RelayConfig()
+    agent = AgentConfig()
     cron = CronConfig()
     websearch = WebSearchConfig()
     imagegen = ImageGenConfig()
@@ -719,17 +722,19 @@ def load_config() -> SkySheepConfig:
     network = NetworkConfig()
     raw = {}
     p = config_path()
-    if p.exists():
-        try:
-            with open(p, "rb") as f:
-                raw = tomllib.load(f)
-        except Exception as e:
-            raise ConfigError(f"failed to parse {p}: {e}") from e
-        # 先做一次性明文→加密迁移（对刚解析、还没解密的 raw 判断，配置已是
-        # 加密形态时零写盘），再就地解密 dpapi: 前缀的凭据值——值要送进
-        # Provider，解不开必须置空，绝不让密文本体被当成 Key 用
-        _migrate_plaintext_secrets(p, raw)
-        _decrypt_secret_values(raw, keep_on_failure=False)
+    with _CONFIG_LOCK:
+        if p.exists():
+            try:
+                with open(p, "rb") as f:
+                    raw = tomllib.load(f)
+            except Exception as e:
+                raise ConfigError(f"failed to parse {p}: {e}") from e
+            # 先做一次性明文→加密迁移（对刚解析、还没解密的 raw 判断，配置已是
+            # 加密形态时零写盘），再就地解密 dpapi: 前缀的凭据值——值要送进
+            # Provider，解不开必须置空，绝不让密文本体被当成 Key 用
+            _migrate_plaintext_secrets(p, raw)
+            _decrypt_secret_values(raw, keep_on_failure=False)
+    if raw:
         default = raw.get("default", default)
         # 手改配置越界/写成非数字时夹回合法区间（区间与下方 SkySheepConfig 的
         # Field 约束一致），别让启动炸在 pydantic 校验上——安全审查 M13
@@ -766,47 +771,46 @@ def load_config() -> SkySheepConfig:
         routing_raw = raw.get("routing")
         if isinstance(routing_raw, dict):
             routing = _build_section_model(RoutingConfig, routing_raw, "routing")
+        relay_raw = raw.get("relay")
+        if isinstance(relay_raw, dict):
+            relay = _build_section_model(RelayConfig, relay_raw, "relay")
+        agent_raw = raw.get("agent")
+        if isinstance(agent_raw, dict):
+            agent = _build_section_model(AgentConfig, agent_raw, "agent")
         cron_raw = raw.get("cron")
         if isinstance(cron_raw, dict):
             cron = _build_section_model(CronConfig, cron_raw, "cron")
-        for section_name, model_cls, cur in (
-            ("websearch", WebSearchConfig, websearch),
-            ("imagegen", ImageGenConfig, imagegen),
-            ("speech", SpeechConfig, speech),
-            ("server", ServerConfig, server),
-            ("memory_maintenance", MemoryMaintenanceConfig, memory_maintenance),
-            ("memory_map", MemoryMapConfig, memory_map),
-            ("retention", RetentionConfig, retention),
-            ("archive", ArchiveConfig, archive),
-            ("factory", FactoryConfig, factory),
-            ("shell", ShellConfig, shell),
-            ("search", SearchConfig, search),
-        ):
-            section = raw.get(section_name)
-            if isinstance(section, dict):
-                cur = _build_section_model(model_cls, section, section_name)
-            if section_name == "websearch":
-                websearch = cur
-            elif section_name == "imagegen":
-                imagegen = cur
-            elif section_name == "speech":
-                speech = cur
-            elif section_name == "memory_maintenance":
-                memory_maintenance = cur
-            elif section_name == "memory_map":
-                memory_map = cur
-            elif section_name == "retention":
-                retention = cur
-            elif section_name == "archive":
-                archive = cur
-            elif section_name == "factory":
-                factory = cur
-            elif section_name == "shell":
-                shell = cur
-            elif section_name == "search":
-                search = cur
-            else:
-                server = cur
+        secs = {
+            name: (
+                _build_section_model(model_cls, raw[name], name)
+                if isinstance(raw.get(name), dict)
+                else model_cls()
+            )
+            for name, model_cls in (
+                ("websearch", WebSearchConfig),
+                ("imagegen", ImageGenConfig),
+                ("speech", SpeechConfig),
+                ("server", ServerConfig),
+                ("memory_maintenance", MemoryMaintenanceConfig),
+                ("memory_map", MemoryMapConfig),
+                ("retention", RetentionConfig),
+                ("archive", ArchiveConfig),
+                ("factory", FactoryConfig),
+                ("shell", ShellConfig),
+                ("search", SearchConfig),
+            )
+        }
+        websearch = secs["websearch"]
+        imagegen = secs["imagegen"]
+        speech = secs["speech"]
+        server = secs["server"]
+        memory_maintenance = secs["memory_maintenance"]
+        memory_map = secs["memory_map"]
+        retention = secs["retention"]
+        archive = secs["archive"]
+        factory = secs["factory"]
+        shell = secs["shell"]
+        search = secs["search"]
         # [network] 单独读，不并进上面的 section 元组：那个循环靠链式
         # if/elif 逐项赋值、末尾 else 兜底给 server，追加成员容易落错变量。
         net_raw = raw.get("network")
@@ -883,7 +887,8 @@ def load_config() -> SkySheepConfig:
             team=team,
             adversarial=adversarial,
             routing=routing,
-            relay=raw.get("relay", {}),
+            relay=relay,
+            agent=agent,
             cron=cron,
             websearch=websearch,
             imagegen=imagegen,
@@ -953,64 +958,91 @@ def set_advanced_settings_in_config(
             raise ConfigError('备用模型格式应为「服务名:模型名」，如 "zhipu:glm-5.3"')
     if sandbox_level is not None and sandbox_level not in ("job", "restricted"):
         raise ConfigError("沙箱级别只能是 job（仅进程遏制）或 restricted（受限令牌）")
-    p, raw = _read_raw_config()
-    if max_iterations is not None:
-        raw["max_iterations"] = int(max_iterations)
-    if context_limit_tokens is not None:
-        raw["context_limit_tokens"] = int(context_limit_tokens)
-    if compaction_keep_recent is not None:
-        raw["compaction_keep_recent"] = int(compaction_keep_recent)
-    if compaction_trigger is not None:
-        raw["compaction_trigger"] = min(0.98, max(0.5, float(compaction_trigger)))
-    if compaction_auto is not None:
-        raw["compaction_auto"] = bool(compaction_auto)
-    if restrict_to_workdir is not None:
-        raw["restrict_to_workdir"] = bool(restrict_to_workdir)
-    if computer_control is not None:
-        raw["computer_control"] = bool(computer_control)
-    if browser_control is not None:
-        raw["browser_control"] = bool(browser_control)
-    if browser_ignore_cert is not None:
-        raw["browser_ignore_cert"] = bool(browser_ignore_cert)
-    if daily_token_budget is not None:
-        raw["daily_token_budget"] = max(0, int(daily_token_budget))
-    if turn_token_budget is not None:
-        raw["turn_token_budget"] = max(0, int(turn_token_budget))
-    if permission_timeout_s is not None:
-        raw["permission_timeout_s"] = max(0, min(3600, int(permission_timeout_s)))
-    if fallback_model is not None:
-        if fallback_model:
-            raw["fallback_model"] = fallback_model
+    with _CONFIG_LOCK:
+        p, raw = _read_raw_config()
+        if max_iterations is not None:
+            raw["max_iterations"] = int(max_iterations)
+        if context_limit_tokens is not None:
+            raw["context_limit_tokens"] = int(context_limit_tokens)
+        if compaction_keep_recent is not None:
+            raw["compaction_keep_recent"] = int(compaction_keep_recent)
+        if compaction_trigger is not None:
+            raw["compaction_trigger"] = min(0.98, max(0.5, float(compaction_trigger)))
+        if compaction_auto is not None:
+            raw["compaction_auto"] = bool(compaction_auto)
+        if restrict_to_workdir is not None:
+            raw["restrict_to_workdir"] = bool(restrict_to_workdir)
+        if computer_control is not None:
+            raw["computer_control"] = bool(computer_control)
+        if browser_control is not None:
+            raw["browser_control"] = bool(browser_control)
+        if browser_ignore_cert is not None:
+            raw["browser_ignore_cert"] = bool(browser_ignore_cert)
+        if daily_token_budget is not None:
+            raw["daily_token_budget"] = max(0, int(daily_token_budget))
+        if turn_token_budget is not None:
+            raw["turn_token_budget"] = max(0, int(turn_token_budget))
+        if permission_timeout_s is not None:
+            raw["permission_timeout_s"] = max(0, min(3600, int(permission_timeout_s)))
+        if fallback_model is not None:
+            if fallback_model:
+                raw["fallback_model"] = fallback_model
+            else:
+                raw.pop("fallback_model", None)
+        if memory_digest is not None:
+            raw["memory_digest"] = bool(memory_digest)
+        # [cron] / [shell] / [search] 段：照 [retention] 的姿态按需建段、空段删除，
+        # 不整体重写用户没碰的键
+        cron_sec = dict(raw.get("cron") or {})
+        shell_sec = dict(raw.get("shell") or {})
+        search_sec = dict(raw.get("search") or {})
+        if system_schedule is not None:
+            cron_sec["system_schedule"] = bool(system_schedule)
+        if job_containment is not None:
+            shell_sec["job_containment"] = bool(job_containment)
+        if sandbox_level is not None:
+            shell_sec["sandbox_level"] = str(sandbox_level)
+        if use_ripgrep is not None:
+            search_sec["use_ripgrep"] = bool(use_ripgrep)
+        if cron_sec:
+            raw["cron"] = cron_sec
         else:
-            raw.pop("fallback_model", None)
-    if memory_digest is not None:
-        raw["memory_digest"] = bool(memory_digest)
-    # [cron] / [shell] / [search] 段：照 [retention] 的姿态按需建段、空段删除，
-    # 不整体重写用户没碰的键
-    cron_sec = dict(raw.get("cron") or {})
-    shell_sec = dict(raw.get("shell") or {})
-    search_sec = dict(raw.get("search") or {})
-    if system_schedule is not None:
-        cron_sec["system_schedule"] = bool(system_schedule)
-    if job_containment is not None:
-        shell_sec["job_containment"] = bool(job_containment)
-    if sandbox_level is not None:
-        shell_sec["sandbox_level"] = str(sandbox_level)
-    if use_ripgrep is not None:
-        search_sec["use_ripgrep"] = bool(use_ripgrep)
-    if cron_sec:
-        raw["cron"] = cron_sec
-    else:
-        raw.pop("cron", None)
-    if shell_sec:
-        raw["shell"] = shell_sec
-    else:
-        raw.pop("shell", None)
-    if search_sec:
-        raw["search"] = search_sec
-    else:
-        raw.pop("search", None)
-    _write_raw_config(p, raw)
+            raw.pop("cron", None)
+        if shell_sec:
+            raw["shell"] = shell_sec
+        else:
+            raw.pop("shell", None)
+        if search_sec:
+            raw["search"] = search_sec
+        else:
+            raw.pop("search", None)
+        _write_raw_config(p, raw)
+
+
+def _update_section_fields(
+    section_name: str,
+    updates: dict[str, object],
+    *,
+    drop_if_empty: bool = True,
+    non_empty_keys: tuple[str, ...] | None = None,
+) -> None:
+    """在 _CONFIG_LOCK 下更新 config.toml 指定 section 的非 None 字段并原子写回。"""
+    with _CONFIG_LOCK:
+        p, raw = _read_raw_config()
+        section = dict(raw.get(section_name) or {})
+        for k, v in updates.items():
+            if v is not None:
+                section[k] = v
+        keep = (
+            any(section.get(k) for k in non_empty_keys)
+            if non_empty_keys is not None
+            else bool(section)
+        )
+        if keep or not drop_if_empty:
+            raw[section_name] = section
+        else:
+            raw.pop(section_name, None)
+        _write_raw_config(p, raw)
 
 
 def set_network_settings_in_config(
@@ -1048,19 +1080,11 @@ def set_network_settings_in_config(
                 build_ssl_context(ca_cert)  # 只校验可加载，返回的上下文丢弃
             except ValueError as e:
                 raise ConfigError(str(e)) from e
-    p, raw = _read_raw_config()
-    section = dict(raw.get("network") or {})
-    if proxy is not None:
-        section["proxy"] = proxy
-    if no_proxy is not None:
-        section["no_proxy"] = no_proxy
-    if ca_cert is not None:
-        section["ca_cert"] = ca_cert
-    if any(section.get(k) for k in ("proxy", "no_proxy", "ca_cert")):
-        raw["network"] = section
-    else:
-        raw.pop("network", None)
-    _write_raw_config(p, raw)
+    _update_section_fields(
+        "network",
+        {"proxy": proxy, "no_proxy": no_proxy, "ca_cert": ca_cert},
+        non_empty_keys=("proxy", "no_proxy", "ca_cert"),
+    )
 
 
 def set_memory_maintenance_in_config(
@@ -1074,16 +1098,15 @@ def set_memory_maintenance_in_config(
     """
     if interval_hours is not None and not 1 <= int(interval_hours) <= 8760:
         raise ConfigError("整理周期要在 1–8760 小时之间")
-    p, raw = _read_raw_config()
-    section = dict(raw.get("memory_maintenance") or {})
-    if global_enabled is not None:
-        section["global_enabled"] = bool(global_enabled)
-    if project_enabled is not None:
-        section["project_enabled"] = bool(project_enabled)
-    if interval_hours is not None:
-        section["interval_hours"] = int(interval_hours)
-    raw["memory_maintenance"] = section
-    _write_raw_config(p, raw)
+    _update_section_fields(
+        "memory_maintenance",
+        {
+            "global_enabled": None if global_enabled is None else bool(global_enabled),
+            "project_enabled": None if project_enabled is None else bool(project_enabled),
+            "interval_hours": None if interval_hours is None else int(interval_hours),
+        },
+        drop_if_empty=False,
+    )
 
 
 def set_memory_map_config(*, auto_digest: bool | None = None) -> None:
@@ -1091,12 +1114,11 @@ def set_memory_map_config(*, auto_digest: bool | None = None) -> None:
 
     记忆地图的「自动生成演化摘要」开关走这里，与其它设置项同一套读写路径。
     """
-    p, raw = _read_raw_config()
-    section = dict(raw.get("memory_map") or {})
-    if auto_digest is not None:
-        section["auto_digest"] = bool(auto_digest)
-    raw["memory_map"] = section
-    _write_raw_config(p, raw)
+    _update_section_fields(
+        "memory_map",
+        {"auto_digest": None if auto_digest is None else bool(auto_digest)},
+        drop_if_empty=False,
+    )
 
 
 def set_retention_in_config(
@@ -1119,19 +1141,14 @@ def set_retention_in_config(
             continue
         if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 3650:
             raise ConfigError(f"{name}的保留天数要在 0–3650 之间（0 = 关闭该类清理）")
-    p, raw = _read_raw_config()
-    section = dict(raw.get("retention") or {})
-    if screenshots_days is not None:
-        section["screenshots_days"] = int(screenshots_days)
-    if quarantine_days is not None:
-        section["quarantine_days"] = int(quarantine_days)
-    if reports_days is not None:
-        section["reports_days"] = int(reports_days)
-    if section:
-        raw["retention"] = section
-    else:
-        raw.pop("retention", None)
-    _write_raw_config(p, raw)
+    _update_section_fields(
+        "retention",
+        {
+            "screenshots_days": None if screenshots_days is None else int(screenshots_days),
+            "quarantine_days": None if quarantine_days is None else int(quarantine_days),
+            "reports_days": None if reports_days is None else int(reports_days),
+        },
+    )
 
 
 def set_usage_pricing_in_config(
@@ -1154,19 +1171,14 @@ def set_usage_pricing_in_config(
             continue
         if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
             raise ConfigError(f"{name}要是不小于 0 的数字（元 / 百万 tokens）")
-    p, raw = _read_raw_config()
-    section = dict(raw.get("usage_pricing") or {})
-    if price_in is not None:
-        section["price_in"] = round(float(price_in), 6)
-    if price_out is not None:
-        section["price_out"] = round(float(price_out), 6)
-    if price_cache is not None:
-        section["price_cache"] = round(float(price_cache), 6)
-    if section:
-        raw["usage_pricing"] = section
-    else:
-        raw.pop("usage_pricing", None)
-    _write_raw_config(p, raw)
+    _update_section_fields(
+        "usage_pricing",
+        {
+            "price_in": None if price_in is None else round(float(price_in), 6),
+            "price_out": None if price_out is None else round(float(price_out), 6),
+            "price_cache": None if price_cache is None else round(float(price_cache), 6),
+        },
+    )
 
 
 def set_archive_in_config(
@@ -1186,17 +1198,13 @@ def set_archive_in_config(
         or not 1 <= auto_after_days <= 3650
     ):
         raise ConfigError("自动归档的保留时长要在 1–3650 天之间")
-    p, raw = _read_raw_config()
-    section = dict(raw.get("archive") or {})
-    if auto_archive is not None:
-        section["auto_archive"] = bool(auto_archive)
-    if auto_after_days is not None:
-        section["auto_after_days"] = int(auto_after_days)
-    if section:
-        raw["archive"] = section
-    else:
-        raw.pop("archive", None)
-    _write_raw_config(p, raw)
+    _update_section_fields(
+        "archive",
+        {
+            "auto_archive": None if auto_archive is None else bool(auto_archive),
+            "auto_after_days": None if auto_after_days is None else int(auto_after_days),
+        },
+    )
 
 
 def set_factory_in_config(
@@ -1240,39 +1248,26 @@ def set_factory_in_config(
     city = None
     if weather_location is not None:
         city = " ".join(str(weather_location).split())[:80]
-    p, raw = _read_raw_config()
-    section = dict(raw.get("factory") or {})
-    if enabled is not None:
-        section["enabled"] = bool(enabled)
-    if demo is not None:
-        section["demo"] = bool(demo)
-    if ambient is not None:
-        section["ambient"] = bool(ambient)
-    if weather is not None:
-        section["weather"] = bool(weather)
-    if city is not None:
-        section["weather_location"] = city
-    if history_keep is not None:
-        section["history_keep"] = int(history_keep)
-    if history_days is not None:
-        section["history_days"] = int(history_days)
-    if max_packages is not None:
-        section["max_packages"] = int(max_packages)
-    if machine_limit is not None:
-        section["machine_limit"] = int(machine_limit)
-    if label_limit is not None:
-        section["label_limit"] = int(label_limit)
-    if run_timeout_minutes is not None:
-        section["run_timeout_minutes"] = int(run_timeout_minutes)
-    if max_parallel_runs is not None:
-        section["max_parallel_runs"] = int(max_parallel_runs)
-    if alert_after_failures is not None:
-        section["alert_after_failures"] = int(alert_after_failures)
-    if section:
-        raw["factory"] = section
-    else:
-        raw.pop("factory", None)
-    _write_raw_config(p, raw)
+    _update_section_fields(
+        "factory",
+        {
+            "enabled": None if enabled is None else bool(enabled),
+            "demo": None if demo is None else bool(demo),
+            "ambient": None if ambient is None else bool(ambient),
+            "weather": None if weather is None else bool(weather),
+            "weather_location": city,
+            "history_keep": None if history_keep is None else int(history_keep),
+            "history_days": None if history_days is None else int(history_days),
+            "max_packages": None if max_packages is None else int(max_packages),
+            "machine_limit": None if machine_limit is None else int(machine_limit),
+            "label_limit": None if label_limit is None else int(label_limit),
+            "run_timeout_minutes": None if run_timeout_minutes is None else int(run_timeout_minutes),
+            "max_parallel_runs": None if max_parallel_runs is None else int(max_parallel_runs),
+            "alert_after_failures": (
+                None if alert_after_failures is None else int(alert_after_failures)
+            ),
+        },
+    )
 
 
 def set_hooks_in_config(
@@ -1288,22 +1283,58 @@ def set_hooks_in_config(
     pre/post 每项形如 {"match": "write_file", "command": "python check.py",
     "timeout_s": 10, "enabled": true}；stop 项没有 match（任务完成事件不按工具过滤）。
     """
-    p, raw = _read_raw_config()
-    hooks = raw.get("hooks")
-    if not isinstance(hooks, dict):
-        hooks = {}
-    if pre is not None:
-        hooks["pre_tool_use"] = _clean_hook_items(pre)
-    if post is not None:
-        hooks["post_tool_use"] = _clean_hook_items(post)
-    if stop is not None:
-        hooks["stop"] = _clean_hook_items(stop, with_match=False)
-    # 三组都空时删掉整张表：留空表会让用户以为钩子还在生效
-    if not any(hooks.get(k) for k in ("pre_tool_use", "post_tool_use", "stop")):
-        raw.pop("hooks", None)
-    else:
-        raw["hooks"] = hooks
-    _write_raw_config(p, raw)
+    with _CONFIG_LOCK:
+        p, raw = _read_raw_config()
+        hooks = raw.get("hooks")
+        if not isinstance(hooks, dict):
+            hooks = {}
+        if pre is not None:
+            hooks["pre_tool_use"] = _clean_hook_items(pre)
+        if post is not None:
+            hooks["post_tool_use"] = _clean_hook_items(post)
+        if stop is not None:
+            hooks["stop"] = _clean_hook_items(stop, with_match=False)
+        # 三组都空时删掉整张表：留空表会让用户以为钩子还在生效
+        if not any(hooks.get(k) for k in ("pre_tool_use", "post_tool_use", "stop")):
+            raw.pop("hooks", None)
+        else:
+            raw["hooks"] = hooks
+        _write_raw_config(p, raw)
+
+
+def _set_mods_section_in_config(
+    section_key: str,
+    *,
+    enabled: bool | None = None,
+    enabled_mods: list[str] | None = None,
+) -> None:
+    """[mods] 与 [mods_claude] 共用的设置写入逻辑，避免两处重复校验与锁操作。"""
+    if enabled is not None and not isinstance(enabled, bool):
+        raise ConfigError("Mods 总开关只能是 true / false")
+    cleaned: list[str] | None = None
+    if enabled_mods is not None:
+        if not isinstance(enabled_mods, list):
+            raise ConfigError("启用 Mods 的名单必须是字符串数组")
+        cleaned = []
+        for i, item in enumerate(enabled_mods, start=1):
+            text = str(item or "").strip()
+            if not text:
+                raise ConfigError(f"启用 Mods 名单第 {i} 项是空的")
+            if text not in cleaned:
+                cleaned.append(text)
+    with _CONFIG_LOCK:
+        p, raw = _read_raw_config()
+        section = dict(raw.get(section_key) or {})
+        if enabled is not None:
+            section["enabled"] = enabled
+        if cleaned is not None:
+            section["enabled_mods"] = cleaned
+        # 两组全空删整表：总开关关着且没有任何启用项 = 用户已回到默认状态
+        if not section.get("enabled") and not section.get("enabled_mods"):
+            raw.pop(section_key, None)
+        else:
+            raw[section_key] = section
+        _write_raw_config(p, raw)
 
 
 def set_mods_in_config(
@@ -1318,31 +1349,7 @@ def set_mods_in_config(
     是 Mod id 字符串，去重保序；两组全空时删掉整张表——留空表会让用户以为
     配置还在生效（与 hooks 同一惯例）。坏条目中文报错，不静默清洗。
     """
-    if enabled is not None and not isinstance(enabled, bool):
-        raise ConfigError("Mods 总开关只能是 true / false")
-    cleaned: list[str] | None = None
-    if enabled_mods is not None:
-        if not isinstance(enabled_mods, list):
-            raise ConfigError("启用 Mods 的名单必须是字符串数组")
-        cleaned = []
-        for i, item in enumerate(enabled_mods, start=1):
-            text = str(item or "").strip()
-            if not text:
-                raise ConfigError(f"启用 Mods 名单第 {i} 项是空的")
-            if text not in cleaned:
-                cleaned.append(text)
-    p, raw = _read_raw_config()
-    section = dict(raw.get("mods") or {})
-    if enabled is not None:
-        section["enabled"] = enabled
-    if cleaned is not None:
-        section["enabled_mods"] = cleaned
-    # 两组全空删整表：总开关关着且没有任何启用项 = 用户已回到默认状态
-    if not section.get("enabled") and not section.get("enabled_mods"):
-        raw.pop("mods", None)
-    else:
-        raw["mods"] = section
-    _write_raw_config(p, raw)
+    _set_mods_section_in_config("mods", enabled=enabled, enabled_mods=enabled_mods)
 
 
 def set_mods_claude_in_config(
@@ -1354,30 +1361,7 @@ def set_mods_claude_in_config(
 
     与 set_mods_in_config 同姿态：每组全空时删整表，坏条目不静默清洗。
     """
-    if enabled is not None and not isinstance(enabled, bool):
-        raise ConfigError("Mods 总开关只能是 true / false")
-    cleaned: list[str] | None = None
-    if enabled_mods is not None:
-        if not isinstance(enabled_mods, list):
-            raise ConfigError("启用 Mods 的名单必须是字符串数组")
-        cleaned = []
-        for i, item in enumerate(enabled_mods, start=1):
-            text = str(item or "").strip()
-            if not text:
-                raise ConfigError(f"启用 Mods 名单第 {i} 项是空的")
-            if text not in cleaned:
-                cleaned.append(text)
-    p, raw = _read_raw_config()
-    section = dict(raw.get("mods_claude") or {})
-    if enabled is not None:
-        section["enabled"] = enabled
-    if cleaned is not None:
-        section["enabled_mods"] = cleaned
-    if not section.get("enabled") and not section.get("enabled_mods"):
-        raw.pop("mods_claude", None)
-    else:
-        raw["mods_claude"] = section
-    _write_raw_config(p, raw)
+    _set_mods_section_in_config("mods_claude", enabled=enabled, enabled_mods=enabled_mods)
 
 
 def _clean_hook_items(items: list, *, with_match: bool = True) -> list[dict]:
@@ -1423,14 +1407,15 @@ def set_subagent_settings_in_config(
         raise ConfigError("子代理迭代轮数要在 1–100 之间")
     if max_concurrent is not None and not 1 <= int(max_concurrent) <= 8:
         raise ConfigError("子代理并发上限要在 1–8 之间")
-    p, raw = _read_raw_config()
-    if enabled is not None:
-        raw["subagent_enabled"] = bool(enabled)
-    if max_iterations is not None:
-        raw["subagent_max_iterations"] = int(max_iterations)
-    if max_concurrent is not None:
-        raw["subagent_max_concurrent"] = int(max_concurrent)
-    _write_raw_config(p, raw)
+    with _CONFIG_LOCK:
+        p, raw = _read_raw_config()
+        if enabled is not None:
+            raw["subagent_enabled"] = bool(enabled)
+        if max_iterations is not None:
+            raw["subagent_max_iterations"] = int(max_iterations)
+        if max_concurrent is not None:
+            raw["subagent_max_concurrent"] = int(max_concurrent)
+        _write_raw_config(p, raw)
 
 
 def resolve_api_key(name: str, cfg: ProviderConfig) -> str | None:
@@ -1511,6 +1496,7 @@ def _encrypt_secret_values(raw: dict) -> None:
             section[key] = secure_store.encrypt_value(value)
 
 
+_CONFIG_LOCK = threading.RLock()
 # 模块级 run-once 语义：本次进程只在首次读到明文凭据时尝试一次迁移，
 # 成败都置位——写失败只记日志，下次启动（新进程）再试，避免每次读配置
 # 都重试写盘。测试可用 config._migration_attempted = False 复位。
@@ -1551,25 +1537,26 @@ def _read_raw_config() -> tuple[Path, dict]:
     ``dpapi:`` 前缀的加密凭据解密成明文后返回（调用方零改动）；解不开的
     值保留原样透传（见 _decrypt_secret_values），并做一次性明文→加密迁移。
     """
-    # 目录边界校验：配置写入只允许发生在 SkySheep 主目录内
-    # （防 SKYSHEEP_HOME 环境变量被指向任意位置后在此写文件）
-    home = skysheep_home().resolve()
-    p = config_path().resolve()
-    if p.parent != home:
-        raise ConfigError("config path escapes SkySheep home: " + str(p))
+    with _CONFIG_LOCK:
+        # 目录边界校验：配置写入只允许发生在 SkySheep 主目录内
+        # （防 SKYSHEEP_HOME 环境变量被指向任意位置后在此写文件）
+        home = skysheep_home().resolve()
+        p = config_path().resolve()
+        if p.parent != home:
+            raise ConfigError("config path escapes SkySheep home: " + str(p))
 
-    raw: dict = {}
-    if p.exists():
-        try:
-            with p.open("rb") as f:
-                raw = tomllib.load(f)
-        except Exception as e:
-            raise ConfigError(f"failed to parse {p}: {e}") from e
-        # 迁移必须先于解密：has_plain 要看「盘面上」还是不是明文，
-        # 解密后内存里全是明文，顺序反了每次首读都会重写一遍
-        _migrate_plaintext_secrets(p, raw)
-        _decrypt_secret_values(raw, keep_on_failure=True)
-    return p, raw
+        raw: dict = {}
+        if p.exists():
+            try:
+                with p.open("rb") as f:
+                    raw = tomllib.load(f)
+            except Exception as e:
+                raise ConfigError(f"failed to parse {p}: {e}") from e
+            # 迁移必须先于解密：has_plain 要看「盘面上」还是不是明文，
+            # 解密后内存里全是明文，顺序反了每次首读都会重写一遍
+            _migrate_plaintext_secrets(p, raw)
+            _decrypt_secret_values(raw, keep_on_failure=True)
+        return p, raw
 
 
 def _write_raw_config(p: Path, raw: dict) -> None:
@@ -1577,12 +1564,13 @@ def _write_raw_config(p: Path, raw: dict) -> None:
 
     from .textio import write_text_atomic
 
-    # 深拷贝后再加密落盘：不就地改调用方手里的 raw——update_config_section
-    # 会把 section 原样返回给后端，返回值里出现密文会打扰调用方
-    out = copy.deepcopy(raw)
-    _encrypt_secret_values(out)
-    # 原子写（安全审查 M13）：写一半被中断时旧配置仍然完整，不会留下截断的 TOML
-    write_text_atomic(p, tomli_w.dumps(out))
+    with _CONFIG_LOCK:
+        # 深拷贝后再加密落盘：不就地改调用方手里的 raw——update_config_section
+        # 会把 section 原样返回给后端，返回值里出现密文会打扰调用方
+        out = copy.deepcopy(raw)
+        _encrypt_secret_values(out)
+        # 原子写（安全审查 M13）：写一半被中断时旧配置仍然完整，不会留下截断的 TOML
+        write_text_atomic(p, tomli_w.dumps(out))
 
 
 def update_provider_in_config(
@@ -1608,64 +1596,71 @@ def update_provider_in_config(
     只更新传入的字段；api_key 传 None 表示保持不变。
     temperature 传空串表示"清除该设置"（回到不发送该参数）。
     """
-    p, raw = _read_raw_config()
+    with _CONFIG_LOCK:
+        p, raw = _read_raw_config()
 
-    providers = raw.setdefault("providers", {})
-    section = dict(providers.get(name) or {})
-    if kind is not None:
-        section["kind"] = kind
-    if base_url is not None:
-        section["base_url"] = base_url
-    if model is not None:
-        section["model"] = model
-    if api_key is not None:
-        section["api_key"] = api_key
-    if reasoning_effort is not None:
-        effort = str(reasoning_effort).strip().lower()
-        if effort not in REASONING_EFFORTS:
-            raise ConfigError("思考强度只支持 " + " / ".join(REASONING_EFFORTS) + ": " + effort)
-        section["reasoning_effort"] = effort
-    if supports_reasoning is not None:
-        section["supports_reasoning"] = bool(supports_reasoning)
-    if supports_vision is not None:
-        section["supports_vision"] = bool(supports_vision)
-    if context_limit is not None:
-        limit = int(context_limit)
-        if limit and not 4_000 <= limit <= 2_000_000:
-            raise ConfigError("上下文上限要在 4000–2000000 tokens 之间（0 = 用全局默认）")
-        section["context_limit"] = limit
-    if temperature is not None:
-        if isinstance(temperature, str) and not temperature.strip():
-            section.pop("temperature", None)  # 空 = 交回服务默认
-        else:
-            try:
-                temp = float(temperature)
-            except (TypeError, ValueError):
-                raise ConfigError("温度需要是 0–2 之间的数字（留空 = 用服务默认）") from None
-            if not 0.0 <= temp <= 2.0:
-                raise ConfigError("温度要在 0–2 之间（留空 = 用服务默认）")
-            section["temperature"] = temp
-    if price_in is not None:
-        section["price_in"] = max(0.0, float(price_in))
-    if price_out is not None:
-        section["price_out"] = max(0.0, float(price_out))
-    if price_cache is not None:
-        section["price_cache"] = max(0.0, float(price_cache))
-    if proxy is not None:
-        proxy = str(proxy).strip()
-        if proxy:
-            from urllib.parse import urlparse
+        providers = raw.setdefault("providers", {})
+        section = dict(providers.get(name) or {})
+        if kind is not None:
+            section["kind"] = kind
+        if base_url is not None:
+            section["base_url"] = base_url
+        if model is not None:
+            section["model"] = model
+        if api_key is not None:
+            section["api_key"] = api_key
+        if reasoning_effort is not None:
+            effort = str(reasoning_effort).strip().lower()
+            if effort not in REASONING_EFFORTS:
+                raise ConfigError("思考强度只支持 " + " / ".join(REASONING_EFFORTS) + ": " + effort)
+            section["reasoning_effort"] = effort
+        if supports_reasoning is not None:
+            section["supports_reasoning"] = bool(supports_reasoning)
+        if supports_vision is not None:
+            section["supports_vision"] = bool(supports_vision)
+        if context_limit is not None:
+            limit = int(context_limit)
+            if limit and not 4_000 <= limit <= 2_000_000:
+                raise ConfigError("上下文上限要在 4000–2000000 tokens 之间（0 = 用全局默认）")
+            section["context_limit"] = limit
+        if temperature is not None:
+            if isinstance(temperature, str) and not temperature.strip():
+                section.pop("temperature", None)  # 空 = 交回服务默认
+            else:
+                try:
+                    temp = float(temperature)
+                except (TypeError, ValueError):
+                    raise ConfigError("温度需要是 0–2 之间的数字（留空 = 用服务默认）") from None
+                if not 0.0 <= temp <= 2.0:
+                    raise ConfigError("温度要在 0–2 之间（留空 = 用服务默认）")
+                section["temperature"] = temp
+        if price_in is not None:
+            section["price_in"] = max(0.0, float(price_in))
+        if price_out is not None:
+            section["price_out"] = max(0.0, float(price_out))
+        if price_cache is not None:
+            section["price_cache"] = max(0.0, float(price_cache))
+        if proxy is not None:
+            proxy = str(proxy).strip()
+            if proxy:
+                from urllib.parse import urlparse
 
-            if urlparse(proxy).scheme not in ("http", "https", "socks5"):
-                raise ConfigError("代理地址需以 http:// 或 https:// 或 socks5:// 开头: " + proxy)
-        section["proxy"] = proxy
-    providers[name] = section
-    if set_default:
-        raw["default"] = name
-    if not section and not set_default:
-        raise ConfigError("no fields to save for provider: " + name)
+                parsed_proxy = urlparse(proxy)
+                if (
+                    parsed_proxy.scheme not in ("http", "https", "socks5", "socks5h")
+                    or not parsed_proxy.netloc
+                ):
+                    raise ConfigError(
+                        "代理地址需以 http://、https://、socks5:// 或 socks5h:// 开头并包含主机名: " + proxy
+                    )
+            section["proxy"] = proxy
+        providers[name] = section
+        if set_default:
+            raw["default"] = name
+        if not section and not set_default:
+            raise ConfigError("no fields to save for provider: " + name)
 
-    _write_raw_config(p, raw)
+        _write_raw_config(p, raw)
 
 
 PROVIDER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
@@ -1723,33 +1718,35 @@ def add_provider_to_config(
             others.append(m)
     enabled = [model] + others
 
-    p, raw = _read_raw_config()
-    providers = raw.setdefault("providers", {})
-    if name in providers:
-        raise ConfigError(f"服务「{name}」已存在，请在列表里直接编辑它")
+    with _CONFIG_LOCK:
+        p, raw = _read_raw_config()
+        providers = raw.setdefault("providers", {})
+        if name in providers:
+            raise ConfigError(f"服务「{name}」已存在，请在列表里直接编辑它")
 
-    section: dict = {"kind": kind, "model": model, "models": enabled}
-    if base_url:
-        section["base_url"] = base_url
-    if api_key:
-        section["api_key"] = api_key
-    providers[name] = section
-    if set_default:
-        raw["default"] = name
-    _write_raw_config(p, raw)
+        section: dict = {"kind": kind, "model": model, "models": enabled}
+        if base_url:
+            section["base_url"] = base_url
+        if api_key:
+            section["api_key"] = api_key
+        providers[name] = section
+        if set_default:
+            raw["default"] = name
+        _write_raw_config(p, raw)
 
 
 def disabled_providers_in_config() -> list[str]:
     """当前被隐藏（从列表里删掉）的服务名。"""
-    p = config_path()
-    if not p.exists():
-        return []
-    try:
-        with p.open("rb") as f:
-            raw = tomllib.load(f)
-    except Exception:  # noqa: BLE001
-        return []
-    return [str(n) for n in (raw.get("disabled_providers") or [])]
+    with _CONFIG_LOCK:
+        p = config_path()
+        if not p.exists():
+            return []
+        try:
+            with p.open("rb") as f:
+                raw = tomllib.load(f)
+        except Exception:  # noqa: BLE001
+            return []
+        return [str(n) for n in (raw.get("disabled_providers") or [])]
 
 
 def _drop_default_if_matches(raw: dict, name: str) -> None:
@@ -1770,15 +1767,16 @@ def disable_provider_in_config(name: str) -> None:
     与 remove_provider_from_config 的区别：这个对自定义服务也只进名单、
     不删 [providers.<name>] 段，重新启用后配置原样回来。
     """
-    if name in disabled_providers_in_config():
-        raise ConfigError(f"「{name}」已经停用了")
-    p, raw = _read_raw_config()
-    if name not in PRESETS and name not in (raw.get("providers") or {}):
-        raise ConfigError("模型服务不存在: " + name)
-    disabled = [str(n) for n in (raw.get("disabled_providers") or [])]
-    raw["disabled_providers"] = [*disabled, name]
-    _drop_default_if_matches(raw, name)
-    _write_raw_config(p, raw)
+    with _CONFIG_LOCK:
+        if name in disabled_providers_in_config():
+            raise ConfigError(f"「{name}」已经停用了")
+        p, raw = _read_raw_config()
+        if name not in PRESETS and name not in (raw.get("providers") or {}):
+            raise ConfigError("模型服务不存在: " + name)
+        disabled = [str(n) for n in (raw.get("disabled_providers") or [])]
+        raw["disabled_providers"] = [*disabled, name]
+        _drop_default_if_matches(raw, name)
+        _write_raw_config(p, raw)
 
 
 def set_provider_models_in_config(name: str, models: list[str]) -> None:
@@ -1788,16 +1786,17 @@ def set_provider_models_in_config(name: str, models: list[str]) -> None:
         # 空列表不能落盘：下面的不变量修复（当前模型被删时换到列表第一个）
         # 会取 [0] 踩空 IndexError。与设置页口径一致：至少保留一个启用的模型。
         raise ConfigError("至少保留一个启用的模型；先添加新的，再删除旧的")
-    p, raw = _read_raw_config()
-    providers = raw.setdefault("providers", {})
-    if name in PRESETS and name not in providers:
-        providers[name] = {}
-    section = providers.setdefault(name, {})
-    section["models"] = cleaned
-    # 保持「当前模型 ∈ 已启用列表」的不变量：当前模型被删时换到列表第一个
-    if section.get("model") and section["model"] not in cleaned:
-        section["model"] = cleaned[0]
-    _write_raw_config(p, raw)
+    with _CONFIG_LOCK:
+        p, raw = _read_raw_config()
+        providers = raw.setdefault("providers", {})
+        if name in PRESETS and name not in providers:
+            providers[name] = {}
+        section = providers.setdefault(name, {})
+        section["models"] = cleaned
+        # 保持「当前模型 ∈ 已启用列表」的不变量：当前模型被删时换到列表第一个
+        if section.get("model") and section["model"] not in cleaned:
+            section["model"] = cleaned[0]
+        _write_raw_config(p, raw)
 
 
 def remove_provider_from_config(name: str) -> None:
@@ -1807,23 +1806,24 @@ def remove_provider_from_config(name: str) -> None:
     内置服务：记入 config 的 disabled_providers 名单（预设每次启动都会合并回来，
     所以必须用名单屏蔽），可随时用 restore_provider_in_config 恢复。
     """
-    p, raw = _read_raw_config()
-    providers = raw.get("providers") or {}
-    disabled = [str(n) for n in (raw.get("disabled_providers") or [])]
+    with _CONFIG_LOCK:
+        p, raw = _read_raw_config()
+        providers = raw.get("providers") or {}
+        disabled = [str(n) for n in (raw.get("disabled_providers") or [])]
 
-    if name in PRESETS:
-        if name in disabled:
-            raise ConfigError(f"「{name}」已经被隐藏了")
-        raw["disabled_providers"] = [*disabled, name]
-    else:
-        if name not in providers:
-            raise ConfigError("模型服务不存在: " + name)
-        del providers[name]
-        if disabled:
-            raw["disabled_providers"] = [n for n in disabled if n != name]
+        if name in PRESETS:
+            if name in disabled:
+                raise ConfigError(f"「{name}」已经被隐藏了")
+            raw["disabled_providers"] = [*disabled, name]
+        else:
+            if name not in providers:
+                raise ConfigError("模型服务不存在: " + name)
+            del providers[name]
+            if disabled:
+                raw["disabled_providers"] = [n for n in disabled if n != name]
 
-    _drop_default_if_matches(raw, name)
-    _write_raw_config(p, raw)
+        _drop_default_if_matches(raw, name)
+        _write_raw_config(p, raw)
 
 
 def restore_provider_in_config(name: str) -> None:
@@ -1835,28 +1835,29 @@ def restore_provider_in_config(name: str) -> None:
     会覆盖升级后的预设，导致「恢复回来还是老模型」。
     自定义服务：仅移出停用名单，条目原样保留（set_provider_enabled 重新启用时走这里）。
     """
-    p, raw = _read_raw_config()
-    disabled = [str(n) for n in (raw.get("disabled_providers") or [])]
-    if name not in disabled:
-        raise ConfigError("该服务没有被隐藏: " + name)
-    remaining = [n for n in disabled if n != name]
-    if remaining:
-        raw["disabled_providers"] = remaining
-    else:
-        raw.pop("disabled_providers", None)
-    if name in PRESETS:
-        preset = PRESETS[name].model_dump()
-        section = {
-            k: preset[k]
-            for k in ("kind", "base_url", "env_key", "model")
-            if preset[k] is not None
-        }
-        old = (raw.get("providers") or {}).get(name) or {}
-        api_key = old.get("api_key") or preset["api_key"]
-        if api_key:
-            section["api_key"] = api_key
-        raw.setdefault("providers", {})[name] = section
-    _write_raw_config(p, raw)
+    with _CONFIG_LOCK:
+        p, raw = _read_raw_config()
+        disabled = [str(n) for n in (raw.get("disabled_providers") or [])]
+        if name not in disabled:
+            raise ConfigError("该服务没有被隐藏: " + name)
+        remaining = [n for n in disabled if n != name]
+        if remaining:
+            raw["disabled_providers"] = remaining
+        else:
+            raw.pop("disabled_providers", None)
+        if name in PRESETS:
+            preset = PRESETS[name].model_dump()
+            section = {
+                k: preset[k]
+                for k in ("kind", "base_url", "env_key", "model")
+                if preset[k] is not None
+            }
+            old = (raw.get("providers") or {}).get(name) or {}
+            api_key = old.get("api_key") or preset["api_key"]
+            if api_key:
+                section["api_key"] = api_key
+            raw.setdefault("providers", {})[name] = section
+        _write_raw_config(p, raw)
 
 
 CONFIG_TEMPLATE = """\
@@ -1951,21 +1952,22 @@ def update_config_section(section: str, updates: dict) -> dict:
 
     updates 里值为空串的键表示删除该字段（恢复默认）；返回写完的 section 内容。
     """
-    p, raw = _read_raw_config()
-    cur = dict(raw.get(section) or {})
-    for k, v in (updates or {}).items():
-        if v is None:
-            continue
-        if v == "":
-            cur.pop(k, None)
+    with _CONFIG_LOCK:
+        p, raw = _read_raw_config()
+        cur = dict(raw.get(section) or {})
+        for k, v in (updates or {}).items():
+            if v is None:
+                continue
+            if v == "":
+                cur.pop(k, None)
+            else:
+                cur[k] = v
+        if cur:
+            raw[section] = cur
         else:
-            cur[k] = v
-    if cur:
-        raw[section] = cur
-    else:
-        raw.pop(section, None)
-    _write_raw_config(p, raw)
-    return cur
+            raw.pop(section, None)
+        _write_raw_config(p, raw)
+        return cur
 
 
 _WEBSEARCH_AUTO_ORDER = ("zhipu", "bocha", "tavily")

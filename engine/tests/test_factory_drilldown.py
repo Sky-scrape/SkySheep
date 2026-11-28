@@ -121,7 +121,7 @@ def test_factory_list_presets_stale_response_and_pipeline_navigation(tmp_path):
         pytest.skip("Node unavailable")
     # 工厂已拆成四个分区（共享 window.FX）：按加载顺序拼接后从 FX 取内部函数
     source = "\n".join((STATIC / n).read_text(encoding="utf-8") for n in (
-        "app-factory.js", "app-factory-scene.js",
+        "app-factory.js", "app-factory-camera.js", "app-factory-scene.js",
         "app-factory-drawer.js", "app-factory-draw.js"))
     source += (
         "\nwindow.fx = { S: window.FX.S, dom: window.FX.dom,"

@@ -53,6 +53,8 @@ MUST_BE_LOCAL = (
     "factory.state", "factory.runs", "factory.live", "factory.weather", "factory.run_now",
     "factory.toggle", "factory.cancel", "factory.ack", "factory.grant_tools",
     "factory.line_add", "factory.save", "factory.run_mark",
+    "factory.workbench", "factory.project_toggle", "factory.cancel_all",
+    "factory.pipeline_start", "factory.pipeline_cancel",
     # 浏览器控制：改开关（含「忽略证书校验」这个降防护档位）与清除内置浏览器
     # profile 都是本机管理动作，同 archive 家族姿态仅本机
     "browser.save", "browser.clear",

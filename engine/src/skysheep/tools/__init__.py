@@ -113,7 +113,7 @@ _TOOL_SPECS: tuple[_ToolSpec, ...] = (
     _ToolSpec(IndexDocumentsTool),
     _ToolSpec(SearchDocumentsTool),
     _ToolSpec(MemoryWriteTool),
-    _ToolSpec(GenerateImageTool, recorder=True, imagegen=True),
+    _ToolSpec(GenerateImageTool, recorder=True, imagegen=True, network=True),
     # ── computer_control：电脑控制七件套（默认关，安全审查 M16）
     _ToolSpec(ScreenshotTool, gate="computer"),
     _ToolSpec(WindowListTool, gate="computer"),

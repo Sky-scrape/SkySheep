@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -179,6 +180,7 @@ class ClaudeLoadedMod:
         self.permissions: str = str(manifest.get("permissions") or "full")
         self.events: list[str] = list(manifest.get("events") or CORE_EVENTS)
         self._runtime: NodeRuntime | None = None
+        self._load_lock: asyncio.Lock = asyncio.Lock()
         self._state_cache: dict = {}
         self._state_loaded = False
         self.load_error: str = ""
@@ -245,18 +247,23 @@ class ClaudeLoadedMod:
             return True
         if self.load_error:
             return False
-        try:
-            entry_resolved = _validate_entry_path(self.dir, self.entry)
-            rt = NodeRuntime(
-                self.id, entry_resolved, mod_dir=self.dir, session_id=session_id,
-                host_handler=self._host_handler,
-            )
-            await rt.start()
-            self._runtime = rt
-            return True
-        except (ClaudeModError, NodeRuntimeError, OSError) as e:
-            self.load_error = str(e)
-            return False
+        async with self._load_lock:
+            if self._runtime is not None:
+                return True
+            if self.load_error:
+                return False
+            try:
+                entry_resolved = _validate_entry_path(self.dir, self.entry)
+                rt = NodeRuntime(
+                    self.id, entry_resolved, mod_dir=self.dir, session_id=session_id,
+                    host_handler=self._host_handler,
+                )
+                await rt.start()
+                self._runtime = rt
+                return True
+            except (ClaudeModError, NodeRuntimeError, OSError) as e:
+                self.load_error = str(e)
+                return False
 
     def _load_state(self) -> dict:
         if self._state_loaded:
@@ -292,7 +299,7 @@ class ClaudeLoadedMod:
         assert self._runtime is not None
         state = self._load_state()
         verdict, new_state, err = await self._runtime.call(event, payload, state, session_id=session_id)
-        if new_state and new_state != state:
+        if isinstance(new_state, dict) and new_state != state:
             self._state_cache = new_state
             self._save_state()
         return verdict, err

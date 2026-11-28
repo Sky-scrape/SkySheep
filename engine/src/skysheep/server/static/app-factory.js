@@ -16,11 +16,11 @@
   "use strict";
 
   // ---------- FX 命名空间 ----------
-  // 工厂拆成四个普通 script，加载顺序：本文件（状态 / 数据 / 面板 / 循环 / 事件）
-  // → app-factory-scene.js（世界布局建模）→ app-factory-drawer.js（抽屉与产线
-  // 操作）→ app-factory-draw.js（场景绘制）。共享状态、常量与跨层函数统一挂
-  // window.FX：先加载方在 IIFE 尾部导出，后加载方在顶部绑定活引用；先加载方
-  // 调后加载方的函数一律经 FX.xxx 运行时查表（见各「转发」区块）。
+  // 工厂拆成五个普通 script，加载顺序：本文件（状态 / 数据 / 面板 / 循环 / 事件）
+  // → app-factory-camera.js（相机 / 手势 / 热区）→ app-factory-scene.js（世界布局建模）
+  // → app-factory-drawer.js（抽屉与产线操作）→ app-factory-draw.js（场景绘制）。
+  // 共享状态、常量与跨层函数统一挂 window.FX：先加载方在 IIFE 尾部导出，
+  // 后加载方在顶部绑定活引用；先加载方调后加载方的函数一律经 FX.xxx 运行时查表。
   var FX = window.FX = window.FX || {};
 
   // ---------- 常量 ----------
@@ -169,13 +169,19 @@
     // 厂区今日统计（做成 / 返工 / 在跑）：只喂给场景，不当文字显示
     stats: {},
     trips: [],             // 出货卡车（装满一托盘放一辆，纯表现）
+    _worldSrc: null,
+    camFittedSig: "",
     runCache: new Map(),   // 抽屉里按需求回的行
     upcoming: [],          // 告示牌数据：近 30 分钟到点（含刚过点未启动）的产线，按 eta 升序
     noticeboardView: null,    // 告示牌离散状态（noticeboardState 的结果，绘制/标签/测试同源）
     noticeboard: null,     // 告示牌本帧几何（绘制层写，标签层与点击热区共用）
     cam: { x: 0, y: 0, zoom: 1, tx: 0, ty: 0, tz: 1 },
+    camDirty: false,
     fitZoom: 0.82,         // 全景取景的缩放：机台名只在比全景更近时出现
-    focusPid: null,        // 聚焦档：点厂区头「飞过去」看机台，Esc / 全景按钮回全景
+    workZoom: 0.82,        // 作业区取景的缩放：紧框调度厅与真实厂区
+    camMode: "panorama",   // work / panorama / focus / custom（无挂载探针默认 panorama）
+    viewMode: "board",     // board（默认全局调度看板） / scene（像素厂区挂机观战）
+    focusPid: null,        // 聚焦档：点厂区头 / 画布厂区「飞过去」看机台，Esc / 全景按钮回全景
     bufW: BUFFER_MIN_W, bufH: BUFFER_MIN_H,
     cssW: 960, cssH: 540,
     ticks: 0,
@@ -183,6 +189,7 @@
     hallBoost: 0,          // performance 时间戳：派工时转盘加速
     labelsOff: false,
     panelFolded: true,   // 目录默认折叠：工厂的主体是场景，目录按需展开
+    workbench: null,     // 本机工作台聚合快照（pending_permissions / teams / relays / inspect）
     drawer: null,
     selectedKey: null,
     // 处置台的「补预授权」：pending 是待确认的那一次（算好了还没写盘），
@@ -289,7 +296,31 @@
   }
 
   // ---------- 数据源 ----------
-  function activeState() { return S.demo || S.state; }
+  // 看板（board）永远优先展示真实项目与实时工作台（待审批/对话/团队/接力）；
+  // 只有「厂区场景」在没有真实产线时、或外部探针未注入 S.state 时才切到内存样板厂。
+  function isDemoMode() {
+    return !!(S.demo && !(S.viewMode === "board" && S.state));
+  }
+  function activeState() { return isDemoMode() ? S.demo : S.state; }
+  function activeWorkbench() { return (!isDemoMode() && S.workbench) || null; }
+  function applySavedFactoryPrefs(prefs) {
+    if (!prefs || typeof prefs !== "object") return;
+    if (!S.loaded) {
+      if (prefs.view === "board" || prefs.view === "scene") S.viewMode = prefs.view;
+      if (typeof prefs.folded === "boolean") S.panelFolded = prefs.folded;
+      if (prefs.cam === "panorama" || prefs.cam === "work") S.camMode = prefs.cam;
+    }
+  }
+  function persistFactoryPref(patch) {
+    if (typeof saveUiPrefs === "function") saveUiPrefs(patch);
+  }
+  function factoryApplyUiPrefs(prefs) {
+    applySavedFactoryPrefs(prefs);
+    if (S.mounted) {
+      if (dom.panel) dom.panel.classList.toggle("folded", S.panelFolded);
+      setViewMode(S.viewMode, false);
+    }
+  }
   // 上限按 [factory] 配置读（默认 6 台机台 / 40 个标签），越界按后端同口径夹取
   function machineCap() { return clamp(Math.round(Number(activeConfig().machine_limit) || 6), 1, 12); }
   function labelCap() { return clamp(Math.round(Number(activeConfig().label_limit) || MAX_LABELS), 10, 80); }
@@ -319,8 +350,12 @@
   function factoryMount() {
     if (S.mounted) return;
     S.mounted = true;
+    // 首进 UI 默认用「作业区」焦距并读取持久化偏好（无挂载探针仍按 panorama 口径）
+    if (!S.loaded && S.camMode === "panorama") S.camMode = "work";
+    if (window.__factoryPrefs) applySavedFactoryPrefs(window.__factoryPrefs);
     cacheDom();
     bindOnce();
+    syncViewMode();
     // 目录默认折叠（状态在 S.panelFolded，折叠按钮会把它翻过来）
     if (dom.panel) dom.panel.classList.toggle("folded", S.panelFolded);
     updateClock();
@@ -328,14 +363,16 @@
     // 「减少动态效果」：场景是静态快照，每分钟刷一次（设计 §4.5）
     if (!S.snapshotTimer) {
       S.snapshotTimer = setInterval(function () {
-        if (S.mounted && S.reduced) render();
+        if (S.mounted && S.reduced && S.viewMode === "scene") render();
       }, 60000);
     }
-    resizeScene(true);
+    if (S.viewMode === "scene") resizeScene(true);
     if (S.loaded) renderAll(); // 先用缓存画一帧，再向服务端要最新（打开时拉一次）
+    else if (S.viewMode === "board") renderBoard();
     else showPanelMessage("正在读取工厂数据…");
     factoryReload();
-    startLoop();
+    if (S.viewMode === "scene") startLoop();
+    else stopLoop();
     if (!S.liveTimer) S.liveTimer = setInterval(refreshLive, LIVE_POLL_MS);
     if (!S.weatherTimer) {
       S.weatherTimer = setInterval(function () { refreshWeather(false); }, WEATHER_POLL_MS);
@@ -347,7 +384,7 @@
     S.hover = null;
     S.hoverPointer = null;
     hideHoverTip();
-    if (S.raf) { cancelAnimationFrame(S.raf); S.raf = 0; }
+    stopLoop();
     if (S.clockTimer) { clearInterval(S.clockTimer); S.clockTimer = 0; }
     if (S.snapshotTimer) { clearInterval(S.snapshotTimer); S.snapshotTimer = 0; }
     if (S.liveTimer) { clearInterval(S.liveTimer); S.liveTimer = 0; }
@@ -368,10 +405,14 @@
     dom.clockTime = $("factory-clock-time");
     dom.clockDate = $("factory-clock-date");
     dom.toolbar = $("factory-toolbar");
+    dom.workBtn = $("factory-work-view");
     dom.centerBtn = $("factory-center");
     dom.labelToggle = $("factory-labels-toggle");
     dom.settingsBtn = $("factory-settings");
     dom.panelFold = $("factory-panel-fold");
+    dom.livePill = $("factory-live-pill");
+    dom.viewSwitch = $("factory-view-switch");
+    dom.board = $("factory-board");
     // 顶上只剩一盏灯：在跑几件、今天做成几件已经长在场景里，不再占计数条
     dom.attentionLamp = $("factory-attention");
     dom.attnNum = $("factory-attn-num");
@@ -404,12 +445,41 @@
 
     if (allBtn) allBtn.onclick = function () { openAllRunsDrawer(); };
     if (panelRunsBtn) panelRunsBtn.onclick = function () { openAllRunsDrawer(); };
+    if (dom.workBtn) {
+      dom.workBtn.onclick = function () {
+        fitWorkCamera(true);
+        updateLabels();
+        persistFactoryPref({ factory_cam: "work" });
+      };
+    }
     if (dom.centerBtn) {
       dom.centerBtn.onclick = function () {
         fitCamera(true);
         updateLabels();
+        persistFactoryPref({ factory_cam: "panorama" });
       };
     }
+    if (dom.viewSwitch) {
+      dom.viewSwitch.addEventListener("click", function (ev) {
+        var btn = ev.target && ev.target.closest("[data-fview]");
+        if (btn) setViewMode(btn.dataset.fview, true);
+      });
+    }
+    if (dom.livePill) {
+      dom.livePill.onclick = function () {
+        var st = activeState() || {};
+        var live = st.live || {};
+        var wb = activeWorkbench() || {};
+        var permN = (wb.pending_permissions || []).length;
+        var collabN = (wb.teams || []).length + (wb.relays || []).length;
+        var liveN = (Number(live.chat) || 0) + (Number(live.subagent) || 0);
+        var queued = Number((st.counters && st.counters.queued) || 0);
+        if (permN > 0 || liveN > 0 || collabN > 0) openLiveDrawer();
+        else if (queued > 0) openQueueDrawer();
+        else openAllRunsDrawer({ status: "running" });
+      };
+    }
+    bindCameraEvents();
     if (dom.labelToggle) {
       dom.labelToggle.onclick = function () {
         S.labelsOff = !S.labelsOff;
@@ -431,6 +501,7 @@
       dom.panelFold.onclick = function () {
         S.panelFolded = !S.panelFolded;
         dom.panel.classList.toggle("folded", S.panelFolded);
+        persistFactoryPref({ factory_panel_folded: S.panelFolded ? 1 : 0 });
         resizeScene(false);
       };
     }
@@ -438,8 +509,18 @@
       dom.panelBody.addEventListener("click", function (ev) {
         var clearEl = ev.target.closest("[data-clear-filter]");
         if (clearEl) { resetFilter(); return; }
+        var addEl = ev.target.closest("[data-add-line-pid]");
+        if (addEl) { openNewLineDrawer(Number(addEl.dataset.addLinePid)); return; }
         var head = ev.target.closest("[data-focus-project]");
-        if (head) { focusProject(Number(head.dataset.focusProject)); return; }
+        if (head) {
+          var fpid = Number(head.dataset.focusProject);
+          if (typeof window !== "undefined" && window.innerWidth <= 860) {
+            openProjectDrawer(fpid);
+          } else {
+            focusProject(fpid);
+          }
+          return;
+        }
         var lineEl = ev.target.closest("[data-line-key]");
         if (lineEl) { openLineDrawer(lineEl.dataset.lineKey, { focus: true }); }
       });
@@ -450,21 +531,16 @@
     // 需留意：厂区头顶的红灯是主入口，这盏灯是键盘 / 扫视的等价入口
     if (dom.attentionLamp) dom.attentionLamp.onclick = function () { openAttentionDrawer(); };
 
-    if (dom.canvas) {
-      dom.canvas.addEventListener("pointerdown", onPointerDown);
-      dom.canvas.addEventListener("pointermove", onPointerMove);
-      dom.canvas.addEventListener("pointerup", onPointerUp);
-      dom.canvas.addEventListener("pointercancel", onPointerLeave);
-      dom.canvas.addEventListener("pointerleave", onPointerLeave);
-      dom.canvas.addEventListener("wheel", onWheel, { passive: false });
-    }
-
     if (typeof ResizeObserver === "function" && dom.stage) {
       try {
-        new ResizeObserver(function () { resizeScene(false); }).observe(dom.stage);
+        new ResizeObserver(function () {
+          if (S.mounted && S.viewMode === "scene") resizeScene(false);
+        }).observe(dom.stage);
       } catch (e) { /* 老 WebView 没有 ResizeObserver：退回 window resize */ }
     }
-    window.addEventListener("resize", function () { if (S.mounted) resizeScene(false); });
+    window.addEventListener("resize", function () {
+      if (S.mounted && S.viewMode === "scene") resizeScene(false);
+    });
     document.addEventListener("visibilitychange", function () {
       if (!S.mounted) return;
       if (document.hidden) {
@@ -482,7 +558,7 @@
       S.lastTick = 0;
       renderAll();
       refreshLive();
-      refreshWeather(false);
+      if (S.viewMode === "scene") refreshWeather(false);
     });
     try {
       var mq = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -491,7 +567,7 @@
         S.reduced = e.matches;
         // 切到减少动态：在途出车立即撤场（位姿是时间函数，不清会继续跑）
         if (S.reduced) S.trips = [];
-        if (S.mounted) render();
+        if (S.mounted && S.viewMode === "scene") render();
       };
       if (mq.addEventListener) mq.addEventListener("change", onChange);
       else if (mq.addListener) mq.addListener(onChange);
@@ -504,6 +580,23 @@
     if (dom.clockDate) dom.clockDate.textContent = fmtDate(d);
     // 运行中的计时按本地时钟每秒推算（不轮询、不整块重绘面板）
     tickPanelTimers();
+    // 看板模式不跑 rAF：每隔 5 秒由时钟节拍同步一次统计与时间轴（正输搜索时只刷新泳道，不打断输入法）
+    if (S.mounted && S.viewMode === "board") {
+      var now = nowMs();
+      if (now - S.lastPanel > 5000) {
+        S.lastPanel = now;
+        refreshProjectStats(true);
+        renderCounters();
+        if (dom.board) {
+          var activeEl = typeof document !== "undefined" ? document.activeElement : null;
+          if (activeEl && activeEl.id === "fb-search") {
+            if (FX.renderBoardLanesOnly) FX.renderBoardLanesOnly();
+          } else if (!activeEl || !dom.board.contains(activeEl)) {
+            renderBoard();
+          }
+        }
+      }
+    }
   }
 
   function tickPanelTimers() {
@@ -523,6 +616,17 @@
       var txt = line.kind === "pipeline" ? "运行中" : "运行中 " + fmtDur(lineRunSeconds(line));
       if (el.textContent !== txt) el.textContent = txt;
     }
+    if (S.viewMode === "board" && dom.board) {
+      var bRows = dom.board.querySelectorAll("[data-board-timer]");
+      for (var bi = 0; bi < bRows.length; bi += 1) {
+        var bLine = byKey[bRows[bi].dataset.boardTimer];
+        if (!bLine || bLine.status !== "running") continue;
+        var step = runningStepText(bLine);
+        var bTxt = (bLine.kind === "pipeline" ? "运行中" : "已跑 " + fmtDur(lineRunSeconds(bLine))) +
+          (step ? " · " + step : "");
+        if (bRows[bi].textContent !== bTxt) bRows[bi].textContent = bTxt;
+      }
+    }
   }
 
   // ---------- 数据加载 ----------
@@ -539,9 +643,11 @@
     Promise.all([
       request("factory.state"),
       request("project.list").catch(function () { return null; }),
+      request("factory.workbench").catch(function () { return null; }),
     ]).then(function (pair) {
       S.loading = false;
       var st = pair[0] || {};
+      S.workbench = pair[2] || S.workbench;
       var order = ((pair[1] && pair[1].projects) || []).map(function (p) { return Number(p.id); });
       if (order.length && Array.isArray(st.projects)) {
         var rank = new Map();
@@ -574,16 +680,34 @@
   // 轻量实时快照：只刷新「对话在跑 / 子代理」与疑似卡住标记，不重建场景。
   // factory.state 会查项目、任务、7 天运行等多份数据，不适合十几秒轮询。
   function refreshLive() {
-    if (!S.mounted || S.demo || S.liveLoading || !S.state || document.hidden) return;
+    if (!S.mounted || isDemoMode() || S.liveLoading || !S.state || document.hidden) return;
     S.liveLoading = true;
-    request("factory.live").then(function (r) {
+    Promise.all([
+      request("factory.live"),
+      request("factory.workbench").catch(function () { return null; }),
+    ]).then(function (pair) {
+      var r = pair[0];
       if (!S.mounted || !S.state || !r) return;
       S.state.live = r.live || { chat: 0, subagent: 0, runs: [] };
+      if (pair[1]) S.workbench = pair[1];
       renderCounters();
-      // 抽屉正开着且用户没把焦点放进去：跟着刷新；有焦点时不动，避免抢操作
-      if (S.drawer && S.drawer.type === "live" && dom.drawer
-          && !dom.drawer.contains(document.activeElement)) {
+      if (S.viewMode === "board") {
+        var activeEl = typeof document !== "undefined" ? document.activeElement : null;
+        if (activeEl && activeEl.id === "fb-search") {
+          if (FX.renderBoardLanesOnly) FX.renderBoardLanesOnly();
+        } else if (!(dom.board && activeEl && dom.board.contains(activeEl))) {
+          renderBoard();
+        }
+      }
+      // 抽屉正开着且用户没把焦点或展开预览放在里面时才静默刷新
+      var holdDrawer = !!(dom.drawer && (dom.drawer.contains(document.activeElement)
+        || dom.drawer.querySelector("details[open]")));
+      if (S.drawer && S.drawer.type === "live" && !holdDrawer) {
         openLiveDrawer();
+      } else if (S.drawer && S.drawer.type === "dispatch" && !holdDrawer) {
+        openDispatchDrawer();
+      } else if (S.drawer && S.drawer.type === "project" && !holdDrawer) {
+        openProjectDrawer(S.drawer.pid);
       }
     }).catch(function () {
       /* 实时快照失败不打扰观战：下一轮再试 */
@@ -593,7 +717,7 @@
   }
 
   function refreshWeather(force) {
-    if (!S.mounted || S.demo || !S.state) return;
+    if (!S.mounted || isDemoMode() || !S.state) return;
     var cfg = S.state.config || {};
     if (cfg.weather !== true) {
       var hadWeather = !!S.weather;
@@ -602,9 +726,10 @@
       S.weather = null;
       S.lastWeatherAt = 0;
       renderWeatherChip();
-      if (hadWeather) render();
+      if (hadWeather && S.viewMode === "scene") render();
       return;
     }
+    if (S.viewMode !== "scene" && !force) return;
     if (S.weatherLoading && !force) return;
     if (!force && S.weather && nowMs() - S.lastWeatherAt < 5 * 60 * 1000) return;
     var seq = ++S.weatherSeq;
@@ -614,13 +739,13 @@
       if (!(S.state.config || {}).weather) {
         S.weather = null;
         renderWeatherChip();
-        render();
+        if (S.viewMode === "scene") render();
         return;
       }
       S.weather = r.weather || null;
       S.lastWeatherAt = nowMs();
       renderWeatherChip();
-      render();
+      if (S.viewMode === "scene") render();
     }).catch(function () {
       /* 天气失败不打扰观战：保留上一份快照，chip 会显示不可用 */
       if (S.mounted && seq === S.weatherSeq) renderWeatherChip();
@@ -632,7 +757,7 @@
   function renderWeatherChip() {
     if (!dom.weatherChip) return;
     var cfg = activeConfig();
-    var on = !!(cfg && cfg.weather === true) && !S.demo;
+    var on = S.viewMode === "scene" && !!(cfg && cfg.weather === true) && !isDemoMode();
     dom.weatherChip.classList.toggle("hidden", !on);
     if (!on) return;
     var w = S.weather;
@@ -667,7 +792,7 @@
     var cfg = st.config || {};
     applyNavVisibility(cfg.enabled !== false);
 
-    // 没有真实产线 → 播放样板厂（只在内存；config.demo 默认 true）
+    // 没有真实产线 → 准备样板厂供「厂区场景」挂机演示（只在内存；看板仍优先显示真实项目与活动）
     if (!hasRealLines(st) && cfg.demo !== false) {
       S.demo = buildDemoState(cfg);
     } else {
@@ -675,6 +800,7 @@
     }
 
     var src = activeState();
+    S._worldSrc = src;
     buildWorld(src);
     syncPackages(true);
     // quiet：重拉快照不补放货车——否则每次配置变化都会有一队车同时涌出来
@@ -683,13 +809,15 @@
     renderPanel();
     renderAttentionNotice(cfg);
     renderWeatherChip();
-    // 现实天气跟着配置走：开启后拉一次（后端 30 分钟缓存），关闭则清掉
-    refreshWeather(false);
-    // 世界重建后取景：聚焦档还在（厂区仍在）就保持推进后的镜头，否则回全景
-    if (S.world && (!prevSig || prevSig !== S.worldSig)) {
+    // 现实天气只在场景模式拉取：看板模式不发天气请求
+    if (S.viewMode === "scene") refreshWeather(false);
+    // 世界重建后取景：只在场景可见时重算相机（看板模式留到切回场景再适配）
+    if (S.viewMode === "scene" && S.world && (!prevSig || prevSig !== S.worldSig || S.camFittedSig !== S.worldSig)) {
       var still = S.focusPid && S.world.factories.some(function (f) { return f.id === S.focusPid; });
       if (still) applyFocusCamera(false);
+      else if (S.camMode === "work" && S.world.factories.length) fitWorkCamera(false);
       else fitCamera(false);
+      S.camFittedSig = S.worldSig;
     }
     renderAll();
   }
@@ -713,28 +841,75 @@
   // catch 误报成「读取工厂数据失败」。
   function pointAt(pts, t) { return FX.pointAt(pts, t); }
 
-  function focusProject(pid) {
-    if (!S.world) return;
-    var f = S.world.factories.find(function (x) { return x.id === pid; });
-    if (!f) return;
-    S.selectedKey = f.lines.length ? f.lines[0].key : null;
-    S.focusPid = pid;
-    applyFocusCamera(true);
-    renderPanel();   // 选中态要跟着变
+  // ---------- 相机与手势转发 ----------
+  // 相机矩阵、边界钳位、滚轮/拖拽与热区判定集中到 app-factory-camera.js（经 window.FX 运行时查表）。
+  function focusProject(pid) { return FX.focusProject(pid); }
+
+  // ---------- 视图模式（厂区场景 ↔ 调度看板） ----------
+  function syncViewMode() {
+    var boardOn = S.viewMode === "board";
+    if (dom.view) dom.view.classList.toggle("board-mode", boardOn);
+    if (dom.stage) dom.stage.classList.toggle("hidden", boardOn);
+    if (dom.board) dom.board.classList.toggle("hidden", !boardOn);
+    if (dom.viewSwitch) {
+      dom.viewSwitch.querySelectorAll("[data-fview]").forEach(function (b) {
+        var on = b.dataset.fview === S.viewMode;
+        b.classList.toggle("active", on);
+        b.setAttribute("aria-selected", on ? "true" : "false");
+      });
+    }
+  }
+
+  function setViewMode(mode, persist) {
+    S.viewMode = mode === "board" ? "board" : "scene";
+    syncViewMode();
+    if (persist) persistFactoryPref({ factory_view: S.viewMode });
+    var src = activeState();
+    if (src && S._worldSrc !== src) {
+      S._worldSrc = src;
+      buildWorld(src);
+      syncPackages(true);
+      refreshProjectStats(true);
+      S.camFittedSig = "";
+    }
+    renderCounters();
+    renderAttentionNotice(activeConfig());
+    renderWeatherChip();
+    if (S.viewMode === "board") {
+      stopLoop();
+      S.hover = null;
+      S.hoverPointer = null;
+      hideHoverTip();
+      clearLabels();
+      renderBoard();
+    } else {
+      resizeScene(false);
+      S.camFittedSig = S.worldSig;
+      renderPanel();
+      refreshWeather(false);
+      render();
+      startLoop();
+    }
   }
 
   // ---------- 计数器 / 面板 ----------
   function renderAll() {
     renderCounters();
     renderPanel();
-    render();
+    if (S.viewMode === "board") {
+      if (dom.board && typeof document !== "undefined" && document.activeElement && document.activeElement.id === "fb-search") {
+        if (FX.renderBoardLanesOnly) FX.renderBoardLanesOnly();
+      } else {
+        renderBoard();
+      }
+    } else render();
   }
 
-  /** 顶部只更新「需留意」这一盏灯。
-      其余读数（在跑几件 / 今天做成几件 / 谁在返工）一律不在这里显示——
-      它们已经在场景里有形状：带上的包裹、垛高的成品、地上堆的返工箱。 */
+  /** 顶部更新「需留意」灯与极简实时脉搏胶囊。
+      有实时活动（在跑 / 等待确认 / 对话或子代理 / 排队）时才出现，平时隐藏。 */
   function renderCounters() {
     var st = activeState();
+    var demoOn = isDemoMode();
     var c = (st && st.counters) || {};
     var n = Number(c.attention) || 0;
     if (dom.attnNum) dom.attnNum.textContent = String(n);
@@ -744,9 +919,34 @@
         ? (n + " 条产线需要看一眼（上次失败 / 有工具被拦 / 停工）；点击逐条列出")
         : "当前没有需要留意的产线";
     }
+    if (dom.livePill) {
+      var running = Number(c.running) || 0;
+      var queued = Number(c.queued) || 0;
+      var live = (st && st.live) || {};
+      var wb = activeWorkbench() || {};
+      var liveRuns = live.runs || [];
+      var liveN = (Number(live.chat) || 0) + (Number(live.subagent) || 0);
+      var permN = (wb.pending_permissions || []).length;
+      var collabN = (wb.teams || []).length + (wb.relays || []).length;
+      var waitingN = Math.max(permN, liveRuns.filter(function (r) {
+        return String((r && r.state) || "") === "waiting_permission";
+      }).length);
+      var parts = [];
+      if (running > 0) parts.push("在跑 " + running);
+      if (waitingN > 0) parts.push("等你确认 " + waitingN);
+      else if (liveN > 0) parts.push("对话 " + liveN);
+      if (collabN > 0) parts.push("协作 " + collabN);
+      if (queued > 0) parts.push("排队 " + queued);
+      dom.livePill.classList.toggle("hidden", !parts.length);
+      if (parts.length) {
+        dom.livePill.classList.toggle("has-wait", waitingN > 0 || queued > 0);
+        dom.livePill.innerHTML = '<span class="fh-pulse-dot" aria-hidden="true"></span><span>' +
+          escapeHtml(parts.join(" · ")) + "</span>";
+      }
+    }
     // 样板厂：整条顶栏挂「演示」，避免把演示当成真的
-    if (dom.hud) dom.hud.classList.toggle("demo", !!S.demo);
-    if (dom.demoBadge) dom.demoBadge.classList.toggle("hidden", !S.demo);
+    if (dom.hud) dom.hud.classList.toggle("demo", demoOn);
+    if (dom.demoBadge) dom.demoBadge.classList.toggle("hidden", !demoOn);
   }
 
   /** 对话轮 / 子代理「疑似卡住」：服务端快照的 stale 或本地按 updated_at 推算。
@@ -975,16 +1175,20 @@
           S.filter.mode = b.dataset.filter || "all";
           syncFilterChips();
           renderPanel();
+          if (S.viewMode === "board") renderBoard();
         };
       });
     }
     if (dom.search) {
       dom.search.addEventListener("input", function () {
         S.filter.q = dom.search.value;
+        var fbSearch = dom.board && dom.board.querySelector ? dom.board.querySelector("#fb-search") : null;
+        if (fbSearch && fbSearch.value !== S.filter.q) fbSearch.value = S.filter.q;
         if (S.filterTimer) clearTimeout(S.filterTimer);
         S.filterTimer = setTimeout(function () {
           S.filterTimer = 0;
           renderPanel();
+          if (S.viewMode === "board") renderBoard();
         }, FILTER_DEBOUNCE_MS);
       });
       dom.search.addEventListener("keydown", function (ev) {
@@ -993,7 +1197,10 @@
           ev.stopPropagation();
           dom.search.value = "";
           S.filter.q = "";
+          var fbSearch = dom.board && dom.board.querySelector ? dom.board.querySelector("#fb-search") : null;
+          if (fbSearch) fbSearch.value = "";
           renderPanel();
+          if (S.viewMode === "board") renderBoard();
         }
       });
     }
@@ -1013,8 +1220,11 @@
     S.filter.mode = "all";
     S.filter.q = "";
     if (dom.search) dom.search.value = "";
+    var fbSearch = dom.board && dom.board.querySelector ? dom.board.querySelector("#fb-search") : null;
+    if (fbSearch) fbSearch.value = "";
     syncFilterChips();
     renderPanel();
+    if (S.viewMode === "board") renderBoard();
   }
 
   /** 面板内方向键导航：在可见按钮之间移动焦点（不改选中态，选中由点击决定）。 */
@@ -1081,7 +1291,12 @@
         (p.root_ok === false ? "停工" : allLines.length + " 线" + (busy ? "  " + busy + " 在忙" : "")) +
         "</span></button></div>";
       if (!lines.length) {
-        html += '<div class="fx-empty">这个厂区还没有产线。在左侧「自动化」里给它建一条。</div>';
+        html += '<div class="fx-empty">这个厂区还没有产线。' +
+          (!filterActive() && p.id > 0 && p.root_ok !== false
+            ? '<button type="button" class="fx-add-line" data-add-line-pid="' + escapeHtml(String(p.id)) +
+              '">＋ 新建定时产线</button>'
+            : "在左侧「自动化」里给它建一条。") +
+          "</div>";
       } else {
         lines.forEach(function (l) {
           // 面板只说「在跑什么」：下次几点、成功率、token 都进抽屉，别在目录里堆数字
@@ -1144,11 +1359,20 @@
   function renderAttentionNotice(cfg) {
     var st = activeState();
     if (!st) return;
-    if (S.demo) {
-      // 建线入口不在工厂里：这里只说「去哪儿建」，不给表单
-      showNotice("<b>样板厂</b>：本机还没有真实产线，下面是演示数据——只在内存，不会真的运行。" +
-        "在左侧「自动化」里给项目建一条定时产线，这座园区就开始动起来。" +
-        '<div class="fx-notice-ops"><button class="btn-ghost" data-notice-dismiss="1">知道了</button></div>', false);
+    if (isDemoMode()) {
+      var realProjects = (S.state && S.state.projects) || [];
+      var hasCreatable = realProjects.some(function (p) {
+        return Number(p.id) > 0 && p.root_ok !== false;
+      });
+      var hasRealProjects = realProjects.length > 0;
+      showNotice("<b>样板厂</b>：本机还没有真实产线，下面展示演示园区（仅在内存，不会运行）。" +
+        (hasCreatable
+          ? "可直接给你的项目新建第一条定时产线，切入真实监控。"
+          : "先在侧栏添加真实项目目录，或建一条定时产线，园区就会动起来。") +
+        '<div class="fx-notice-ops">' +
+        (hasCreatable ? '<button class="btn-primary" data-notice-new-line="1">＋ 新建真实产线</button>' : "") +
+        (hasRealProjects ? '<button class="btn-ghost" data-notice-real="1">只看真实项目</button>' : "") +
+        '<button class="btn-ghost" data-notice-dismiss="1">知道了</button></div>', false);
       bindNoticeOps();
       return;
     }
@@ -1176,92 +1400,34 @@
     if (!dom.notice) return;
     var retry = dom.notice.querySelector("[data-notice-retry]");
     if (retry) retry.onclick = function () { hideNotice(); factoryReload(); };
+    var newLineBtn = dom.notice.querySelector("[data-notice-new-line]");
+    if (newLineBtn) newLineBtn.onclick = function () { openNewLineDrawer(); };
+    var realBtn = dom.notice.querySelector("[data-notice-real]");
+    if (realBtn) realBtn.onclick = function () { saveConfig({ demo: false }, realBtn); };
     var dismiss = dom.notice.querySelector("[data-notice-dismiss]");
     if (dismiss) dismiss.onclick = function () { hideNotice(); };
     var enable = dom.notice.querySelector("[data-notice-enable]");
     if (enable) enable.onclick = function () { saveConfig({ enabled: true }, enable); };
   }
 
-  // ---------- 相机 ----------
-  function fitCamera(animate) {
-    S.focusPid = null;   // 全景 = 退出聚焦档（Esc / 重开视图都回到这里）
-    var w = S.bufW, h = S.bufH;
-    // 全景 = 整个场景（台地 + 厂区坪 + 外圈设施）都进画幅，取景按 bounds。
-    // 以前只框厂区坪：外圈设施被画幅边裁掉，看着就是「局部放大」，而「全景」
-    // 按钮重算的又是同一个框，点下去等于没点。想看机台细节点厂区头进聚焦档，
-    // 全景这一档只负责「一眼看全」。
-    var b = (S.world && S.world.bounds)
-      || { minX: -80, maxX: 80, minY: -50, maxY: 50 };
-    var pad = 32;
-    var z = Math.min((w - pad * 2) / Math.max(1, b.maxX - b.minX),
-                     (h - pad * 2) / Math.max(1, b.maxY - b.minY));
-    z = Math.max(0.01, Math.min(z, 1.45));
-    S.fitZoom = z;
-    var cx = (b.minX + b.maxX) / 2;
-    // 天空占上方约 11% 封顶，余量上下均分且底部保 16px 安全边；机台名等
-    // 「比全景更近才出现」的阈值仍按 fitZoom（窗口尺寸变化不改变全景语义）。
-    var landOffset = Math.max(0, Math.min(h * 0.11,
-      (h - (b.maxY - b.minY) * z) / 2 - 16));
-    var cy = (b.minY + b.maxY) / 2 - landOffset / z;
-    if (animate) {
-      S.cam.tx = cx; S.cam.ty = cy; S.cam.tz = z;
-    } else {
-      S.cam.x = S.cam.tx = cx;
-      S.cam.y = S.cam.ty = cy;
-      S.cam.zoom = S.cam.tz = z;
-      render();
-    }
-    updateLabels();
-  }
-
-  /** 聚焦档：把镜头推进到某个厂区。
-
-      以前 focusProject 只改选中态、镜头被 fitCamera 锁死在全景，而机台名牌
-      的显示条件是「zoom ≥ 全景缩放 × 1.15」——条件恒为假，设计稿里最核心的
-      观战信息（机台名 / 在跑计时 / 正在执行哪个工具）一格都没画出来。
-      聚焦档同时解决「点厂区头却没反应」的观感问题：真的飞过去。 */
-  function applyFocusCamera(animate) {
-    var f = S.world && S.world.factories.find(function (x) { return x.id === S.focusPid; });
-    if (!f) { S.focusPid = null; fitCamera(animate); return; }
-    var w = f.halfW * 2 + 90;
-    var h = f.halfH * 2 + 150;
-    var pad = 24;
-    var z = Math.min((S.bufW - pad * 2) / Math.max(1, w),
-                     (S.bufH - pad * 2) / Math.max(1, h));
-    z = clamp(z, (S.fitZoom || 0.82) * 1.15, 2.6);
-    var cx = f.x;
-    var cy = f.y - 10 / z;   // 抬高一点，给机台上方的名牌留位置
-    if (animate) {
-      S.cam.tx = cx; S.cam.ty = cy; S.cam.tz = z;
-    } else {
-      S.cam.x = S.cam.tx = cx;
-      S.cam.y = S.cam.ty = cy;
-      S.cam.zoom = S.cam.tz = z;
-      render();
-    }
-    updateLabels();
-  }
-
-  // ---------- 场景尺寸 ----------
-  function resizeScene(initial) {
-    if (!dom.stage || !dom.canvas) return;
-    // DOM 标签使用逻辑 CSS 像素；rect 已含全局界面缩放，混用会让名牌整体漂移。
-    S.cssW = Math.max(1, dom.stage.clientWidth);
-    S.cssH = Math.max(1, dom.stage.clientHeight);
-    var bw = Math.max(BUFFER_MIN_W, Math.round(S.cssW / 2));
-    var bh = Math.max(BUFFER_MIN_H, Math.round(S.cssH / 2));
-    if (dom.canvas.width !== bw || dom.canvas.height !== bh) {
-      dom.canvas.width = bw;
-      dom.canvas.height = bh;
-    }
-    S.bufW = bw;
-    S.bufH = bh;
-    var ctx = dom.canvas.getContext("2d");
-    if (ctx) ctx.imageSmoothingEnabled = false;
-    // 聚焦档要跟着窗口尺寸重算取景，不能被一次 resize 拉回全景
-    if (S.focusPid) applyFocusCamera(false);
-    else fitCamera(false);
-  }
+  // ---------- 相机 / 交互转发 ----------
+  function syncCameraButtons() { return FX.syncCameraButtons(); }
+  function clampCameraTarget(tx, ty, zoom) { return FX.clampCameraTarget(tx, ty, zoom); }
+  function stepCamera(dt) { return FX.stepCamera(dt); }
+  function fitCamera(animate) { return FX.fitCamera(animate); }
+  function fitWorkCamera(animate) { return FX.fitWorkCamera(animate); }
+  function applyFocusCamera(animate) { return FX.applyFocusCamera(animate); }
+  function resizeScene(initial) { return FX.resizeScene(initial); }
+  function bindCameraEvents() { return FX.bindCameraEvents(); }
+  function onPointerDown(ev) { return FX.onPointerDown(ev); }
+  function onPointerMove(ev) { return FX.onPointerMove(ev); }
+  function onPointerUp(ev) { return FX.onPointerUp(ev); }
+  function onPointerLeave() { return FX.onPointerLeave(); }
+  function onWheel(ev) { return FX.onWheel(ev); }
+  function hoverTitle(hit) { return FX.hoverTitle(hit); }
+  function hideHoverTip() { return FX.hideHoverTip(); }
+  function refreshHover() { return FX.refreshHover(); }
+  function hitTest(x, y) { return FX.hitTest(x, y); }
 
   // ---------- 绘制层转发 ----------
   // 绘制实现搬入 app-factory-draw.js（经 window.FX 运行时查表）；
@@ -1883,7 +2049,7 @@
     return el;
   }
 
-  function placeLabel(el, wx, wy, text, cls, z, used) {
+  function placeLabel(el, wx, wy, text, cls, z, used, attrs) {
     var p = viewPoint(wx, wy);
     p.y -= Math.round((z || 0) * S.cam.zoom);
     var sx = p.x * (S.cssW / S.bufW);
@@ -1892,7 +2058,7 @@
     // 名牌互相压字比少显示几个更难看：按 hall → project → machine 的优先级让位
     if (used) {
       var w = Math.max(26, String(text).length * 11 + 12);
-      var h = cls === "machine" ? 18 : 21;
+      var h = cls && cls.indexOf("machine") >= 0 ? 18 : 21;
       var box = { l: sx - w / 2, r: sx + w / 2, t: sy - h, b: sy };
       for (var ui = 0; ui < used.length; ui += 1) {
         var o = used[ui];
@@ -1908,6 +2074,16 @@
     el.style.top = Math.round(sy) + "px";
     el.className = "fx-label " + (cls || "");
     if (el.textContent !== text) el.textContent = text;
+    if (el.dataset) {
+      delete el.dataset.focusPid;
+      delete el.dataset.openHall;
+      delete el.dataset.openLine;
+      if (attrs) {
+        if (attrs.focusPid != null) el.dataset.focusPid = String(attrs.focusPid);
+        if (attrs.openHall) el.dataset.openHall = "1";
+        if (attrs.openLine) el.dataset.openLine = String(attrs.openLine);
+      }
+    }
   }
 
   /** 直接按屏幕坐标摆一个标签（不走世界坐标换算，也不参与互压检测）。
@@ -1924,6 +2100,11 @@
     el.style.top = Math.round(sy) + "px";
     el.className = "fx-label " + (cls || "");
     if (el.textContent !== text) el.textContent = text;
+    if (el.dataset) {
+      delete el.dataset.focusPid;
+      delete el.dataset.openHall;
+      delete el.dataset.openLine;
+    }
   }
 
   function updateLabels() {
@@ -1939,25 +2120,27 @@
     var berth = S.berthLane;
     var hallText = "调度厅" + (running ? "  在转 " + running + " 件" : "");
     if (berth) hallText += "  额度 " + berth.used + "/" + berth.cap;
-    placeLabel(labelFor(i++), S.world.hall.x, S.world.hall.y, hallText, "hall", 76, used);
+    placeLabel(labelFor(i++), S.world.hall.x, S.world.hall.y, hallText, "hall", 94, used, { openHall: true });
     // 待发告示牌：只贴「待发」短标题（牌面太小，任务名 / 倒计时 / 条数一律不上面，
-    // 明细点击后进弹窗）。中文一律走标签池，牌面上不画字。
+    // 明细点击后进弹窗）。中文一律走标签池，牌面上不画字；顺便占位防后续厂区牌压上来。
     var board = S.noticeboard;
     if (board) {
       var bxs = S.cssW / S.bufW, bys = S.cssH / S.bufH;
-      placeLabelAt(labelFor(i++), board.titleX * bxs, board.titleY * bys,
-                   "待发", "board title");
+      var bsx = board.titleX * bxs, bsy = board.titleY * bys;
+      placeLabelAt(labelFor(i++), bsx, bsy, "待发", "board title");
+      used.push({ l: bsx - 24, r: bsx + 24, t: bsy - 20, b: bsy + 2 });
     }
     // 排队最久的一枚位于左下侧；从绘制层复用其实际位置，抖动时标签同步移动。
     var qLane = S.queuedLane;
     if (qLane && qLane.top && qLane.label) {
       var topTier = qLane.top.tier;
-      placeLabelAt(labelFor(i++), qLane.label.x * (S.cssW / S.bufW),
-                   qLane.label.y * (S.cssH / S.bufH),
+      var qsx = qLane.label.x * (S.cssW / S.bufW), qsy = qLane.label.y * (S.cssH / S.bufH);
+      placeLabelAt(labelFor(i++), qsx, qsy,
                    "等 " + fmtCountdown(qLane.top.waited),
                    topTier >= 2 ? "queued hot" : "queued");
+      used.push({ l: qsx - 28, r: qsx + 28, t: qsy - 20, b: qsy + 2 });
     }
-    // 厂区名牌优先
+    // 厂区名牌优先（可点击聚焦）
     var factories = S.world.factories.slice().sort(function (a, b) { return a.y - b.y; });
     factories.forEach(function (f) {
       if (i >= maxLabels - 8) return;
@@ -1967,10 +2150,9 @@
       var hidden = Math.max(0, allLines.length - machineCap());
       if (hidden) text += "  +" + hidden + " 线";
       if (f.root_ok === false) text += "  停工";
-      placeLabel(labelFor(i++), f.x, f.y, text, "project", f.labelZ || 44, used);
+      placeLabel(labelFor(i++), f.x, f.y, text, "project", f.labelZ || 44, used, { focusPid: f.id });
     });
-    // 机台名：聚焦到某个厂区时一定画（这是聚焦档存在的理由），全景下缩放
-    // 够大才画——默认取景里一排小字会糊在一起。
+    // 机台名：聚焦或放大后全量显示；远景仅显示「在跑 / 异常 / 5 分钟内待发」的活跃胶囊
     if (S.focusPid || S.cam.zoom >= (S.fitZoom || 0.82) * 1.15) {
       factories.forEach(function (f) {
         // 聚焦档只画这一个厂区的机台：别的厂区在屏幕外，画了也只是被裁掉
@@ -1995,7 +2177,39 @@
             var dn = rec.line.progress && Number(rec.line.progress.denied) || 0;
             if (dn) mlabel += "  被拦 " + dn;
           }
-          placeLabel(labelFor(i++), rec.x, rec.y, mlabel, "machine", 20 + (rec.index % 2) * 8, used);
+          placeLabel(labelFor(i++), rec.x, rec.y, mlabel, "machine", 20 + (rec.index % 2) * 8, used,
+                     { openLine: rec.key });
+        });
+      });
+    } else {
+      var nowSec = nowMs() / 1000;
+      factories.forEach(function (f) {
+        f.lines.forEach(function (rec) {
+          if (i >= maxLabels - 2) return;
+          var l = rec.line;
+          var cap = "";
+          var tone = "";
+          if (l.status === "running") {
+            var stepText = runningStepText(l);
+            var tText = l.kind === "cron" ? fmtClockShort(lineRunSeconds(l)) : "运行中";
+            cap = (l.name || rec.key) + " " + tText + (stepText ? " · " + stepText : "");
+          } else if (l.status === "failed" || l.last_status === "error"
+                     || (l.health && l.health.last_outcome === "failed")) {
+            cap = "⚠ " + (l.name || rec.key) + " · 失败";
+            tone = " bad";
+          } else if (l.health && l.health.last_outcome === "partial") {
+            cap = "⚠ " + (l.name || rec.key) + " · 被拦";
+            tone = " warn";
+          } else if (l.kind === "cron" && l.status === "idle" && l.next_run_at) {
+            var eta = Number(l.next_run_at) - nowSec;
+            if (eta > 0 && eta <= 300) {
+              cap = "⏱ " + (l.name || rec.key) + " · " + fmtCountdown(eta);
+              tone = " soon";
+            }
+          }
+          if (!cap) return;
+          placeLabel(labelFor(i++), rec.x, rec.y, cap, "machine live-cap" + tone,
+                     22 + (rec.index % 2) * 8, used, { openLine: rec.key });
         });
       });
     }
@@ -2015,10 +2229,14 @@
 
   // ---------- 主循环 ----------
   function startLoop() {
-    if (S.raf) return;
+    if (S.raf || S.viewMode !== "scene") return;
     S.lastFrame = 0;
     S.lastTick = 0;
     S.raf = requestAnimationFrame(loop);
+  }
+
+  function stopLoop() {
+    if (S.raf) { cancelAnimationFrame(S.raf); S.raf = 0; }
   }
 
   function visible() {
@@ -2027,33 +2245,25 @@
   }
 
   function loop(ts) {
-    if (!S.mounted) { S.raf = 0; return; }
+    if (!S.mounted || S.viewMode !== "scene") { S.raf = 0; return; }
     S.raf = requestAnimationFrame(loop);
     if (document.hidden || !visible()) return;
     var dt = Math.min(0.25, (ts - (S.lastFrame || ts)) / 1000);
     S.lastFrame = ts;
 
-    var k = 1 - Math.exp(-dt * CAM_EASE);
-    var moved = false;
-    var nx = S.cam.x + (S.cam.tx - S.cam.x) * k;
-    var ny = S.cam.y + (S.cam.ty - S.cam.y) * k;
-    var nz = S.cam.zoom + (S.cam.tz - S.cam.zoom) * k;
-    if (Math.abs(nx - S.cam.x) > 0.05 || Math.abs(ny - S.cam.y) > 0.05) moved = true;
-    if (Math.abs(nz - S.cam.zoom) > 0.001) moved = true;
-    S.cam.x = nx; S.cam.y = ny; S.cam.zoom = nz;
-    if (Math.abs(S.cam.tx - S.cam.x) < 0.1) S.cam.x = S.cam.tx;
-    if (Math.abs(S.cam.ty - S.cam.y) < 0.1) S.cam.y = S.cam.ty;
-    if (Math.abs(S.cam.tz - S.cam.zoom) < 0.002) S.cam.zoom = S.cam.tz;
+    var moved = stepCamera(dt);
+    var dirty = !!S.camDirty;
+    S.camDirty = false;
 
     if (S.reduced) {
-      if (moved) render();
+      if (moved || dirty) render();
       return;
     }
     if (!S.lastTick || ts - S.lastTick >= TICK_MS) {
       S.lastTick = ts;
       tick();
       render();
-    } else if (moved) {
+    } else if (moved || dirty) {
       render();
     }
   }
@@ -2088,73 +2298,13 @@
       refreshProjectStats(true);
       refreshPanelStates();
       renderCounters();
+      if (S.viewMode === "board" && dom.board && !dom.board.contains(document.activeElement)) {
+        renderBoard();
+      }
     }
   }
 
-  // ---------- 交互 ----------
-  var pointerPress = null;
-
-  function canvasPoint(ev) {
-    var rect = dom.canvas.getBoundingClientRect();
-    var bx = (ev.clientX - rect.left) * (S.bufW / Math.max(1, rect.width));
-    var by = (ev.clientY - rect.top) * (S.bufH / Math.max(1, rect.height));
-    return { x: bx, y: by, cx: ev.clientX - rect.left, cy: ev.clientY - rect.top };
-  }
-
-  function onPointerDown(ev) {
-    if (!dom.canvas || ev.button !== 0) return;
-    dom.canvas.setPointerCapture && dom.canvas.setPointerCapture(ev.pointerId);
-    pointerPress = { x: ev.clientX, y: ev.clientY, moved: 0, id: ev.pointerId };
-  }
-
-  /** 悬停的轻量中文提示：只说画面上真实存在的状态，不虚构关联。
-      机台 / 车 / 叉车 / 羊同时会画一圈高亮（见绘制层），提示文字写回 canvas.title。 */
-  function hoverTitle(hit) {
-    if (!hit) return "";
-    if (hit.type === "pkg") {
-      var run = findRun(hit.id);
-      return run ? ("包裹 #" + run.id + "  " + (run.name || "")) : "包裹";
-    }
-    if (hit.type === "line") {
-      var rec = findLine(hit.key);
-      if (!rec) return "";
-      // 机台铭牌：指定了模型就写清「谁在干」（空 = 跟随全局，不占字）
-      var modelText = rec.line.provider_name
-        ? "  · " + (rec.line.provider_label || rec.line.provider_name) +
-          (rec.line.model ? " / " + rec.line.model : "")
-        : "";
-      return "机台  " + (rec.line.name || rec.key) + "  " +
-        lineStateText(rec.line) + modelText;
-    }
-    if (hit.type === "upcoming") {
-      // 牌面只给短标题 + 状态灯，这里补一句「有多少项 / 点开看明细」，
-      // 空态也说清能点（点了会开弹窗报「暂无待发」）。
-      var boardView = S.noticeboardView;
-      var n = (boardView && boardView.count) || 0;
-      return n ? ("待发告示牌  " + n + " 项（点击查看）")
-               : "待发告示牌  暂无待发（点击查看）";
-    }
-    if (hit.type === "queued") {
-      var recQ = findLine(hit.key);
-      return recQ ? ("排队  " + (recQ.line.name || recQ.key)) : "";
-    }
-    if (hit.type === "truck") {
-      var trip = null;
-      S.trips.forEach(function (t) { if (String(t.pid) === String(hit.pid)) trip = t; });
-      var phase = trip ? FX.tripPose(trip, nowMs()).phase : "";
-      return "出货卡车  " + ({ approach: "正在进场", wait: "等候装货", dock: "停靠装货位",
-        load: "装货中", leave: "离场" }[phase] || "在场内");
-    }
-    if (hit.type === "forklift") return "叉车  托盘与车斗之间搬货";
-    if (hit.type === "sheep") {
-      var f = factoryById(hit.pid);
-      if (!f) return "";
-      var pose = FX.workerPose(f, nowMs(), S.reduced);
-      var what = { patrol: "巡检中", pause: "巡检停留", gate: "在门口值守", idle: "待命" }[pose.state] || "在场";
-      return "工头小羊  " + what + (S.reduced ? "" : "（点一下挥手）");
-    }
-    return "";
-  }
+  // ---------- 交互辅助（手势与热区已拆入 app-factory-camera.js） ----------
 
   function factoryById(pid) {
     if (!S.world) return null;
@@ -2162,153 +2312,6 @@
       if (String(S.world.factories[i].id) === String(pid)) return S.world.factories[i];
     }
     return null;
-  }
-
-  /** 悬停信息牌：跟随命中点的轻量 DOM（中文文案不入 canvas）。
-      文本与 hoverTitle 同源；隐藏 / 显示都不接收指针事件。 */
-  function showHoverTip(hit, ev) {
-    if (!dom.tip || !dom.stage) return;
-    var text = hoverTitle(hit);
-    if (!text) {
-      hideHoverTip();
-      return;
-    }
-    var rect = dom.stage.getBoundingClientRect();
-    var width = dom.stage.clientWidth || rect.width;
-    var height = dom.stage.clientHeight || rect.height;
-    var px = (ev.clientX - rect.left) * width / (rect.width || width);
-    var py = (ev.clientY - rect.top) * height / (rect.height || height);
-    var x = px + 14;
-    var y = py + 18;
-    dom.tip.textContent = text;
-    dom.tip.style.display = "";
-    // 贴边收拢：信息牌不探出舞台
-    var w = dom.tip.offsetWidth || 120;
-    var h = dom.tip.offsetHeight || 24;
-    if (x + w > width - 8) x = Math.max(4, px - w - 12);
-    if (y + h > height - 8) y = Math.max(4, py - h - 10);
-    dom.tip.style.left = Math.round(x) + "px";
-    dom.tip.style.top = Math.round(y) + "px";
-  }
-
-  function hideHoverTip() {
-    if (dom.tip && dom.tip.style.display !== "none") dom.tip.style.display = "none";
-  }
-
-  function onPointerMove(ev) {
-    if (!dom.canvas) return;
-    if (pointerPress) {
-      if (ev.pointerId !== pointerPress.id) return;
-      var dx = ev.clientX - pointerPress.x;
-      var dy = ev.clientY - pointerPress.y;
-      pointerPress.moved = Math.max(pointerPress.moved, Math.abs(dx) + Math.abs(dy));
-      return;
-    }
-    // 悬停提示 + 高亮：命中记录进 S.hover（绘制层每帧读取）；reduced 模式的
-    // 主循环不重绘，hover 变化时补一帧让高亮即时出现/消失。
-    S.hoverPointer = { clientX: ev.clientX, clientY: ev.clientY };
-    var pt = canvasPoint(ev);
-    var hit = hitTest(pt.x, pt.y);
-    var prev = S.hover;
-    S.hover = hit || null;
-    dom.canvas.title = hoverTitle(hit);
-    showHoverTip(hit, ev);
-    if (S.reduced && (S.hover || prev) &&
-        (String(S.hover && S.hover.type) !== String(prev && prev.type) ||
-         String(S.hover && S.hover.key) !== String(prev && prev.key) ||
-         String(S.hover && S.hover.pid) !== String(prev && prev.pid))) {
-      render();
-    }
-  }
-
-  function onPointerUp(ev) {
-    if (!dom.canvas || !pointerPress || ev.pointerId !== pointerPress.id) return;
-    var moved = Math.max(pointerPress.moved,
-      Math.abs(ev.clientX - pointerPress.x) + Math.abs(ev.clientY - pointerPress.y));
-    pointerPress = null;
-    if (moved > 5) return;
-    var pt = canvasPoint(ev);
-    var hit = hitTest(pt.x, pt.y);
-    if (hit && hit.type === "pkg") {
-      openRunDrawer(hit.id);
-      return;
-    }
-    if (hit && hit.type === "line") {
-      openLineDrawer(hit.key, { focus: true });
-      return;
-    }
-    // 点告示牌 = 打开待发信息弹窗（空态也开，只报「暂无待发」）：牌面太小放不下
-    // 明细，明细在居中只读弹窗里看，点其中一条才开原产线抽屉。全程不派工——
-    // 还没到点的那一轮不该因为一次误触就提前跑起来。
-    if (hit && hit.type === "upcoming") {
-      openUpcomingDialog();
-      return;
-    }
-    // 点排队包裹 = 看这条产线为什么卡着（抽屉里有状态与排期），同样不派工：
-    // 它已经在等了，再派一次只会被后端按 already_running 挡回来。
-    if (hit && hit.type === "queued" && hit.key) {
-      openLineDrawer(hit.key, { focus: true });
-      return;
-    }
-    // 点工头小羊：短挥手一下（纯表现；减少动态效果时不挥手）
-    if (hit && hit.type === "sheep" && !S.reduced) {
-      var f = factoryById(hit.pid);
-      if (f) {
-        f.waveUntil = nowMs() + WAVE_MS;
-        render();
-      }
-    }
-  }
-
-  function refreshHover() {
-    if (!S.hoverPointer || !dom.canvas) return;
-    var pt = canvasPoint(S.hoverPointer);
-    S.hover = hitTest(pt.x, pt.y) || null;
-    dom.canvas.title = hoverTitle(S.hover);
-    showHoverTip(S.hover, S.hoverPointer);
-  }
-
-  function onPointerLeave() {
-    var hadHover = !!S.hover;
-    S.hover = null;
-    S.hoverPointer = null;
-    hideHoverTip();
-    if (dom.canvas) dom.canvas.title = "";
-    pointerPress = null;
-    if (hadHover && S.reduced) render();
-  }
-
-  function onWheel(ev) {
-    ev.preventDefault();
-    // 场景保持固定全景；滚轮不改变比例，也不带动页面滚动。
-  }
-
-  function hitTest(x, y) {
-    // 包裹（小目标）与告示牌优先：在跑的、排队的、牌面与动态对象（车 / 叉车 / 羊）
-    // 都是小目标，一起判——它们必须压过脚下的机台热区
-    for (var i = S.hits.length - 1; i >= 0; i -= 1) {
-      var h = S.hits[i];
-      // 告示牌给的是矩形（整块板面比一枚包裹大得多，圆热区在四角会漏点）
-      if (h.rw != null) {
-        if (h.type === "upcoming" && Math.abs(x - h.x) <= h.rw
-            && Math.abs(y - h.y) <= h.rh) return h;
-        continue;
-      }
-      if ((h.type === "pkg" || h.type === "upcoming" || h.type === "queued"
-           || h.type === "sheep" || h.type === "truck" || h.type === "forklift")
-          && Math.hypot(x - h.x, y - h.y) <= h.r) return h;
-    }
-    if (!S.world) return null;
-    var best = null;
-    S.world.lines.forEach(function (rec) {
-      if (!rec.drawn) return;
-      var p = viewPoint(rec.x, rec.y);
-      var r = Math.max(8, 14 * S.cam.zoom);
-      if (Math.abs(x - p.x) <= r && y >= p.y - r * 1.6 && y <= p.y + r) {
-        best = { type: "line", key: rec.key };
-      }
-    });
-    return best;
   }
 
   // ---------- 抽屉转发 ----------
@@ -2321,6 +2324,10 @@
   function openLiveDrawer() { FX.openLiveDrawer(); }
   function openQueueDrawer() { FX.openQueueDrawer(); }
   function openAttentionDrawer() { FX.openAttentionDrawer(); }
+  function openDispatchDrawer() { FX.openDispatchDrawer(); }
+  function openProjectDrawer(pid) { if (FX.openProjectDrawer) FX.openProjectDrawer(pid); }
+  function openReworkDrawer(pid) { FX.openReworkDrawer(pid); }
+  function renderBoard() { FX.renderBoard(); }
   function openNewLineDrawer(presetProject) { FX.openNewLineDrawer(presetProject); }
   function openSettingsDrawer() { FX.openSettingsDrawer(); }
   function saveConfig(patch, btn, msgEl) { FX.saveConfig(patch, btn, msgEl); }
@@ -2342,7 +2349,7 @@
 
   function factoryOnEvent(data) {
     if (!data || data.kind !== "factory_run" || !data.run) return;
-    if (S.demo) return; // 样板厂不掺真实事件；真有真实产线时会走下一次 reload
+    if (isDemoMode()) return; // 样板厂不掺真实事件；看板模式会直接更新真实数据
     if (!S.state) return;
     // 工序进度：只更新「在跑什么」，不动运行行与计数（开始/结束才有那两件事）
     if (data.phase === "progress") { applyRunProgress(data.run); return; }
@@ -2474,7 +2481,13 @@
         && Number(S.drawer.id) === Number(run.id)) {
       openRunDrawer(run.id);
     }
-    render();
+    if (S.viewMode === "board") {
+      if (dom.board && typeof document !== "undefined" && document.activeElement && document.activeElement.id === "fb-search") {
+        if (FX.renderBoardLanesOnly) FX.renderBoardLanesOnly();
+      } else {
+        renderBoard();
+      }
+    } else render();
   }
 
   function statusToLast(s) {
@@ -2781,7 +2794,7 @@
 
   // ---------- 公共接口（暴露给 app.js） ----------
   function factoryRepaint() {
-    if (!S.mounted) return;
+    if (!S.mounted || S.viewMode !== "scene") return;
     S.lastTick = 0;
     render();
   }
@@ -2803,16 +2816,26 @@
   FX.TRIP_PHASES = TRIP_PHASES; FX.TRIP_MAX = TRIP_MAX;
   FX.WAVE_MS = WAVE_MS;
   FX.spawnTrip = spawnTrip; FX.updateTrips = updateTrips;
+  FX.CAM_EASE = CAM_EASE; FX.BUFFER_MIN_W = BUFFER_MIN_W; FX.BUFFER_MIN_H = BUFFER_MIN_H;
   FX.TILE_W = TILE_W; FX.TILE_H = TILE_H;
   FX.RUN_STATUS = RUN_STATUS; FX.RUN_OUTCOME = RUN_OUTCOME;
   FX.ERROR_KIND = ERROR_KIND; FX.TRIGGER_TEXT = TRIGGER_TEXT;
   FX.LIVE_STATE = LIVE_STATE; FX.NODE_KIND = NODE_KIND;
-  FX.activeConfig = activeConfig; FX.activeState = activeState;
+  FX.activeConfig = activeConfig; FX.activeState = activeState; FX.activeWorkbench = activeWorkbench;
+  FX.isDemoMode = isDemoMode; FX.stopLoop = stopLoop; FX.startLoop = startLoop;
+  FX.renderCounters = renderCounters; FX.refreshLive = refreshLive;
   FX.hashKey = hashKey; FX.lineStall = lineStall; FX.clamp = clamp; FX.ringPts = ringPts;
-  // 场景构建层与抽屉层的绑定源
+  // 场景构建层、相机层与抽屉层的绑定源
   FX.nowMs = nowMs; FX.factoryReload = factoryReload;
-  FX.findLine = findLine; FX.findRun = findRun; FX.fitCamera = fitCamera;
+  FX.findLine = findLine; FX.findRun = findRun; FX.setViewMode = setViewMode;
   FX.fmtDur = fmtDur; FX.fmtTs = fmtTs; FX.freshProgress = freshProgress;
+  FX.lineRunSeconds = lineRunSeconds; FX.runningStepText = runningStepText;
+  FX.fmtClockShort = fmtClockShort; FX.lineDotClass = lineDotClass;
+  FX.lineStateClass = lineStateClass; FX.teamLineText = teamLineText;
+  FX.filterProjects = filterProjects; FX.filterActive = filterActive;
+  FX.syncFilterChips = syncFilterChips; FX.resetFilter = resetFilter;
+  FX.factoryById = factoryById; FX.statFor = statFor;
+  FX.allRuns = allRuns; FX.allProjects = allProjects;
   FX.hasRealLines = hasRealLines; FX.lineStateText = lineStateText; FX.liveStale = liveStale;
   FX.refreshPanelStates = refreshPanelStates; FX.refreshWeather = refreshWeather;
   FX.renderAll = renderAll; FX.renderAttentionNotice = renderAttentionNotice;
@@ -2835,11 +2858,7 @@
   FX.demoReserved = demoReserved; FX.startDemoRun = startDemoRun;
   FX.refreshFactoryMood = refreshFactoryMood;
   FX.updateLabels = updateLabels;
-  // 测试探针（test_factory_scene_models / test_factory_panel_logic）经 FX 取内部函数
-  FX.resizeScene = resizeScene; FX.fitCamera = fitCamera;
-  FX.onPointerDown = onPointerDown; FX.onPointerMove = onPointerMove;
-  FX.onPointerUp = onPointerUp; FX.onPointerLeave = onPointerLeave; FX.onWheel = onWheel;
-  FX.refreshHover = refreshHover;
+  // 测试探针（test_factory_panel_logic）经 FX 取内部纯函数；相机与指针接口由 app-factory-camera.js 挂 FX
   FX.filterProjects = filterProjects; FX.matchFilterMode = matchFilterMode;
   FX.filterActive = filterActive; FX.fmtTokens = fmtTokens; FX.lineKeyFor = lineKeyFor;
   FX.teamLineText = teamLineText;
@@ -2851,4 +2870,5 @@
   window.factoryOnEvent = factoryOnEvent;
   window.factoryRepaint = factoryRepaint;
   window.factoryOnAutomationChanged = factoryOnAutomationChanged;
+  window.factoryApplyUiPrefs = factoryApplyUiPrefs;
 })();

@@ -207,9 +207,18 @@ class IsolatedGate(PermissionGate):
         # 隔离工作区覆盖不了它（落点固定在 ~/.skysheep，不在 worktree 内）。
         # 命中后落父类 authorize → 下方 resolve(DENY)，fail-closed。
         engine_home_write = self._write_hits_engine_home(tool, input_dict)
-        if tool.safety == Safety.READONLY and not engine_home_write:
+        extra_req = self._extra_confirm_required(tool, input_dict)
+        force_pending = bool(kwargs.get("force_pending", False))
+        if (
+            tool.safety == Safety.READONLY
+            and not engine_home_write
+            and not extra_req
+            and not force_pending
+        ):
             return None
-        if tool.safety == Safety.WRITE and self._write_target_inside_workdir(tool, input_dict):
+        if self._isolated_write_allowed(
+            tool, input_dict, force_pending=force_pending
+        ):
             return None
         pending = await super().authorize(tool, input_dict, **kwargs)
         if pending is not None:
@@ -1015,20 +1024,22 @@ class TaskManager:
             self._maybe_write_report(rec, result)
             return result, agent
         except asyncio.CancelledError as ce:
+            # run_subagent 收割的取消前已流出正文（M15，挂在取消异常上带出）：
+            # 先同步落进任务记录并落盘——避免下面 await _record_usage 被二次取消时
+            # 把已流出的 partial_result 丢掉。
+            partial = getattr(ce, "partial_result", "")
+            if partial:
+                rec.result = "（任务已取消，以下为取消前已流出的部分内容）\n\n" + partial
+                self._maybe_write_report(rec, rec.result)
             # 被取消：已消耗的 token 也要入账，然后原样上抛
             if agent is not None:
                 rec.tokens_in = agent.total_in_tokens
                 rec.tokens_out = agent.total_out_tokens
                 rec.tokens_cached = agent.total_cached_tokens
-                await self._record_usage(rec)
-            # run_subagent 收割的取消前已流出正文（M15，挂在取消异常上带出）：
-            # 写进任务记录并照常走 _maybe_write_report 落盘——用户已经看到的
-            # 不凭空消失（与圆桌/团队的取消回收同语义）。状态仍由上层取消
-            # 收尾统一标 cancelled，这里不吞取消、原样上抛。
-            partial = getattr(ce, "partial_result", "")
-            if partial:
-                rec.result = "（任务已取消，以下为取消前已流出的部分内容）\n\n" + partial
-                self._maybe_write_report(rec, rec.result)
+                try:
+                    await asyncio.shield(self._record_usage(rec))
+                except asyncio.CancelledError:
+                    pass
             raise
 
     def _maybe_write_report(self, rec: TaskRecord, result: str) -> None:

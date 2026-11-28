@@ -14,13 +14,25 @@
   var RUN_STATUS = FX.RUN_STATUS, RUN_OUTCOME = FX.RUN_OUTCOME,
       ERROR_KIND = FX.ERROR_KIND, TRIGGER_TEXT = FX.TRIGGER_TEXT,
       LIVE_STATE = FX.LIVE_STATE, NODE_KIND = FX.NODE_KIND;
-  var activeState = FX.activeState, applyNavVisibility = FX.applyNavVisibility,
+  var activeState = FX.activeState, activeWorkbench = FX.activeWorkbench,
+      isDemoMode = FX.isDemoMode || function () { return !!S.demo; },
+      applyNavVisibility = FX.applyNavVisibility,
+      applyFocusCamera = FX.applyFocusCamera, fitWorkCamera = FX.fitWorkCamera,
+      focusProject = FX.focusProject, setViewMode = FX.setViewMode,
+      allRuns = FX.allRuns, allProjects = FX.allProjects, statFor = FX.statFor,
+      filterProjects = FX.filterProjects, syncFilterChips = FX.syncFilterChips,
+      resetFilter = FX.resetFilter, lineDotClass = FX.lineDotClass,
+      lineRunSeconds = FX.lineRunSeconds, runningStepText = FX.runningStepText,
+      teamLineText = FX.teamLineText, fmtClockShort = FX.fmtClockShort,
+      factoryById = FX.factoryById, filterActive = FX.filterActive,
       factoryReload = FX.factoryReload, findLine = FX.findLine, findRun = FX.findRun,
       fitCamera = FX.fitCamera, fmtDur = FX.fmtDur, fmtTokens = FX.fmtTokens,
       fmtTs = FX.fmtTs, freshProgress = FX.freshProgress, hasRealLines = FX.hasRealLines,
-      lineStateText = FX.lineStateText, liveStale = FX.liveStale, nowMs = FX.nowMs,
+      lineStateText = FX.lineStateText, lineStateClass = FX.lineStateClass,
+      liveStale = FX.liveStale, nowMs = FX.nowMs,
       refreshPanelStates = FX.refreshPanelStates, refreshWeather = FX.refreshWeather,
       renderAll = FX.renderAll, renderAttentionNotice = FX.renderAttentionNotice,
+      renderCounters = FX.renderCounters, refreshLive = FX.refreshLive,
       renderPanel = FX.renderPanel, renderWeatherChip = FX.renderWeatherChip,
       runElapsed = FX.runElapsed, scheduleResync = FX.scheduleResync,
       lineKeyFor = FX.lineKeyFor, startDemoRun = FX.startDemoRun,
@@ -140,12 +152,16 @@
         '<div class="fx-hint">近 7 天还没有可统计的运行。</div></div>';
     }
     var rate = Math.round((h.success_rate || 0) * 100);
+    var tok7 = Number(h.tokens_7d) || 0;
+    var lowEfficiency = tok7 >= 15000 && (h.success_rate || 0) < 0.5 && h.total >= 2;
     var parts = [
       "成功率 <b>" + rate + "%</b>（7 天 " + h.total + " 次）",
       "平均 " + fmtDur(h.avg_s),
       "P95 " + fmtDur(h.p95_s),
       "最慢 " + fmtDur(h.max_s),
     ];
+    if (tok7 > 0) parts.push("7 天用量 " + fmtTokens(tok7) + " token");
+    if (lowEfficiency) parts.push('<span class="fx-bad">高耗低效</span>');
     // 「跑完了但被门控拦过」与「用户判定不算」单独说清：它们不拉低状态色条，
     // 但必须拉低成功率，否则这个百分比会一直是绿的
     if (h.partial) parts.push('<span class="fx-warn">有拦截 ' + h.partial + " 次</span>");
@@ -318,7 +334,7 @@
 
   /** 点「去补预授权」：先算一遍（dry_run），结果回来再重画抽屉。 */
   function startGrant(line) {
-    if (S.demo) {
+    if (isDemoMode()) {
       addNotice("样板厂为演示数据，切回真实厂区后可调整预授权");
       return;
     }
@@ -458,7 +474,7 @@
    *  不是起点，和文章里「批红」的位置一样。
    */
   async function delegateToAgent(line, rec, btn) {
-    if (S.demo) {
+    if (isDemoMode()) {
       addNotice("样板厂为演示数据，切回真实厂区后可交给 Agent 诊断");
       return;
     }
@@ -497,9 +513,16 @@
   function openDrawer(html) {
     if (!dom.drawer) return;
     var wasHidden = dom.drawer.classList.contains("hidden");
+    var prevBody = !wasHidden && dom.drawer.querySelector ? dom.drawer.querySelector(".fx-drawer-body") : null;
+    var keepScroll = prevBody ? prevBody.scrollTop : 0;
     dom.drawer.innerHTML = html;
+    if (dom.view && dom.view.classList) dom.view.classList.toggle("has-drawer", true);
     if (wasHidden) dom.drawer.classList.remove("factory-entered");
     dom.drawer.classList.remove("hidden");
+    if (keepScroll > 0 && dom.drawer.querySelector) {
+      var nextBody = dom.drawer.querySelector(".fx-drawer-body");
+      if (nextBody) nextBody.scrollTop = keepScroll;
+    }
     if (wasHidden) {
       void dom.drawer.offsetWidth;
       dom.drawer.classList.add("factory-entered");
@@ -515,6 +538,7 @@
 
   function closeDrawer() {
     S.drawer = null;
+    if (dom.view && dom.view.classList) dom.view.classList.toggle("has-drawer", false);
     if (dom.drawer) {
       dom.drawer.classList.add("hidden");
       dom.drawer.innerHTML = "";
@@ -523,8 +547,23 @@
 
   function factoryEscape() {
     if (S.drawer) { closeDrawer(); return true; }
-    // 聚焦档里 Esc 先回全景；工具栏的「全景」按钮是同一出口（键盘 / 鼠标都行）
-    if (S.focusPid) { fitCamera(true); return true; }
+    // 聚焦档先退回作业区（若存在），自定义缩放/平移先回作业区，再回全景
+    if (S.focusPid) {
+      if (typeof fitWorkCamera === "function" && S.world && S.world.factories && S.world.factories.length) {
+        fitWorkCamera(true);
+      } else {
+        fitCamera(true);
+      }
+      return true;
+    }
+    if (S.camMode === "custom") {
+      if (typeof fitWorkCamera === "function" && S.world && S.world.factories && S.world.factories.length) {
+        fitWorkCamera(true);
+      } else {
+        fitCamera(true);
+      }
+      return true;
+    }
     return false;
   }
 
@@ -613,7 +652,7 @@
     if (!dom.drawer) return;
     var pipeBtn = dom.drawer.querySelector("[data-view-pipeline]");
     if (pipeBtn) pipeBtn.onclick = function () {
-      if (S.demo) {
+      if (isDemoMode()) {
         addNotice("样板厂为演示数据，切回真实厂区后可查看编排");
         return;
       }
@@ -633,7 +672,7 @@
     var editBtn = dom.drawer.querySelector("[data-edit-task]");
     if (editBtn) {
       editBtn.onclick = function () {
-        if (S.demo) {
+        if (isDemoMode()) {
           addNotice("样板厂为演示数据，切回真实厂区后可编辑任务");
           return;
         }
@@ -668,7 +707,15 @@
     opts = opts || {};
     var line = rec.line;
     S.selectedKey = key;
+    if (opts.focus && rec.factory && S.focusPid !== rec.factory.id
+        && typeof applyFocusCamera === "function" && S.viewMode !== "board") {
+      S.focusPid = rec.factory.id;
+      applyFocusCamera(true);
+    } else if (S.viewMode !== "board" && typeof FX.render === "function") {
+      FX.render();
+    }
     renderPanel();
+    if (S.viewMode === "board") renderBoard();
     S.drawer = { type: "line", key: key };
     var next = line.next_run_at ? fmtTs(line.next_run_at) : "—";
     // 团队产线（mode=team）：类型先认出来，模板 / 成员 / 总管各占一行——
@@ -748,6 +795,18 @@
         : "") +
       "</div></details>";
     if (line.kind === "pipeline" && (line.nodes || []).length) {
+      var dagHtml = line.nodes.slice(0, 12).map(function (n, idx) {
+        var nCls = n.status === "done" ? "done"
+          : n.status === "running" ? "running"
+            : (n.status === "failed" || n.status === "error") ? "failed"
+              : n.status === "ready" ? "ready" : "";
+        return (idx > 0 ? '<span class="fb-dag-arrow">→</span>' : "") +
+          '<span class="fb-dag-node ' + nCls + '" title="' +
+          escapeHtml((n.title || ("工位 " + n.id)) + "：" + nodeStatusText(n.status)) + '">' +
+          escapeHtml(n.title || ("工位 " + n.id)) + "</span>";
+      }).join("");
+      html += '<div><div class="dim small">装配流向</div><div class="fx-dag-strip">' +
+        dagHtml + "</div></div>";
       html += "<div><div class=\"dim small\">工位</div><div class=\"fx-run-list\">";
       line.nodes.slice(0, 20).forEach(function (n) {
         html += '<div class="fx-run-row"><span class="fx-run-name">' + escapeHtml(n.title || ("工位 " + n.id)) +
@@ -759,12 +818,26 @@
     // 要看趋势再展开——它属于排查，不属于观战。
     html += '<details class="fx-more"><summary>更多：产线体检</summary>' +
       healthBlock(line) + "</details>";
-    if (line.kind === "pipeline") html += '<button class="btn-ghost" data-view-pipeline="1">查看编排</button>';
+    var pipeCanStart = !isDemoMode() && line.kind === "pipeline" && line.status !== "running"
+      && rec.project.root_ok !== false
+      && (line.nodes || []).some(function (nd) {
+        return nd.status === "ready" || nd.status === "blocked" || nd.status === "cancelled";
+      });
+    var pipeCanCancel = !isDemoMode() && line.kind === "pipeline" && line.status === "running";
     html += '<div class="fx-drawer-ops">';
+    if (line.kind === "pipeline") {
+      if (pipeCanStart) html += '<button type="button" class="btn-primary" data-start-pipeline="1">启动流水线</button>';
+      if (pipeCanCancel) html += '<button type="button" class="btn-ghost fx-danger" data-cancel-pipeline="1">停止流水线</button>';
+      html += '<button class="btn-ghost" data-view-pipeline="1">查看编排</button>';
+    }
     if (line.kind === "cron") {
-      html += '<button class="btn-primary" data-run-now="1">立即运行</button>';
-      html += '<button class="btn-ghost" data-toggle-line="1">' +
-        (line.status === "paused" || line.status === "stopped" ? "启用产线" : "暂停产线") + "</button>";
+      var cronStopped = line.status === "stopped" || rec.project.root_ok === false;
+      html += '<button class="btn-primary" data-run-now="1"' +
+        (cronStopped ? ' disabled title="项目目录不存在，无法运行"' : "") + ">立即运行</button>";
+      if (!(cronStopped && (line.status === "paused" || line.status === "stopped"))) {
+        html += '<button class="btn-ghost" data-toggle-line="1">' +
+          (line.status === "paused" || line.status === "stopped" ? "启用产线" : "暂停产线") + "</button>";
+      }
       if (line.status === "running") {
         html += '<button class="btn-ghost fx-danger" data-cancel-line="1">叫停</button>';
       }
@@ -782,6 +855,10 @@
     openDrawer(drawerShell(escapeHtml(line.name || key), html));
     if (!dom.drawer) return;
 
+    var startPipeBtn = dom.drawer.querySelector("[data-start-pipeline]");
+    if (startPipeBtn) startPipeBtn.onclick = function () { runPipeline(line, startPipeBtn); };
+    var cancelPipeBtn = dom.drawer.querySelector("[data-cancel-pipeline]");
+    if (cancelPipeBtn) cancelPipeBtn.onclick = function () { cancelPipeline(line, cancelPipeBtn); };
     var pipeBtn = dom.drawer.querySelector("[data-view-pipeline]");
     if (pipeBtn) pipeBtn.onclick = function () { closeDrawer(); openPipelineFor(rec.project.id, line.id); };
     var runBtn = dom.drawer.querySelector("[data-run-now]");
@@ -797,7 +874,7 @@
       cancelBtn.onclick = function () { cancelRun(line.id, line.name, cancelBtn); };
     }
     var goEdit = function () {
-      if (S.demo) {
+      if (isDemoMode()) {
         addNotice("样板厂为演示数据，切回真实厂区后可编辑产线");
         return;
       }
@@ -807,7 +884,7 @@
       }
     };
     var goPipeline = function () {
-      if (S.demo) {
+      if (isDemoMode()) {
         addNotice("样板厂为演示数据，切回真实厂区后可查看编排");
         return;
       }
@@ -854,8 +931,9 @@
   function loadLineRuns(line) {
     var box = dom.drawer && dom.drawer.querySelector("#fx-line-runs");
     if (!box) return;
-    if (S.demo) {
-      var demoRows = ((S.demo && S.demo.runs) || []).filter(function (x) {
+    if (isDemoMode()) {
+      var stDemo = activeState();
+      var demoRows = ((stDemo && stDemo.runs) || []).filter(function (x) {
         return line.kind === "pipeline"
           ? Number(x.pipeline_id) === Number(line.id)
           : (x.kind === "cron" && Number(x.task_id) === Number(line.id));
@@ -1051,8 +1129,9 @@
     var requestId = ++runsRequestId;
     var drawer = dom.drawer && dom.drawer.querySelector("#fx-all-runs");
     if (!drawer) return;
-    if (S.demo) {
-      var list = ((S.demo && S.demo.runs) || []).filter(function (x) {
+    if (isDemoMode()) {
+      var stDemo = activeState();
+      var list = ((stDemo && stDemo.runs) || []).filter(function (x) {
         if (f.status && x.status !== f.status) return false;
         if (f.project_id && Number(x.project_id) !== Number(f.project_id)) return false;
         if (f.view === "done_today") {
@@ -1097,51 +1176,206 @@
     }
   }
 
-  /** 「对话在跑」抽屉：只读快照 + 跳到该会话。
-      工厂只覆盖定时任务与编排，用户自己发起的对话轮 / 子代理在这里是盲区。
-      每条都带运行中心的 state/detail：等权限确认的运行要显示「等你确认」，
-      不能让用户把「等你拍板」看成「卡死」（两者都表现为很久没更新）。 */
+  // ---------- 工厂实用共享组件（内联审批 / 协作进度 / 批量运维） ----------
+  function safetyText(safety) {
+    return { readonly: "只读", write: "写入", exec: "命令执行" }[safety] || "需要确认";
+  }
+
+  function renderPermCardsHtml(perms) {
+    if (!perms || !perms.length) return "";
+    return '<div class="fx-perm-list">' + perms.map(function (p) {
+      var scope = [p.project_name, p.session_title].filter(Boolean).join(" · ") || "实时会话";
+      return '<div class="fx-perm-card" data-perm-box="' + escapeHtml(String(p.request_id || "")) + '">' +
+        '<div class="fx-perm-head">' +
+        '<span class="fx-perm-tool">' + escapeHtml(p.tool_name || "待确认工具") + "</span>" +
+        '<span class="fx-outcome partial">' + escapeHtml(safetyText(p.safety)) + "</span>" +
+        '<span class="fx-run-meta">' + escapeHtml(scope) + "</span>" +
+        "</div>" +
+        (p.detail ? '<div class="fx-perm-detail">' + escapeHtml(p.detail) + "</div>" : "") +
+        (p.note ? '<div class="fx-run-meta">' + escapeHtml(p.note) + "</div>" : "") +
+        (p.diff
+          ? '<details class="fx-cfg"><summary>变更预览</summary><pre class="fx-excerpt">' +
+            escapeHtml(String(p.diff).slice(0, 800)) + "</pre></details>"
+          : "") +
+        '<div class="fx-drawer-ops">' +
+        '<button type="button" class="btn-primary" data-perm-decide="allow_once" data-perm-id="' +
+        escapeHtml(String(p.request_id || "")) + '" data-perm-tool="' +
+        escapeHtml(String(p.tool_name || "")) + '">允许一次</button>' +
+        '<button type="button" class="btn-ghost fx-danger" data-perm-decide="deny" data-perm-id="' +
+        escapeHtml(String(p.request_id || "")) + '" data-perm-tool="' +
+        escapeHtml(String(p.tool_name || "")) + '">拒绝</button>' +
+        (p.session_id
+          ? '<button type="button" class="btn-ghost" data-live-session="' +
+            escapeHtml(String(p.session_id)) + '">去会话</button>'
+          : "") +
+        "</div></div>";
+    }).join("") + "</div>";
+  }
+
+  function bindPermCards(container, afterFn) {
+    if (!container) return;
+    container.querySelectorAll("[data-perm-decide]").forEach(function (b) {
+      b.onclick = function () {
+        var rid = b.dataset.permId || "";
+        var dec = b.dataset.permDecide || "deny";
+        var tool = b.dataset.permTool || "操作";
+        var box = b.closest("[data-perm-box]");
+        if (box) box.querySelectorAll("button").forEach(function (x) { x.disabled = true; });
+        request("permission.respond", { request_id: rid, decision: dec }).then(function (res) {
+          if (res && res.delivered === false) {
+            addNotice("该确认请求已失效或已处理");
+          } else {
+            addNotice((dec === "allow_once" ? "已允许一次：" : "已拒绝：") + tool);
+          }
+          var wb = activeWorkbench && activeWorkbench();
+          if (wb && Array.isArray(wb.pending_permissions)) {
+            wb.pending_permissions = wb.pending_permissions.filter(function (x) {
+              return String(x.request_id || "") !== String(rid);
+            });
+          }
+          if (typeof renderCounters === "function") renderCounters();
+          if (typeof afterFn === "function") afterFn();
+          if (typeof refreshLive === "function") refreshLive();
+        }).catch(function (e) {
+          addNotice("审批失败：" + (e && e.message ? e.message : "未知错误"));
+          if (box) box.querySelectorAll("button").forEach(function (x) { x.disabled = false; });
+        });
+      };
+    });
+  }
+
+  function renderCollabRowsHtml(teams, relays) {
+    var html = "";
+    (teams || []).forEach(function (t) {
+      var label = "团队 · " + (t.template || t.session_title || "多成员协作");
+      var meta = (t.director_mode === "ai" ? "AI总管 · " : "") +
+        (t.members || 0) + " 成员 · 第 " + (t.rounds_used || 0) +
+        (t.max_rounds ? "/" + t.max_rounds : "") + " 轮" +
+        (t.tasks_total ? " · 工单 " + (t.tasks_done || 0) + "/" + t.tasks_total : "");
+      html += '<div class="fx-run-row">' +
+        '<span class="fx-run-name">' + escapeHtml((t.project_name ? t.project_name + " · " : "") + label) + "</span>" +
+        '<span class="fx-run-meta">' + escapeHtml(meta) + "</span>" +
+        (t.session_id
+          ? '<button type="button" class="fx-ack" data-live-session="' + escapeHtml(String(t.session_id)) + '">去会话</button>'
+          : "") +
+        "</div>";
+    });
+    (relays || []).forEach(function (r) {
+      var label = "接力 · " + (r.goal || r.id || "双会话接力");
+      var meta = "第 " + (r.step || 0) + " 步 · " + (r.state || "");
+      html += '<div class="fx-run-row">' +
+        '<span class="fx-run-name">' + escapeHtml((r.project_name ? r.project_name + " · " : "") + label) + "</span>" +
+        '<span class="fx-run-meta">' + escapeHtml(meta) + "</span>" +
+        (r.session_id
+          ? '<button type="button" class="fx-ack" data-live-session="' + escapeHtml(String(r.session_id)) + '">去会话</button>'
+          : "") +
+        "</div>";
+    });
+    return html ? ('<div class="fx-run-list">' + html + "</div>") : "";
+  }
+
+  function toggleProjectCronLines(pid, name, enabled, btn) {
+    if (isDemoMode()) {
+      addNotice("样板厂演示数据不支持批量启停");
+      return;
+    }
+    var verb = enabled ? "恢复" : "暂停";
+    var go = function () {
+      if (btn) btn.disabled = true;
+      request("factory.project_toggle", { project_id: pid, enabled: enabled }).then(function (res) {
+        var n = Number(res && res.updated) || 0;
+        addNotice(n ? ("已" + verb + "「" + (name || pid) + "」" + n + " 条定时产线")
+                    : ("「" + (name || pid) + "」当前没有需要" + verb + "的定时产线"));
+        factoryReload();
+      }).catch(function (e) {
+        addNotice("操作失败：" + (e && e.message ? e.message : "未知错误"));
+      }).finally(function () {
+        if (btn) btn.disabled = false;
+      });
+    };
+    if (enabled) { go(); return; }
+    confirmModal("暂停「" + (name || ("厂区 " + pid)) + "」全部自动定时产线？\n暂停后不再到点自动派工（仍可手动运行单条），可随时恢复。").then(function (ok) {
+      if (ok) go();
+    });
+  }
+
+  function cancelAllRunning(pid, btn) {
+    if (isDemoMode()) {
+      addNotice("样板厂演示数据不支持全部叫停");
+      return;
+    }
+    confirmModal("确认叫停当前正在运行的所有后台定时产线？\n（仅取消这一轮，不改动启用状态与排期）").then(function (ok) {
+      if (!ok) return;
+      if (btn) btn.disabled = true;
+      request("factory.cancel_all", pid ? { project_id: pid } : {}).then(function (res) {
+        var n = Number(res && res.cancelled) || 0;
+        addNotice(n ? ("已向 " + n + " 条在跑产线发出叫停信号") : "当前没有可叫停的后台定时产线");
+        factoryReload();
+      }).catch(function (e) {
+        addNotice("叫停失败：" + (e && e.message ? e.message : "未知错误"));
+      }).finally(function () {
+        if (btn) btn.disabled = false;
+      });
+    });
+  }
+
+  /** 「对话在跑」抽屉：支持直接拍板「等待确认」、跳回原会话，以及查看团队/接力协作。 */
   function openLiveDrawer() {
     var st = activeState();
     var live = (st && st.live) || {};
+    var wb = (typeof activeWorkbench === "function" && activeWorkbench()) || {};
+    var perms = wb.pending_permissions || [];
+    var teams = wb.teams || [];
+    var relays = wb.relays || [];
     var rows = live.runs || [];
     S.drawer = { type: "live" };
     var html = "";
-    if (!rows.length) {
-      html = '<div class="fx-run-empty">当前没有在跑的对话轮或后台子代理。' +
-        "工厂只统计定时任务与编排；你在对话里发起的运行会在这里出现。</div>";
-    } else {
-      html = '<div class="fx-run-list">' + rows.map(function (r) {
-        var kind = r.kind === "turn" ? "对话" : "子代理";
-        var title = r.title || (r.kind === "turn" ? "对话轮" : "后台任务");
-        var waiting = String(r.state || "") === "waiting_permission";
-        var detail = String(r.detail || "").trim();
-        // detail 已经是人话（「等待确认：write_file」/「正在执行 read_file」），
-        // 有就优先用它，没有才回落到状态文案
-        var nowText = detail || LIVE_STATE[r.state] || "";
-        var meta = '<span class="fx-run-meta">' + escapeHtml(kind) + "</span>";
-        if (nowText) {
-          meta += '<span class="fx-run-meta' + (waiting ? " warn" : "") + '">' +
-            escapeHtml(nowText) + "</span>";
-        }
-        if (!waiting && liveStale(r)) {
-          meta += '<span class="fx-run-meta bad">5 分钟无更新</span>';
-        }
-        return '<div class="fx-run-row' + (waiting ? " waiting" : "") + '">' +
-          '<span class="fx-run-name">' + escapeHtml(title) + "</span>" +
-          meta +
-          (r.session_id
-            ? '<button class="fx-ack" data-live-session="' + escapeHtml(String(r.session_id)) +
-              '" title="打开这个会话">去会话</button>'
-            : "") +
-          "</div>";
-      }).join("") + "</div>" +
-        '<p class="fx-form-msg">这里是只读观战：' +
-        "「等待确认」是在权限确认卡上等你拍板，不是卡死；" +
-        "对话轮的中止请在会话里操作（工厂的「叫停」只中止定时任务）。</p>";
+    if (perms.length) {
+      html += '<div><div class="dim small">等待你确认（' + perms.length + "）</div>" +
+        renderPermCardsHtml(perms) + "</div>";
     }
-    openDrawer(drawerShell("对话与子代理在跑", html));
+    if (!rows.length && !perms.length && !teams.length && !relays.length) {
+      html = '<div class="fx-run-empty">当前没有在跑的对话轮、待审批请求或协作任务。</div>';
+    } else {
+      if (rows.length) {
+        html += '<div><div class="dim small">对话与子代理（' + rows.length + '）</div><div class="fx-run-list">' +
+          rows.map(function (r) {
+            var kind = r.kind === "turn" ? "对话" : "子代理";
+            var title = r.title || (r.kind === "turn" ? "对话轮" : "后台任务");
+            var waiting = String(r.state || "") === "waiting_permission";
+            var detail = String(r.detail || "").trim();
+            // detail 已经是人话（「等待确认：write_file」/「正在执行 read_file」），
+            // 有就优先用它，没有才回落到状态文案
+            var nowText = detail || LIVE_STATE[r.state] || "";
+            var meta = '<span class="fx-run-meta">' + escapeHtml(kind) + "</span>";
+            if (nowText) {
+              meta += '<span class="fx-run-meta' + (waiting ? " warn" : "") + '">' +
+                escapeHtml(nowText) + "</span>";
+            }
+            if (!waiting && liveStale(r)) {
+              meta += '<span class="fx-run-meta bad">5 分钟无更新</span>';
+            }
+            return '<div class="fx-run-row' + (waiting ? " waiting" : "") + '">' +
+              '<span class="fx-run-name">' + escapeHtml(title) + "</span>" +
+              meta +
+              (r.session_id
+                ? '<button class="fx-ack" data-live-session="' + escapeHtml(String(r.session_id)) +
+                  '" title="打开这个会话">去会话</button>'
+                : "") +
+              "</div>";
+          }).join("") + "</div></div>";
+      }
+      var collabHtml = renderCollabRowsHtml(teams, relays);
+      if (collabHtml) {
+        html += '<div><div class="dim small">进行中的团队与接力（' + (teams.length + relays.length) + "）</div>" +
+          collabHtml + "</div>";
+      }
+      html += '<p class="fx-form-msg">权限待确认可直接在这里「允许一次 / 拒绝」；' +
+        "若需补充上下文或中止对话轮，点「去会话」进入对应对话。</p>";
+    }
+    openDrawer(drawerShell("实时运行与审批", html));
     if (!dom.drawer) return;
+    bindPermCards(dom.drawer, openLiveDrawer);
     dom.drawer.querySelectorAll("[data-live-session]").forEach(function (b) {
       b.onclick = function () {
         closeDrawer();
@@ -1152,12 +1386,12 @@
   }
 
   function runLine(line, btn) {
-    if (S.demo) {
+    if (isDemoMode()) {
       if (line.status === "running") {
         addNotice("该工位正在演示运行中");
         return;
       }
-      if (typeof startDemoRun === "function") startDemoRun(S.demo, line, nowMs() / 1000);
+      if (typeof startDemoRun === "function") startDemoRun(activeState(), line, nowMs() / 1000);
       else line.status = "running";
       addNotice("样板厂演示：已触发「" + (line.name || line.key) + "」");
       renderAll();
@@ -1178,11 +1412,12 @@
 
   function toggleLine(line, btn) {
     var enabled = line.status === "paused" || line.status === "stopped";
-    if (S.demo) {
+    if (isDemoMode()) {
       line.status = enabled ? "idle" : "paused";
       addNotice(enabled ? "样板厂演示：产线已启用" : "样板厂演示：产线已暂停");
       renderPanel();
-      FX.render();
+      if (S.viewMode === "board") renderBoard();
+      else FX.render();
       if (S.drawer && S.drawer.type === "line") openLineDrawer(line.key, { focus: false });
       return;
     }
@@ -1191,11 +1426,59 @@
       line.status = enabled ? "idle" : "paused";
       if (r && r.next_run_at != null) line.next_run_at = r.next_run_at;
       addNotice(enabled ? "产线已启用" : "产线已暂停（不再到点派工；仍可手动运行一次）");
-      renderPanel();
-      FX.render();  // 绘制层真身（运行时查表）
+      renderAll();
       if (S.drawer && S.drawer.type === "line") openLineDrawer(line.key, { focus: false });
     }).catch(function (e) {
       addNotice("操作失败：" + (e.message || "未知错误"));
+    }).finally(function () {
+      if (btn) btn.disabled = false;
+    });
+  }
+
+  function runPipeline(line, btn) {
+    if (isDemoMode()) { addNotice("样板厂演示数据不支持启动流水线"); return; }
+    if (btn) btn.disabled = true;
+    request("factory.pipeline_start", { pipeline_id: line.id }).then(function () {
+      addNotice("流水线已启动：" + (line.name || line.key));
+      factoryReload();
+    }).catch(function (e) {
+      addNotice("启动失败：" + (e && e.message ? e.message : "未知错误"));
+    }).finally(function () {
+      if (btn) btn.disabled = false;
+    });
+  }
+
+  function cancelPipeline(line, btn) {
+    if (isDemoMode()) { addNotice("样板厂演示数据不支持停止流水线"); return; }
+    confirmModal(
+      "确认停止「" + (line.name || line.key) + "」正在运行的流水线？未开始的工位将标记为已取消。",
+      { title: "停止装配流水线", okLabel: "停止", danger: true }
+    ).then(function (ok) {
+      if (!ok) return;
+      if (btn) btn.disabled = true;
+      request("factory.pipeline_cancel", { pipeline_id: line.id }).then(function () {
+        addNotice("已停止流水线：" + (line.name || line.key));
+        factoryReload();
+      }).catch(function (e) {
+        addNotice("停止失败：" + (e && e.message ? e.message : "未知错误"));
+      }).finally(function () {
+        if (btn) btn.disabled = false;
+      });
+    });
+  }
+
+  function runInspectNow(btn) {
+    if (isDemoMode()) { addNotice("样板厂演示数据不支持运行巡检"); return; }
+    if (btn) btn.disabled = true;
+    request("automation.inspect_now", {}).then(function (r) {
+      if (r && r.ok) {
+        addNotice("运行巡检完成：" + (r.summary || "已生成报告"));
+      } else {
+        addNotice((r && r.reason) || "最近样本不足或尚未配置可用模型");
+      }
+      factoryReload();
+    }).catch(function (e) {
+      addNotice("巡检失败：" + (e && e.message ? e.message : "未知错误"));
     }).finally(function () {
       if (btn) btn.disabled = false;
     });
@@ -1360,7 +1643,7 @@
       b.onclick = function (ev) {
         ev.stopPropagation();
         var rec = findLine(b.dataset.attnProcess);
-        if (!rec || S.demo) return;
+        if (!rec || isDemoMode()) return;
         closeDrawer();
         if (rec.line.kind === "cron") openAutomationFor(rec.project.id, rec.line.id);
         else openPipelineFor(rec.project.id, rec.line.id);
@@ -1381,14 +1664,25 @@
     var st = S.state || activeState();
     var projects = (st && st.projects) || [];
     if (!projects.length) { addNotice("先在侧栏添加一个项目，再给它的厂区建产线"); return; }
+    var validProjects = projects.filter(function (p) {
+      return Number(p.id) > 0 && p.root_ok !== false;
+    });
+    if (!validProjects.length) {
+      addNotice("所有项目的根目录当前都不可用（停工），无法建产线；请先检查项目路径");
+      return;
+    }
+    var defaultPid = validProjects.some(function (p) { return p.id === presetProject; })
+      ? presetProject : validProjects[0].id;
     var tools = [];
     try {
       if (typeof bootSnap !== "undefined" && bootSnap && bootSnap.tools) tools = bootSnap.tools;
     } catch (e) { tools = []; }
     var projectOpts = projects.map(function (p) {
+      var bad = p.root_ok === false || Number(p.id) <= 0;
       return '<option value="' + escapeHtml(String(p.id)) + '"' +
-        (presetProject && p.id === presetProject ? " selected" : "") + ">" +
-        escapeHtml(p.name || ("项目 " + p.id)) + (p.root_ok === false ? "（停工）" : "") + "</option>";
+        (bad ? " disabled" : "") +
+        (p.id === defaultPid ? " selected" : "") + ">" +
+        escapeHtml(p.name || ("项目 " + p.id)) + (p.root_ok === false ? "（目录不可用/停工）" : "") + "</option>";
     }).join("");
     var toolRows = tools.length ? tools.map(function (t) {
       var locked = t.safety === "readonly";
@@ -1404,9 +1698,10 @@
       "<label>频率</label><select id=\"fx-nl-type\">" +
       '<option value="interval">每隔 N 分钟</option>' +
       '<option value="daily">每天固定时间</option>' +
+      '<option value="workdays">工作日固定时间</option>' +
       '<option value="weekly">每周固定时间</option></select>' +
       '<div id="fx-nl-interval-wrap"><label>间隔（分钟）</label>' +
-      '<input id="fx-nl-interval" type="number" min="1" max="525600" step="5" value="60"></div>' +
+      '<input id="fx-nl-interval" type="number" min="1" max="525600" step="1" value="60"></div>' +
       '<div id="fx-nl-time-wrap" class="hidden"><label>时间（HH:MM）</label>' +
       '<input id="fx-nl-time" type="time" value="09:00">' +
       '<label id="fx-nl-weekday-label" class="hidden">星期几</label>' +
@@ -1689,7 +1984,8 @@
       { title: "叫停正在跑的运行", okLabel: "叫停", danger: true },
     ).then(function (ok) {
       if (!ok) return;
-      if (S.demo) {
+      if (isDemoMode()) {
+        var demoSt = activeState();
         var nowS = nowMs() / 1000;
         var key = lineKeyFor("cron", taskId);
         var rec = findLine(key);
@@ -1699,14 +1995,14 @@
           rec.line.last_status = "cancelled";
           rec.line.last_run_at = nowS;
         }
-        ((S.demo && S.demo.runs) || []).forEach(function (r) {
+        ((demoSt && demoSt.runs) || []).forEach(function (r) {
           if (r.kind === "cron" && Number(r.task_id) === Number(taskId) && r.status === "running") {
             r.status = "cancelled";
             r.finished_at = nowS;
             r.duration_s = Math.max(1, Math.round(nowS - (r.started_at || nowS)));
           }
         });
-        if (S.demo.counters) S.demo.counters.running = Math.max(0, (S.demo.counters.running || 1) - 1);
+        if (demoSt && demoSt.counters) demoSt.counters.running = Math.max(0, (demoSt.counters.running || 1) - 1);
         addNotice("样板厂演示：已叫停「" + (name || ("任务 " + taskId)) + "」");
         renderAll();
         if (S.drawer && S.drawer.type === "line") openLineDrawer(key, { focus: false });
@@ -1729,7 +2025,7 @@
       自动判定（跑完且有产出 / 有没有被门控拦过）回答不了「产出对不对」，
       而成功率要能当决策依据就必须允许人推翻它。 */
   function markRunOutcome(run, outcome, btn) {
-    if (S.demo) {
+    if (isDemoMode()) {
       run.outcome = outcome || "";
       run.outcome_source = outcome ? "user" : "";
       var cachedDemo = findRun(run.id);
@@ -1767,29 +2063,925 @@
   function ackAttention(keys) {
     keys = (keys || []).filter(function (k) { return !!k; });
     if (!keys.length) return;
-    if (S.demo) {
+    if (isDemoMode()) {
       // 样板厂只改内存演示数据，绝不把假 key（cron:-22 等）写入真实数据库表
       var keySet = new Set(keys);
-      if (S.demo) {
-        S.demo.attention = (S.demo.attention || []).filter(function (a) {
+      var demoSt = activeState();
+      if (demoSt) {
+        demoSt.attention = (demoSt.attention || []).filter(function (a) {
           return !keySet.has(a.line_key);
         });
-        S.demo.attention_total = S.demo.attention.length;
-        if (S.demo.counters) S.demo.counters.attention = S.demo.attention.length;
+        demoSt.attention_total = demoSt.attention.length;
+        if (demoSt.counters) demoSt.counters.attention = demoSt.attention.length;
       }
       addNotice("样板厂演示：已标记为知道了");
-      closeDrawer();
+      if (S.drawer && S.drawer.type === "attention") closeDrawer();
       renderAll();
       return;
     }
     request("factory.ack", { line_keys: keys }).then(function () {
       addNotice("已标记为知道了（同一问题再发生会重新提示）");
-      closeDrawer();
+      if (S.drawer && S.drawer.type === "attention") closeDrawer();
       factoryReload();
     }).catch(function (e) {
       addNotice("标记失败：" + (e.message || "未知错误"));
     });
   }
+  // ---------- 调度厅总览 / 返工区处置 / 调度看板 ----------
+
+  /** 点调度厅：把全局并发额度、待确认审批、排队等待、近 30 分钟待发与实时对话/协作放进一张抽屉。 */
+  function openDispatchDrawer() {
+    var st = activeState() || {};
+    var cfg = st.config || {};
+    var c = st.counters || {};
+    var rawCap = Number(cfg.max_parallel_runs);
+    var cap = Math.max(1, Math.min(20, Math.round(Number.isFinite(rawCap) ? rawCap : 3)));
+    var running = Number(c.running) || 0;
+    var used = Math.min(cap, running);
+    var slotsHtml = "";
+    for (var si = 0; si < cap; si += 1) {
+      slotsHtml += '<span class="fb-slot' + (si < used ? " busy" : "") + '"></span>';
+    }
+    var live = st.live || {};
+    var liveRows = live.runs || [];
+    var wb = (typeof activeWorkbench === "function" && activeWorkbench()) || {};
+    var perms = wb.pending_permissions || [];
+    var teams = wb.teams || [];
+    var relays = wb.relays || [];
+    var waits = st.waiting || [];
+    var cronRunning = (st.projects || []).reduce(function (n, p) {
+      return n + (p.lines || []).filter(function (l) { return l.kind === "cron" && l.status === "running"; }).length;
+    }, 0);
+    refreshUpcoming();
+    var upcoming = S.upcoming || [];
+    S.drawer = { type: "dispatch" };
+
+    var html = '<div class="fx-kv">' +
+      "<dt>并发额度</dt><dd><div class=\"fb-slots\">" + slotsHtml +
+      "<span>" + used + " / " + cap + "（在跑 " + running + "）</span></div></dd>" +
+      "<dt>今日做成</dt><dd>" + (Number(c.done_today) || 0) + " 件" +
+      (Number(c.tokens_today) > 0 ? "  ·  " + escapeHtml(fmtTokens(c.tokens_today)) + " token" : "") + "</dd>" +
+      "</div>";
+
+    if (perms.length) {
+      html += '<div><div class="dim small">等待你确认（' + perms.length + "）</div>" +
+        renderPermCardsHtml(perms) + "</div>";
+    }
+
+    html += '<div><div class="dim small">排队等待（' + (Number(c.queued) || waits.length) + "）</div>";
+    if (waits.length) {
+      html += '<div class="fx-run-list">' + waits.slice(0, 8).map(function (w) {
+        return '<button class="fx-run-row" data-dispatch-line="' + escapeHtml(String(w.key || "")) + '">' +
+          '<span class="fx-run-name">' + escapeHtml(w.name || w.key || "") + "</span>" +
+          '<span class="fx-run-meta warn">已等 ' + escapeHtml(fmtDur(Math.max(0, nowMs() / 1000 - (w.due_at || 0)))) +
+          "</span></button>";
+      }).join("") + "</div>";
+    } else {
+      html += '<div class="fx-run-empty">当前没有产线在排队。</div>';
+    }
+    html += "</div>";
+
+    html += '<div><div class="dim small">近 30 分钟待发（' + upcoming.length + "）</div>";
+    if (upcoming.length) {
+      html += '<div class="fx-run-list">' + upcoming.slice(0, 6).map(function (u) {
+        return '<button class="fx-run-row" data-dispatch-line="' + escapeHtml(String(u.key || "")) + '">' +
+          '<span class="fx-run-name">' + escapeHtml((u.project ? u.project + " · " : "") + (u.name || u.key)) + "</span>" +
+          '<span class="fx-run-meta">' + escapeHtml(u.due ? "等待调度" : fmtCountdown(u.eta) + "后") + "</span></button>";
+      }).join("") + "</div>";
+    } else {
+      html += '<div class="fx-run-empty">未来 30 分钟内暂无到点产线。</div>';
+    }
+    html += "</div>";
+
+    html += '<div><div class="dim small">对话与子代理在跑（' + liveRows.length + "）</div>";
+    if (liveRows.length) {
+      html += '<div class="fx-run-list">' + liveRows.slice(0, 8).map(function (r) {
+        var waiting = String(r.state || "") === "waiting_permission";
+        var nowText = String(r.detail || "").trim() || LIVE_STATE[r.state] || "";
+        return '<div class="fx-run-row' + (waiting ? " waiting" : "") + '">' +
+          '<span class="fx-run-name">' + escapeHtml(r.title || (r.kind === "turn" ? "对话轮" : "后台子代理")) + "</span>" +
+          '<span class="fx-run-meta' + (waiting ? " warn" : "") + '">' + escapeHtml(nowText || "运行中") + "</span>" +
+          (r.session_id ? '<button class="fx-ack" data-dispatch-sess="' + escapeHtml(String(r.session_id)) + '">去会话</button>' : "") +
+          "</div>";
+      }).join("") + "</div>";
+    } else {
+      html += '<div class="fx-run-empty">当前没有进行中的对话轮或后台子代理。</div>';
+    }
+    html += "</div>";
+
+    var collabHtml = renderCollabRowsHtml(teams, relays);
+    if (collabHtml) {
+      html += '<div><div class="dim small">进行中的团队与接力（' + (teams.length + relays.length) + "）</div>" +
+        collabHtml + "</div>";
+    }
+
+    var demoOn = isDemoMode();
+    html += '<div class="fx-drawer-ops">' +
+      '<button class="btn-primary" data-dispatch-board="1">切到调度看板</button>' +
+      '<button class="btn-ghost" data-dispatch-runs="1">运行记录</button>' +
+      '<button class="btn-ghost" data-dispatch-cfg="1">工厂设置</button>' +
+      (cronRunning > 0 && !demoOn
+        ? '<button class="btn-ghost fx-danger" data-dispatch-cancel-all="1">叫停全部定时</button>'
+        : "") +
+      '<button class="btn-ghost" data-close-drawer="1">关闭</button></div>';
+
+    openDrawer(drawerShell("总厂调度厅", html));
+    if (!dom.drawer) return;
+    bindPermCards(dom.drawer, openDispatchDrawer);
+    dom.drawer.querySelectorAll("[data-dispatch-line]").forEach(function (b) {
+      b.onclick = function () { openLineDrawer(b.dataset.dispatchLine, { focus: true }); };
+    });
+    dom.drawer.querySelectorAll("[data-dispatch-sess], [data-live-session]").forEach(function (b) {
+      b.onclick = function () {
+        var sid = b.dataset.dispatchSess || b.dataset.liveSession || "";
+        closeDrawer();
+        if (typeof backToChat === "function") backToChat();
+        if (sid && typeof openTabForSession === "function") openTabForSession(sid, "");
+      };
+    });
+    var cancelAllBtn = dom.drawer.querySelector("[data-dispatch-cancel-all]");
+    if (cancelAllBtn) cancelAllBtn.onclick = function () { cancelAllRunning(null, cancelAllBtn); };
+    var boardBtn = dom.drawer.querySelector("[data-dispatch-board]");
+    if (boardBtn) boardBtn.onclick = function () { closeDrawer(); if (typeof setViewMode === "function") setViewMode("board"); };
+    var runsBtn = dom.drawer.querySelector("[data-dispatch-runs]");
+    if (runsBtn) runsBtn.onclick = function () { openAllRunsDrawer(); };
+    var cfgBtn = dom.drawer.querySelector("[data-dispatch-cfg]");
+    if (cfgBtn) cfgBtn.onclick = function () { openSettingsDrawer(); };
+    var closeBtn = dom.drawer.querySelector("[data-close-drawer]");
+    if (closeBtn) closeBtn.onclick = closeDrawer;
+  }
+
+  /** 点「概览」或窄屏下点厂区标题：聚合该厂区的目录状态、在跑对话/协作/待确认、产线与整区运维开关。 */
+  function openProjectDrawer(pid) {
+    var st = activeState() || {};
+    var proj = (st.projects || []).find(function (p) { return String(p.id) === String(pid); });
+    if (!proj) { openDispatchDrawer(); return; }
+    S.drawer = { type: "project", pid: pid };
+    var lines = proj.lines || [];
+    var pstat = statFor(proj.id);
+    var pTokens = (st.runs || []).reduce(function (sum, r) {
+      if (String(r.project_id) !== String(proj.id) || !isTodayTs(r.started_at)) return sum;
+      return sum + (Number(r.in_tokens) || 0) + (Number(r.out_tokens) || 0);
+    }, 0);
+    var wb = (typeof activeWorkbench === "function" && activeWorkbench()) || {};
+    var liveRuns = ((st.live && st.live.runs) || []).filter(function (r) {
+      return r.session_id && String((wb.session_projects || {})[String(r.session_id)]) === String(proj.id);
+    });
+    var perms = (wb.pending_permissions || []).filter(function (pm) {
+      return String(pm.project_id) === String(proj.id);
+    });
+    var teams = (wb.teams || []).filter(function (t) { return String(t.project_id) === String(proj.id); });
+    var relays = (wb.relays || []).filter(function (r) { return String(r.project_id) === String(proj.id); });
+    var cronLines = lines.filter(function (l) { return l.kind === "cron"; });
+    var enabledCron = cronLines.filter(function (l) {
+      return l.status !== "paused" && l.status !== "stopped";
+    }).length;
+    var runningCron = cronLines.filter(function (l) { return l.status === "running"; }).length;
+    var off = proj.root_ok === false;
+
+    var html = '<div class="fx-kv">' +
+      "<dt>状态</dt><dd>" + (off ? '<span class="fx-bad">目录不可用（停工）</span>' : "正常运转") + "</dd>" +
+      "<dt>产线</dt><dd>" + lines.length + " 条（在跑 " + (pstat.busy || 0) + "）</dd>" +
+      "<dt>今日产出</dt><dd>做成 " + (pstat.done || 0) + " 件" +
+      (pstat.rework ? ' · <span class="fx-bad">异常 ' + pstat.rework + "</span>" : "") +
+      (pTokens > 0 ? " · " + escapeHtml(fmtTokens(pTokens)) + " token" : "") + "</dd>" +
+      "</div>";
+
+    if (perms.length) {
+      html += '<div><div class="dim small">本厂区待确认（' + perms.length + "）</div>" +
+        renderPermCardsHtml(perms) + "</div>";
+    }
+    var collabHtml = renderCollabRowsHtml(teams, relays);
+    if (collabHtml || liveRuns.length) {
+      html += '<div><div class="dim small">进行中的对话与协作（' +
+        (liveRuns.length + teams.length + relays.length) + "）</div>";
+      if (liveRuns.length) {
+        html += '<div class="fx-run-list">' + liveRuns.slice(0, 6).map(function (r) {
+          var waiting = String(r.state || "") === "waiting_permission";
+          return '<div class="fx-run-row' + (waiting ? " waiting" : "") + '">' +
+            '<span class="fx-run-name">' + escapeHtml(r.title || "实时对话") + "</span>" +
+            '<span class="fx-run-meta' + (waiting ? " warn" : "") + '">' +
+            escapeHtml(String(r.detail || "").trim() || LIVE_STATE[r.state] || "运行中") + "</span>" +
+            (r.session_id ? '<button class="fx-ack" data-live-session="' + escapeHtml(String(r.session_id)) + '">去会话</button>' : "") +
+            "</div>";
+        }).join("") + "</div>";
+      }
+      if (collabHtml) html += collabHtml;
+      html += "</div>";
+    }
+
+    html += '<div><div class="dim small">全部产线（' + lines.length + "）</div>";
+    if (!lines.length) {
+      html += '<div class="fx-run-empty">这个厂区还没有定时或编排产线。</div>';
+    } else {
+      html += '<div class="fx-run-list">' + lines.map(function (l) {
+        return '<button class="fx-run-row" data-proj-line="' + escapeHtml(l.key) + '">' +
+          '<span class="fx-run-name">' + escapeHtml(l.name || l.key) + "</span>" +
+          '<span class="fx-run-meta ' + lineStateClass(l) + '">' + escapeHtml(lineStateText(l)) + "</span></button>";
+      }).join("") + "</div>";
+    }
+    html += "</div>";
+
+    var demoOn = isDemoMode();
+    html += '<div class="fx-drawer-ops">' +
+      (!demoOn && Number(proj.id) > 0 && !off
+        ? '<button type="button" class="btn-primary" data-proj-add="1">＋ 新建定时产线</button>'
+        : "") +
+      (!demoOn && cronLines.length && (enabledCron > 0 || !off)
+        ? '<button type="button" class="btn-ghost" data-proj-toggle="' + (enabledCron > 0 ? "0" : "1") + '">' +
+          (enabledCron > 0 ? "暂停本厂区自动" : "恢复本厂区自动") + "</button>"
+        : "") +
+      (!demoOn && runningCron > 0
+        ? '<button type="button" class="btn-ghost fx-danger" data-proj-cancel="1">叫停本厂区在跑</button>'
+        : "") +
+      (!demoOn && Number(proj.id) > 0
+        ? '<button type="button" class="btn-ghost" data-proj-chat="1">切到项目对话</button>'
+        : "") +
+      (pstat.rework ? '<button type="button" class="btn-ghost" data-proj-rework="1">返工处置</button>' : "") +
+      '<button type="button" class="btn-ghost" data-close-drawer="1">关闭</button></div>';
+
+    openDrawer(drawerShell("厂区概览 · " + escapeHtml(proj.name || ("项目 " + pid)), html));
+    if (!dom.drawer) return;
+    bindPermCards(dom.drawer, function () { openProjectDrawer(pid); });
+    dom.drawer.querySelectorAll("[data-proj-line]").forEach(function (b) {
+      b.onclick = function () { openLineDrawer(b.dataset.projLine, { focus: false }); };
+    });
+    dom.drawer.querySelectorAll("[data-live-session]").forEach(function (b) {
+      b.onclick = function () {
+        var sid = b.dataset.liveSession || "";
+        closeDrawer();
+        if (typeof backToChat === "function") backToChat();
+        if (sid && typeof openTabForSession === "function") openTabForSession(sid, "");
+      };
+    });
+    var addBtn = dom.drawer.querySelector("[data-proj-add]");
+    if (addBtn) addBtn.onclick = function () { openNewLineDrawer(Number(proj.id)); };
+    var togBtn = dom.drawer.querySelector("[data-proj-toggle]");
+    if (togBtn) {
+      togBtn.onclick = function () {
+        toggleProjectCronLines(proj.id, proj.name, togBtn.dataset.projToggle === "1", togBtn);
+      };
+    }
+    var canBtn = dom.drawer.querySelector("[data-proj-cancel]");
+    if (canBtn) canBtn.onclick = function () { cancelAllRunning(proj.id, canBtn); };
+    var rwBtn = dom.drawer.querySelector("[data-proj-rework]");
+    if (rwBtn) rwBtn.onclick = function () { openReworkDrawer(proj.id); };
+    var chatBtn = dom.drawer.querySelector("[data-proj-chat]");
+    if (chatBtn) {
+      chatBtn.onclick = function () {
+        ensureProject(proj.id).then(function () {
+          closeDrawer();
+          if (typeof backToChat === "function") backToChat();
+        }).catch(function (e) {
+          addNotice("切换项目失败：" + (e && e.message ? e.message : "未知错误"));
+        });
+      };
+    }
+    var closeBtn = dom.drawer.querySelector("[data-close-drawer]");
+    if (closeBtn) closeBtn.onclick = closeDrawer;
+  }
+
+  /** 点返工区红箱堆：按产线分组汇总该厂区的异常、高耗低效与巡检提醒，直接给出处置与整区启停入口。 */
+  function openReworkDrawer(pid) {
+    var st = activeState() || {};
+    var proj = (st.projects || []).find(function (p) { return String(p.id) === String(pid); });
+    if (!proj) { openAttentionDrawer(); return; }
+    S.drawer = { type: "rework", pid: pid };
+    var lines = proj.lines || [];
+    var sick = [];
+    lines.forEach(function (line) {
+      var diag = lineDiagnosis(line);
+      if (diag && diag.level !== "mute") sick.push({ line: line, diag: diag });
+    });
+    var highBurn = lines.filter(function (line) {
+      var h = line && line.health;
+      return h && h.total >= 2 && (Number(h.tokens_7d) || 0) >= 15000 && (h.success_rate || 0) < 0.5;
+    });
+    var wb = (typeof activeWorkbench === "function" && activeWorkbench()) || {};
+    var inspect = wb.inspect || {};
+    var reworkRuns = (st.runs || []).filter(function (r) {
+      if (String(r.project_id) !== String(pid)) return false;
+      return r.status === "error" || r.status === "empty" || r.outcome === "partial" || r.outcome === "failed";
+    }).slice(0, 12);
+    var cronLines = lines.filter(function (l) { return l.kind === "cron"; });
+    var enabledCronCount = cronLines.filter(function (l) {
+      return l.status !== "paused" && l.status !== "stopped";
+    }).length;
+
+    var html = "";
+    if (sick.length) {
+      html += '<p class="fx-form-msg">以下产线存在近期异常，已按症状归类——先修条件再重跑，不要盲目重试。</p>';
+      html += sick.map(function (it) {
+        return '<div class="fx-verdict ' + escapeHtml(it.diag.level) + '">' +
+          '<div class="fx-verdict-title">' + escapeHtml((it.line.name || it.line.key) + " · " + it.diag.title) + "</div>" +
+          (it.diag.detail ? '<div class="fx-verdict-detail">' + escapeHtml(it.diag.detail) + "</div>" : "") +
+          '<div class="fx-drawer-ops"><button class="btn-primary" data-rw-line="' +
+          escapeHtml(it.line.key) + '">打开产线处置</button></div></div>';
+      }).join("");
+    } else {
+      html += '<div class="fx-run-empty">这座厂区目前没有待处理的异常产线。</div>';
+    }
+    if (highBurn.length) {
+      html += '<div class="fx-verdict warn"><div class="fx-verdict-title">高耗低效产线（' + highBurn.length +
+        " 条）</div>" +
+        '<div class="fx-verdict-detail">近 7 天耗费较高但成功率低于 50%，建议收缩提示词或核对授权后继续跑。</div>' +
+        '<div class="fx-run-list">' + highBurn.map(function (line) {
+        var h = line.health || {};
+        var rate = Math.round((h.success_rate || 0) * 100);
+        return '<button class="fx-run-row" data-rw-line="' + escapeHtml(line.key) + '">' +
+          '<span class="fx-run-name">' + escapeHtml(line.name || line.key) + "</span>" +
+          '<span class="fx-run-meta bad">' + escapeHtml(fmtTokens(h.tokens_7d || 0)) + " token · 成功率 " +
+          rate + "%" + (h.wasted_7d ? " · 异常 " + h.wasted_7d + " 次" : "") + "</span></button>";
+      }).join("") + "</div></div>";
+    }
+    var demoOn = isDemoMode();
+    if (inspect.last_summary && inspect.last_summary !== "无需留意") {
+      html += '<div class="fb-inspect-bar"><div><b>最近运行巡检</b>' +
+        (inspect.last_at ? "（" + escapeHtml(fmtTs(inspect.last_at)) + "）" : "") + "：" +
+        escapeHtml(inspect.last_summary) + "</div>" +
+        '<span class="fb-brief-ops">' +
+        (inspect.last_report ? '<button type="button" class="fx-ack" data-rw-report="1">看巡检报告</button>' : "") +
+        (!demoOn ? '<button type="button" class="fx-ack" data-rw-inspect="1">立即巡检</button>' : "") +
+        "</span></div>";
+    }
+    if (reworkRuns.length) {
+      html += '<div><div class="dim small">最近异常 / 被拦记录</div><div class="fx-run-list">' +
+        reworkRuns.map(function (r) {
+          var stLabel = r.outcome === "partial" ? "跑完 · 被拦" : (RUN_STATUS[r.status] || r.status);
+          return '<button class="fx-run-row" data-rw-run="' + escapeHtml(String(r.id)) + '">' +
+            '<span class="fx-run-name">#' + escapeHtml(String(r.id)) + "  " + escapeHtml(runTitle(r)) + "</span>" +
+            '<span class="fx-run-meta ' + (r.outcome === "partial" || r.status === "empty" ? "warn" : "bad") + '">' +
+            escapeHtml(stLabel) + "</span></button>";
+        }).join("") + "</div></div>";
+    }
+    html += '<div class="fx-drawer-ops">' +
+      (cronLines.length && !demoOn && (enabledCronCount > 0 || proj.root_ok !== false)
+        ? '<button type="button" class="btn-ghost" data-rw-proj-toggle="' +
+          (enabledCronCount > 0 ? "0" : "1") + '">' +
+          (enabledCronCount > 0 ? "暂停本厂区自动" : "恢复本厂区自动") + "</button>"
+        : "") +
+      '<button class="btn-ghost" data-rw-proj="1">厂区概览</button>' +
+      '<button class="btn-ghost" data-rw-all="1">查看全部记录</button>' +
+      '<button class="btn-ghost" data-close-drawer="1">关闭</button></div>';
+    openDrawer(drawerShell("返工区 · " + escapeHtml(proj.name || ("项目 " + pid)), html));
+    if (!dom.drawer) return;
+    dom.drawer.querySelectorAll("[data-rw-line]").forEach(function (b) {
+      b.onclick = function () { openLineDrawer(b.dataset.rwLine, { focus: true }); };
+    });
+    dom.drawer.querySelectorAll("[data-rw-run]").forEach(function (b) {
+      b.onclick = function () { openRunDrawer(Number(b.dataset.rwRun)); };
+    });
+    var repBtn = dom.drawer.querySelector("[data-rw-report]");
+    if (repBtn && inspect.last_report) {
+      repBtn.onclick = function () { openFactoryResult(inspect.last_report); };
+    }
+    var inspBtn = dom.drawer.querySelector("[data-rw-inspect]");
+    if (inspBtn) inspBtn.onclick = function () { runInspectNow(inspBtn); };
+    var projBtn = dom.drawer.querySelector("[data-rw-proj]");
+    if (projBtn) projBtn.onclick = function () { openProjectDrawer(pid); };
+    var projToggleBtn = dom.drawer.querySelector("[data-rw-proj-toggle]");
+    if (projToggleBtn) {
+      projToggleBtn.onclick = function () {
+        toggleProjectCronLines(proj.id, proj.name, projToggleBtn.dataset.rwProjToggle === "1", projToggleBtn);
+      };
+    }
+    var allBtn = dom.drawer.querySelector("[data-rw-all]");
+    if (allBtn) {
+      allBtn.onclick = function () {
+        openAllRunsDrawer({ status: "error" });
+        var ps = dom.drawer && dom.drawer.querySelector("#fx-runs-project");
+        if (ps) { ps.value = String(pid); ps.onchange(); }
+      };
+    }
+    var closeBtn = dom.drawer.querySelector("[data-close-drawer]");
+    if (closeBtn) closeBtn.onclick = closeDrawer;
+  }
+
+  /** 生成看板泳道 HTML（全量重绘与搜索局部刷新共用）。 */
+  function buildBoardLanesHtml(st, wb, nowSec) {
+    var demoOn = isDemoMode();
+    var teams = (wb && wb.teams) || [];
+    var relays = (wb && wb.relays) || [];
+    var liveRuns = (st.live && st.live.runs) || [];
+    var perms = (wb && wb.pending_permissions) || [];
+    var sessProj = (wb && wb.session_projects) || {};
+    var attentionKeys = new Set();
+    (st.attention || []).forEach(function (a) {
+      if (a && a.line_key) attentionKeys.add(a.line_key);
+    });
+    var groups = filterProjects(st.projects || [], attentionKeys, S.filter);
+    var runsByLine = {};
+    (st.runs || []).forEach(function (r) {
+      var lk = r.kind === "pipeline_node" ? lineKeyFor("pipeline", r.pipeline_id) : lineKeyFor("cron", r.task_id);
+      if (!runsByLine[lk]) runsByLine[lk] = [];
+      runsByLine[lk].push(r);
+    });
+
+    var winStart = nowSec - 86400;
+    var winFuture = nowSec + 7200;
+    var nowPct = 88;
+    if (!groups.length) {
+      if (!(st.projects || []).length) {
+        return '<div class="fx-empty fb-empty-card">还没有项目。先在左侧栏添加一个项目，这里就会出现它的调度泳道与时间轴。' +
+          (S.demo && !demoOn
+            ? ' <button type="button" class="fx-add-line" data-board-scene="1">切到厂区场景看样板演示</button>'
+            : "") +
+          "</div>";
+      }
+      return '<div class="fx-empty fb-empty-card">没有符合筛选条件的厂区或产线。' +
+        '<button type="button" class="fx-add-line" data-board-clear="1">清除筛选</button></div>';
+    }
+    var lanesHtml = "";
+    groups.forEach(function (g) {
+      var p = g.project;
+      var pstat = statFor(p.id);
+      var pTokens = (st.runs || []).reduce(function (sum, r) {
+        if (String(r.project_id) !== String(p.id) || !isTodayTs(r.started_at)) return sum;
+        return sum + (Number(r.in_tokens) || 0) + (Number(r.out_tokens) || 0);
+      }, 0);
+      var projTeams = teams.filter(function (t) { return String(t.project_id) === String(p.id); });
+      var projRelays = relays.filter(function (r) { return String(r.project_id) === String(p.id); });
+      var projLiveRuns = liveRuns.filter(function (r) {
+        return r.session_id && String(sessProj[String(r.session_id)]) === String(p.id);
+      });
+      var projPerms = perms.filter(function (pm) { return String(pm.project_id) === String(p.id); });
+      var pCronLines = (p.lines || []).filter(function (l) { return l.kind === "cron"; });
+      var pCronEnabled = pCronLines.filter(function (l) {
+        return l.status !== "paused" && l.status !== "stopped";
+      }).length;
+      lanesHtml += '<div class="fb-lane' + (p.root_ok === false ? " stopped" : "") + '">' +
+        '<div class="fb-lane-head"><span class="fb-lane-title">' + escapeHtml(p.name || "未命名厂区") + "</span>" +
+        '<div class="fb-lane-stats">' +
+        "<span>" + (p.lines || []).length + " 条产线</span>" +
+        (pstat.busy ? '<span class="ok">在跑 ' + pstat.busy + "</span>" : "") +
+        (projLiveRuns.length ? '<span class="ok">实时对话 ' + projLiveRuns.length + "</span>" : "") +
+        (projTeams.length + projRelays.length ? '<span class="ok">协作 ' + (projTeams.length + projRelays.length) + "</span>" : "") +
+        (projPerms.length ? '<span class="bad">待确认 ' + projPerms.length + "</span>" : "") +
+        "<span>今日做成 " + (pstat.done || 0) + "</span>" +
+        (pstat.rework ? '<span class="bad">异常 ' + pstat.rework + "</span>" : "") +
+        (pTokens > 0 ? "<span>用量 " + escapeHtml(fmtTokens(pTokens)) + "</span>" : "") +
+        (p.root_ok === false ? '<span class="bad">目录不可用（停工）</span>' : "") +
+        "</div>" +
+        '<div class="fb-lane-ops">' +
+        (pCronLines.length && !demoOn && (pCronEnabled > 0 || p.root_ok !== false)
+          ? '<button type="button" class="btn-ghost" data-board-proj-toggle="' + escapeHtml(String(p.id)) +
+            '" data-enable="' + (pCronEnabled > 0 ? "0" : "1") + '">' +
+            (pCronEnabled > 0 ? "暂停自动" : "恢复自动") + "</button>"
+          : "") +
+        (!demoOn && Number(p.id) > 0 && p.root_ok !== false
+          ? '<button type="button" class="btn-ghost" data-board-add-line="' + escapeHtml(String(p.id)) + '">＋ 建产线</button>'
+          : "") +
+        (pstat.rework ? '<button type="button" class="btn-ghost" data-board-rework="' + escapeHtml(String(p.id)) + '">处置异常</button>' : "") +
+        '<button type="button" class="btn-ghost" data-board-proj-overview="' + escapeHtml(String(p.id)) + '">概览</button>' +
+        '<button type="button" class="btn-ghost" data-board-focus="' + escapeHtml(String(p.id)) + '">在场景中定位</button>' +
+        "</div></div>";
+      if (!g.lines.length) {
+        lanesHtml += (!demoOn && Number(p.id) > 0 && p.root_ok !== false)
+          ? '<div class="fx-empty">暂无定时或编排产线。' +
+            '<button type="button" class="fx-add-line" data-board-add-line="' + escapeHtml(String(p.id)) +
+            '">＋ 给该厂区建一条定时产线</button></div>'
+          : '<div class="fx-empty">暂无产线，可在左侧「自动化」中添加。</div>';
+      } else {
+        lanesHtml += '<div class="fb-axis-bar"><span>产线与当前状态</span>' +
+          '<div class="fb-axis-ticks">' +
+          '<span style="left:0%">-24h</span>' +
+          '<span style="left:44%">-12h</span>' +
+          '<span style="left:66%">-6h</span>' +
+          '<span class="now" style="left:88%">现在</span>' +
+          '<span class="end">+2h</span>' +
+          "</div>" +
+          '<span style="text-align:right">7天体检 · 操作</span></div>';
+        g.lines.forEach(function (l) {
+          var h = l.health || {};
+          var rate = h.total ? Math.round((h.success_rate || 0) * 100) + "%" : "—";
+          var tok7 = Number(h.tokens_7d) || 0;
+          var lowEff = tok7 >= 15000 && (h.success_rate || 0) < 0.5 && h.total >= 2;
+          var modelTxt = l.kind === "cron" ? lineModelLabel(l) : "";
+          var teamTxt = l.is_team ? teamLineText(l) : "";
+          var subMeta = "";
+          var subCls = "";
+          if (l.status === "running") {
+            var step = runningStepText(l);
+            subMeta = (l.kind === "cron" ? "已跑 " + fmtDur(lineRunSeconds(l)) : "运行中") +
+              (step ? " · " + step : "");
+            subCls = " running";
+          } else if (l.status === "paused" || l.status === "stopped") {
+            subMeta = "停工 · " + (l.trigger_text || "");
+            subCls = " warn";
+          } else if (h.streak >= 2) {
+            subMeta = "连续失败 " + h.streak + " 次";
+            subCls = " bad";
+          } else if (l.next_run_at && l.next_run_at > nowSec) {
+            subMeta = [l.trigger_text || "", fmtCountdown(l.next_run_at - nowSec) + "后", teamTxt || modelTxt]
+              .filter(Boolean).join(" · ");
+          } else {
+            subMeta = [
+              l.trigger_text || "—",
+              l.last_run_at ? "上次 " + fmtTs(l.last_run_at) : "",
+              teamTxt || modelTxt,
+            ].filter(Boolean).join(" · ");
+          }
+          var typeTag = l.is_team ? '<span class="fx-line-team">团队</span>'
+            : (l.kind === "pipeline" ? '<span class="fx-outcome">编排</span>' : "");
+
+          var lineRuns = runsByLine[l.key] || [];
+          var barsHtml = '<div class="fb-now-line" style="left:' + nowPct + '%"></div>';
+          lineRuns.forEach(function (r) {
+            var sAt = Number(r.started_at) || 0;
+            var eAt = r.status === "running" ? nowSec : (Number(r.finished_at) || (sAt + (Number(r.duration_s) || 60)));
+            if (eAt < winStart || sAt > nowSec) return;
+            var clampedStart = Math.max(winStart, sAt);
+            var clampedEnd = Math.min(nowSec, Math.max(clampedStart + 60, eAt));
+            var leftPct = ((clampedStart - winStart) / 86400) * nowPct;
+            var widthPct = Math.max(0.8, ((clampedEnd - clampedStart) / 86400) * nowPct);
+            var bCls = r.status === "running" ? "running"
+              : (r.outcome === "partial" ? "partial" : (r.outcome === "failed" ? "failed" : (r.status || "done")));
+            var tip = "#" + r.id + " · " + fmtTs(sAt) + " · " + (RUN_STATUS[r.status] || r.status) +
+              " · " + fmtDur(runElapsed(r));
+            barsHtml += '<button type="button" class="fb-bar ' + escapeHtml(bCls) +
+              '" style="left:' + leftPct.toFixed(2) + "%;width:" + widthPct.toFixed(2) + '%"' +
+              ' data-board-run="' + escapeHtml(String(r.id)) + '" title="' + escapeHtml(tip) + '"></button>';
+          });
+          if (l.kind === "cron" && l.status === "idle" && l.next_run_at > nowSec && l.next_run_at <= winFuture) {
+            var nextPct = nowPct + ((l.next_run_at - nowSec) / 7200) * (100 - nowPct);
+            barsHtml += '<span class="fb-next-pin" style="left:' + Math.min(98.5, nextPct).toFixed(2) +
+              '%" title="预计下次：' + escapeHtml(fmtTs(l.next_run_at)) + '"></span>';
+          }
+
+          var dagHtml = "";
+          if (l.kind === "pipeline" && (l.nodes || []).length) {
+            dagHtml = '<div class="fb-dag">' + l.nodes.slice(0, 8).map(function (nd, ni) {
+              var nc = nd.status === "done" ? "done" : nd.status === "running" ? "running"
+                : (nd.status === "failed" || nd.status === "error") ? "failed"
+                  : nd.status === "ready" ? "ready" : "";
+              return (ni > 0 ? '<span class="fb-dag-arrow">→</span>' : "") +
+                '<span class="fb-dag-node ' + nc + '">' + escapeHtml(nd.title || ("#" + nd.id)) + "</span>";
+            }).join("") + "</div>";
+          }
+
+          var tail = h.tail || [];
+          var tailOutcomes = h.tail_outcomes || [];
+          var strip = tail.slice(0, 12).map(function (s, ti) {
+            var oc = tailOutcomes[ti] || "";
+            var cls = (s === "done" && oc === "partial") ? "partial" : s;
+            return '<i class="' + escapeHtml(cls) + '"></i>';
+          }).join("");
+
+          var opBtn = "";
+          if (l.kind === "cron") {
+            if (l.status === "running") {
+              opBtn = '<button type="button" class="danger" data-board-cancel="' + escapeHtml(l.key) + '">叫停</button>';
+            } else {
+              var disRun = p.root_ok === false ? ' disabled title="项目目录不可用，无法运行"' : "";
+              opBtn = '<button type="button" data-board-run-now="' + escapeHtml(l.key) + '"' + disRun + ">运行</button>";
+            }
+          } else if (l.kind === "pipeline" && !demoOn) {
+            if (l.status === "running") {
+              opBtn = '<button type="button" class="danger" data-board-pipe-cancel="' + escapeHtml(l.key) + '">叫停</button>';
+            } else if (p.root_ok !== false && (l.nodes || []).some(function (nd) {
+              return nd.status === "ready" || nd.status === "blocked" || nd.status === "cancelled";
+            })) {
+              opBtn = '<button type="button" data-board-pipe-start="' + escapeHtml(l.key) + '">启动</button>';
+            }
+          }
+          lanesHtml += '<div class="fb-line-row' + (S.selectedKey === l.key ? " selected" : "") + '">' +
+            '<button type="button" class="fb-line-id" data-board-line="' + escapeHtml(l.key) + '">' +
+            '<span class="fx-dot ' + lineDotClass(l) + '"></span>' +
+            '<span class="fb-line-info">' +
+            '<span class="fb-line-name-row"><span class="fb-line-name">' + escapeHtml(l.name || l.key) + "</span>" + typeTag + "</span>" +
+            '<span class="fb-line-meta' + subCls + '"' +
+            (l.status === "running" ? ' data-board-timer="' + escapeHtml(l.key) + '"' : "") + ">" +
+            escapeHtml(subMeta) + "</span></span></button>" +
+            '<div class="fb-track-wrap"><div class="fb-track">' + barsHtml + "</div>" + dagHtml + "</div>" +
+            '<div class="fb-line-right"><div class="fb-health-row"><span>成功率 ' + rate + "</span>" +
+            (tok7 > 0 ? "<span>7天 " + escapeHtml(fmtTokens(tok7)) + "</span>" : "") +
+            (lowEff ? '<span class="fx-bad">高耗低效</span>' : "") +
+            (strip ? '<span class="fx-strip">' + strip + "</span>" : "") + "</div>" +
+            '<div class="fb-line-ops">' + opBtn +
+            '<button type="button" data-board-line="' + escapeHtml(l.key) + '">详情</button></div></div>' +
+            "</div>";
+        });
+      }
+      lanesHtml += "</div>";
+    });
+    return lanesHtml;
+  }
+
+  /** 只重画泳道区（搜框输入 / 搜索防抖刷新时用，不动 #fb-search 以保留中文输入法组字与焦点）。 */
+  function renderBoardLanesOnly() {
+    if (!dom.board) return;
+    var host = dom.board.querySelector ? dom.board.querySelector("#fb-lanes") : null;
+    if (!host) { renderBoard(); return; }
+    var st = activeState();
+    if (!st) return;
+    var wb = (typeof activeWorkbench === "function" && activeWorkbench()) || {};
+    host.innerHTML = buildBoardLanesHtml(st, wb, nowMs() / 1000);
+  }
+
+  /** 调度看板（默认主视图）：待确认审批、需留意消化、今日产出简报与巡检、24h 时间轴、排期、DAG 与 7 天体检。 */
+  function renderBoard() {
+    if (!dom.board) return;
+    var keepScroll = dom.board.scrollTop;
+    var st = activeState();
+    if (!st) {
+      dom.board.innerHTML = '<div class="fx-empty">正在读取工厂数据…</div>';
+      return;
+    }
+    var demoOn = isDemoMode();
+    var nowSec = nowMs() / 1000;
+    var cfg = st.config || {};
+    var c = st.counters || {};
+    var rawCap = Number(cfg.max_parallel_runs);
+    var cap = Math.max(1, Math.min(20, Math.round(Number.isFinite(rawCap) ? rawCap : 3)));
+    var running = Number(c.running) || 0;
+    var used = Math.min(cap, running);
+    var slotsHtml = "";
+    for (var si = 0; si < cap; si += 1) {
+      slotsHtml += '<span class="fb-slot' + (si < used ? " busy" : "") + '"></span>';
+    }
+    var live = st.live || {};
+    var liveRuns = live.runs || [];
+    var wb = (typeof activeWorkbench === "function" && activeWorkbench()) || {};
+    var perms = wb.pending_permissions || [];
+    var teams = wb.teams || [];
+    var relays = wb.relays || [];
+    var inspect = wb.inspect || {};
+    var cronRunning = (st.projects || []).reduce(function (n, p) {
+      return n + (p.lines || []).filter(function (l) { return l.kind === "cron" && l.status === "running"; }).length;
+    }, 0);
+
+    var liveChipParts = liveRuns.slice(0, 6).map(function (r) {
+      var waiting = String(r.state || "") === "waiting_permission";
+      var label = (r.title || (r.kind === "turn" ? "对话轮" : "子代理")) +
+        (waiting ? " · 等你确认" : (r.detail ? " · " + r.detail : ""));
+      return '<button type="button" class="fb-live-chip' + (waiting ? " wait" : "") + '"' +
+        (r.session_id ? ' data-board-session="' + escapeHtml(String(r.session_id)) + '"' : "") +
+        ' title="点击前往对应会话">' + escapeHtml(label) + "</button>";
+    });
+    teams.slice(0, 4).forEach(function (t) {
+      var label = "团队 · " + (t.template || t.session_title || "多成员协作") +
+        "（" + (t.rounds_used || 0) + (t.max_rounds ? "/" + t.max_rounds : "") + "轮）";
+      liveChipParts.push(
+        '<button type="button" class="fb-live-chip"' +
+        (t.session_id ? ' data-board-session="' + escapeHtml(String(t.session_id)) + '"' : "") +
+        ' title="点击进入团队会话">' + escapeHtml(label) + "</button>"
+      );
+    });
+    relays.slice(0, 4).forEach(function (r) {
+      var label = "接力 · " + (r.goal || r.id || "双会话") + "（第" + (r.step || 0) + "步）";
+      liveChipParts.push(
+        '<button type="button" class="fb-live-chip"' +
+        (r.session_id ? ' data-board-session="' + escapeHtml(String(r.session_id)) + '"' : "") +
+        ' title="点击进入接力会话">' + escapeHtml(label) + "</button>"
+      );
+    });
+    var permCardHtml = perms.length ? renderPermCardsHtml(perms) : "";
+    var liveHtml = liveChipParts.length
+      ? '<div class="fb-live-chips">' + liveChipParts.join("") + "</div>"
+      : (perms.length ? "" : '<span class="fx-run-empty">暂无对话轮、子代理或协作在跑</span>');
+
+    var filterChips = [
+      ["all", "全部"], ["running", "在跑"], ["attention", "需留意"], ["stopped", "停工"],
+    ].map(function (item) {
+      var on = (S.filter.mode || "all") === item[0];
+      return '<button type="button" class="fx-chip' + (on ? " active" : "") + '" data-board-filter="' +
+        item[0] + '" aria-pressed="' + (on ? "true" : "false") + '">' + item[1] + "</button>";
+    }).join("");
+    var hasCreableProject = ((S.state && S.state.projects) || st.projects || []).some(function (p) {
+      return Number(p.id) > 0 && p.root_ok !== false;
+    });
+    var hasRealProjects = !!((S.state && S.state.projects) || []).length;
+    var showDemoSceneHint = !demoOn && S.demo && !hasRealLines(st);
+
+    var topHtml = '<div class="fb-top">' +
+      '<div class="fb-card"><div class="fb-card-head"><span>总厂并发与排期</span>' +
+      '<span class="fb-brief-ops">' +
+      (cronRunning > 0 && !demoOn ? '<button type="button" class="fx-ack danger" data-board-cancel-all="1">叫停全部</button>' : "") +
+      '<button type="button" class="fx-ack" data-board-dispatch="1">调度厅</button></span></div>' +
+      '<div class="fb-slots">' + slotsHtml + "<span>" + used + " / " + cap + " 占用 · 排队 " +
+      (Number(c.queued) || 0) + "</span></div>" +
+      '<div class="fb-metric-row"><span>今日做成 <b>' + (Number(c.done_today) || 0) +
+      "</b> 件</span><span>今日用量 <b>" + escapeHtml(fmtTokens(c.tokens_today || 0)) + "</b></span></div></div>" +
+      '<div class="fb-card"><div class="fb-card-head"><span>实时对话、协作与审批（' +
+      (liveRuns.length + teams.length + relays.length + perms.length) + "）</span>" +
+      '<button type="button" class="fx-ack" data-board-live="1">全部</button></div>' +
+      permCardHtml + liveHtml + "</div>" +
+      '<div class="fb-card"><div class="fb-card-head"><span>泳道筛选</span>' +
+      '<span class="fb-brief-ops">' +
+      (hasCreableProject ? '<button type="button" class="fx-ack" data-board-new-line="1">＋ 新建定时产线</button>' : "") +
+      (demoOn && hasRealProjects ? '<button type="button" class="fx-ack" data-board-real="1">只看真实项目</button>' : "") +
+      (showDemoSceneHint ? '<button type="button" class="fx-ack" data-board-scene="1">厂区场景演示</button>' : "") +
+      '<button type="button" class="fx-ack" data-board-runs="1">运行记录</button></span></div>' +
+      '<div class="fb-filter-row"><div class="fx-chips">' + filterChips + "</div>" +
+      '<input id="fb-search" class="fb-search" type="search" autocomplete="off" ' +
+      'placeholder="搜厂区或产线" aria-label="按厂区名或产线名筛选" value="' +
+      escapeHtml(S.filter.q || "") + '"></div>' +
+      '<div class="fx-run-empty">横轴展示过去 24 小时运行与未来 2 小时排期，点击色块看详情。</div></div>' +
+      "</div>";
+
+    var attnItems = st.attention || [];
+    var ackableKinds = { error: 1, interrupted: 1, skipped: 1, empty: 1, partial: 1 };
+    var ackableKeys = attnItems.filter(function (a) { return a && a.line_key && ackableKinds[a.kind]; })
+      .map(function (a) { return String(a.line_key); });
+    var attnHtml = "";
+    if (attnItems.length) {
+      attnHtml = '<div class="fb-attn-strip"><div class="fb-card-head"><span>需留意（' +
+        escapeHtml(String(Number(st.attention_total) || attnItems.length)) + "）</span>" +
+        '<span class="fb-brief-ops">' +
+        (ackableKeys.length > 1 ? '<button type="button" class="fx-ack" data-board-ack-all="1">全部知道了</button>' : "") +
+        '<button type="button" class="fx-ack" data-board-attention="1">查看全部</button></span></div>' +
+        '<div class="fb-attn-list">' + attnItems.slice(0, 4).map(function (a) {
+          var lk = String(a.line_key || "");
+          var canAck = !!(lk && ackableKinds[a.kind]);
+          return '<div class="fb-attn-item">' +
+            '<button type="button" class="fb-attn-text" data-board-line="' + escapeHtml(lk) + '">' +
+            escapeHtml(a.text || a.kind || "") + "</button>" +
+            (canAck ? '<button type="button" class="fx-ack" data-board-ack="' + escapeHtml(lk) + '">知道了</button>' : "") +
+            "</div>";
+        }).join("") + "</div></div>";
+    }
+
+    var todayDeliverables = (st.runs || []).filter(function (r) {
+      if (r.status !== "done" || r.outcome === "failed") return false;
+      return isTodayTs(r.finished_at || r.started_at) && !!(r.result_excerpt || r.result_path || r.session_id);
+    });
+    todayDeliverables.sort(function (a, b) {
+      var sa = (a.result_path ? 2 : 0) + (a.result_excerpt ? 1 : 0);
+      var sb = (b.result_path ? 2 : 0) + (b.result_excerpt ? 1 : 0);
+      if (sb !== sa) return sb - sa;
+      return (Number(b.finished_at || b.started_at) || 0) - (Number(a.finished_at || a.started_at) || 0);
+    });
+    todayDeliverables = todayDeliverables.slice(0, 5);
+    var hasInspectAlert = !!(inspect.last_summary && inspect.last_summary !== "无需留意");
+    var briefHtml = "";
+    if (todayDeliverables.length || hasInspectAlert || (!demoOn && (st.runs || []).length)) {
+      briefHtml += '<div class="fb-brief"><div class="fb-card-head"><span>今日产出简报与运行巡检</span>' +
+        '<span class="fb-brief-ops">' +
+        '<span class="dim small">' +
+        (todayDeliverables.length ? "近 " + todayDeliverables.length + " 份做成产出" : "今日暂无新产出摘要") +
+        "</span>" +
+        (!demoOn ? '<button type="button" class="fx-ack" data-board-inspect="1">立即巡检</button>' : "") +
+        "</span></div>";
+      if (hasInspectAlert) {
+        briefHtml += '<div class="fb-inspect-bar"><div><b>最近运行巡检</b>' +
+          (inspect.last_at ? "（" + escapeHtml(fmtTs(inspect.last_at)) + "）" : "") + "：" +
+          escapeHtml(inspect.last_summary) + "</div>" +
+          (inspect.last_report
+            ? '<button type="button" class="fx-ack" data-board-report="' + escapeHtml(String(inspect.last_report)) + '">看巡检报告</button>'
+            : "") +
+          "</div>";
+      }
+      if (todayDeliverables.length) {
+        briefHtml += '<div class="fb-brief-grid">' + todayDeliverables.map(function (r) {
+          var tok = (Number(r.in_tokens) || 0) + (Number(r.out_tokens) || 0);
+          var heading = (r.project_name ? r.project_name + " · " : "") + runTitle(r);
+          var meta = [fmtTs(r.finished_at || r.started_at), tok > 0 ? fmtTokens(tok) + " token" : ""]
+            .filter(Boolean).join(" · ");
+          return '<div class="fb-brief-item">' +
+            '<div class="fb-brief-head"><span class="fb-brief-name">' + escapeHtml(heading) + "</span>" +
+            '<span class="fx-run-meta">' + escapeHtml(meta) + "</span></div>" +
+            (r.result_excerpt
+              ? '<div class="fb-brief-excerpt">' + escapeHtml(String(r.result_excerpt).slice(0, 120)) + "</div>"
+              : "") +
+            '<div class="fb-brief-ops">' +
+            (r.result_path
+              ? '<button type="button" class="fx-ack" data-board-report="' + escapeHtml(String(r.result_path)) + '">打开产出</button>'
+              : "") +
+            (r.session_id
+              ? '<button type="button" class="fx-ack" data-board-session="' + escapeHtml(String(r.session_id)) + '">去会话</button>'
+              : "") +
+            '<button type="button" class="fx-ack" data-board-run="' + escapeHtml(String(r.id)) + '">运行详情</button>' +
+            "</div></div>";
+        }).join("") + "</div>";
+      }
+      briefHtml += "</div>";
+    }
+
+    var lanesHtml = buildBoardLanesHtml(st, wb, nowSec);
+    dom.board.innerHTML = topHtml + attnHtml + briefHtml + '<div class="fb-lanes" id="fb-lanes">' + lanesHtml + "</div>";
+    dom.board.scrollTop = keepScroll;
+    bindPermCards(dom.board, renderBoard);
+
+    if (!dom.board._bound) {
+      dom.board._bound = true;
+      dom.board.addEventListener("input", function (ev) {
+        var inp = ev.target && ev.target.closest ? ev.target.closest("#fb-search") : null;
+        if (!inp) return;
+        S.filter.q = inp.value;
+        if (dom.search && dom.search.value !== S.filter.q) dom.search.value = S.filter.q;
+        if (S.filterTimer) clearTimeout(S.filterTimer);
+        S.filterTimer = setTimeout(function () {
+          S.filterTimer = 0;
+          renderPanel();
+          renderBoardLanesOnly();
+        }, 120);
+      });
+      dom.board.addEventListener("keydown", function (ev) {
+        var inp = ev.target && ev.target.closest ? ev.target.closest("#fb-search") : null;
+        if (!inp) return;
+        if (ev.key === "Escape" && inp.value) {
+          ev.stopPropagation();
+          inp.value = "";
+          S.filter.q = "";
+          if (dom.search) dom.search.value = "";
+          renderPanel();
+          renderBoardLanesOnly();
+        }
+      });
+      dom.board.addEventListener("click", function (ev) {
+        var t = ev.target;
+        var ackBtn = t.closest("[data-board-ack]");
+        if (ackBtn) { ackAttention([ackBtn.dataset.boardAck]); return; }
+        if (t.closest("[data-board-ack-all]")) {
+          var stCur = activeState() || {};
+          var keys = (stCur.attention || []).filter(function (a) {
+            return a && a.line_key && ackableKinds[a.kind];
+          }).map(function (a) { return String(a.line_key); });
+          ackAttention(keys);
+          return;
+        }
+        if (t.closest("[data-board-attention]")) { openAttentionDrawer(); return; }
+        if (t.closest("[data-board-scene]")) { setViewMode("scene", true); return; }
+        var runBtn = t.closest("[data-board-run]");
+        if (runBtn) { openRunDrawer(Number(runBtn.dataset.boardRun)); return; }
+        var lineBtn = t.closest("[data-board-line]");
+        if (lineBtn) { openLineDrawer(lineBtn.dataset.boardLine, { focus: false }); return; }
+        var repBtn = t.closest("[data-board-report]");
+        if (repBtn) { openFactoryResult(repBtn.dataset.boardReport); return; }
+        var inspBtn = t.closest("[data-board-inspect]");
+        if (inspBtn) { runInspectNow(inspBtn); return; }
+        var ovBtn = t.closest("[data-board-proj-overview]");
+        if (ovBtn) { openProjectDrawer(Number(ovBtn.dataset.boardProjOverview)); return; }
+        var focusBtn = t.closest("[data-board-focus]");
+        if (focusBtn) { focusProject(Number(focusBtn.dataset.boardFocus)); return; }
+        var rwBtn = t.closest("[data-board-rework]");
+        if (rwBtn) { openReworkDrawer(Number(rwBtn.dataset.boardRework)); return; }
+        var addLineBtn = t.closest("[data-board-add-line]");
+        if (addLineBtn) { openNewLineDrawer(Number(addLineBtn.dataset.boardAddLine)); return; }
+        if (t.closest("[data-board-new-line]")) { openNewLineDrawer(S.focusPid || undefined); return; }
+        var realBtn = t.closest("[data-board-real]");
+        if (realBtn) { saveConfig({ demo: false }, realBtn); return; }
+        var pToggleBtn = t.closest("[data-board-proj-toggle]");
+        if (pToggleBtn) {
+          var tPid = Number(pToggleBtn.dataset.boardProjToggle);
+          var tProj = ((activeState() || {}).projects || []).find(function (pr) { return Number(pr.id) === tPid; });
+          toggleProjectCronLines(tPid, tProj ? tProj.name : ("厂区 " + tPid), pToggleBtn.dataset.enable === "1", pToggleBtn);
+          return;
+        }
+        var cAllBtn = t.closest("[data-board-cancel-all]");
+        if (cAllBtn) { cancelAllRunning(null, cAllBtn); return; }
+        var psBtn = t.closest("[data-board-pipe-start]");
+        if (psBtn) {
+          var psLine = findLine(psBtn.dataset.boardPipeStart);
+          if (psLine && psLine.line) runPipeline(psLine.line, psBtn);
+          return;
+        }
+        var pcBtn = t.closest("[data-board-pipe-cancel]");
+        if (pcBtn) {
+          var pcLine = findLine(pcBtn.dataset.boardPipeCancel);
+          if (pcLine && pcLine.line) cancelPipeline(pcLine.line, pcBtn);
+          return;
+        }
+        var nowBtn = t.closest("[data-board-run-now]");
+        if (nowBtn) {
+          var rLine = findLine(nowBtn.dataset.boardRunNow);
+          if (rLine && rLine.line) runLine(rLine.line, nowBtn);
+          return;
+        }
+        var cBtn = t.closest("[data-board-cancel]");
+        if (cBtn) {
+          var cLine = findLine(cBtn.dataset.boardCancel);
+          if (cLine && cLine.line) cancelRun(cLine.line.id, cLine.line.name, cBtn);
+          return;
+        }
+        var fBtn = t.closest("[data-board-filter]");
+        if (fBtn) {
+          S.filter.mode = fBtn.dataset.boardFilter || "all";
+          if (typeof syncFilterChips === "function") syncFilterChips();
+          renderPanel();
+          renderBoard();
+          return;
+        }
+        if (t.closest("[data-board-clear]")) {
+          if (typeof resetFilter === "function") resetFilter();
+          renderBoard();
+          return;
+        }
+        var sessBtn = t.closest("[data-board-session], [data-live-session]");
+        if (sessBtn) {
+          var sid = sessBtn.dataset.boardSession || sessBtn.dataset.liveSession || "";
+          closeDrawer();
+          if (typeof backToChat === "function") backToChat();
+          if (sid && typeof openTabForSession === "function") openTabForSession(sid, "");
+          return;
+        }
+        if (t.closest("[data-board-dispatch]")) { openDispatchDrawer(); return; }
+        if (t.closest("[data-board-live]")) { openLiveDrawer(); return; }
+        if (t.closest("[data-board-runs]")) { openAllRunsDrawer(); }
+      });
+    }
+  }
+
   // ---------- FX 导出（主文件转发目标 + 测试探针入口） ----------
   FX.applyRunProgress = applyRunProgress; FX.closeDrawer = closeDrawer;
   FX.openAllRunsDrawer = openAllRunsDrawer; FX.openAttentionDrawer = openAttentionDrawer;
@@ -1797,6 +2989,11 @@
   FX.openNewLineDrawer = openNewLineDrawer; FX.openRunDrawer = openRunDrawer;
   FX.openSettingsDrawer = openSettingsDrawer; FX.openQueueDrawer = openQueueDrawer;
   FX.openUpcomingDialog = openUpcomingDialog;
+  FX.openDispatchDrawer = openDispatchDrawer; FX.openProjectDrawer = openProjectDrawer;
+  FX.openReworkDrawer = openReworkDrawer;
+  FX.renderBoard = renderBoard; FX.renderBoardLanesOnly = renderBoardLanesOnly; FX.runLine = runLine;
+  FX.runPipeline = runPipeline; FX.cancelPipeline = cancelPipeline;
+  FX.runInspectNow = runInspectNow;
   FX.saveConfig = saveConfig; FX.loadAllRuns = loadAllRuns;
   FX.progressText = progressText;
   // 处置台的纯函数（health → 一句话诊断）：导出给测试探针直接断言，

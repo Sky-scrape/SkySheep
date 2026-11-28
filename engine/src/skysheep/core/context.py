@@ -228,7 +228,7 @@ def _safe_recent_start(messages: list[Message], keep: int) -> int:
             and messages[idx + 1].role == "tool"
         )
 
-    while start < len(messages) and _splits_a_pair(start):
+    while start > 1 and start < len(messages) and _splits_a_pair(start):
         start -= 1
     return max(1, start)
 
@@ -265,16 +265,21 @@ def _spill_target(agent, session_id: str) -> tuple[Path, str] | None:
     base = getattr(agent, "working_dir", None)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     safe = re.sub(r"[^0-9A-Za-z_-]", "", session_id or "")[:24] or "session"
-    name = f"{safe}-{stamp}.md"
     try:
         if base is not None:
             root = Path(base) / ".skysheep" / TRANSCRIPT_DIR
-            shown = f".skysheep/{TRANSCRIPT_DIR}/{name}"
+            shown_dir = f".skysheep/{TRANSCRIPT_DIR}"
         else:
             root = Path.home() / ".skysheep" / TRANSCRIPT_DIR
-            shown = str(root / name)
+            shown_dir = str(root)
         root.mkdir(parents=True, exist_ok=True)
         _ensure_transcript_gitignore(root)
+        name = f"{safe}-{stamp}.md"
+        seq = 1
+        while (root / name).exists():
+            seq += 1
+            name = f"{safe}-{stamp}-{seq}.md"
+        shown = f"{shown_dir}/{name}" if base is not None else str(root / name)
         return root / name, shown
     except OSError as e:  # noqa: BLE001 - 磁盘/权限问题不该拖垮压缩
         logger.warning("compact_history: 无法创建 transcript 目录（%s），本次不落盘", e)

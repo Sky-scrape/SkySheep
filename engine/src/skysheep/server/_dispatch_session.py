@@ -7,8 +7,15 @@ usage。自 app.py 逐字迁入，行为零变化。
 
 from __future__ import annotations
 
-from ._dispatch_common import _remote_scope, _WsMethod
+from ._dispatch_common import _param_int, _remote_scope, _WsMethod
 from .backend import ServerBackend
+
+
+def _term_dims(params: dict) -> tuple[int, int]:
+    """统一解析终端尺寸：非法输入给中文提示，并夹在 1..500 合理行列范围。"""
+    rows = _param_int(params, "rows", 24, lo=1, hi=500) or 24
+    cols = _param_int(params, "cols", 100, lo=1, hi=500) or 100
+    return rows, cols
 
 
 def _gate_session_search(params: dict) -> str | None:
@@ -304,22 +311,19 @@ async def _h_diagnostics_turn_breakdown(backend: ServerBackend, params: dict, em
 
 async def _h_term_spawn(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     tid = str(params.get("term_id", "") or "")
-    rows = int(params.get("rows", 24) or 24)
-    cols = int(params.get("cols", 100) or 100)
+    rows, cols = _term_dims(params)
     return backend.term_spawn(tid, rows, cols)
 
 
 async def _h_term_input(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     tid = str(params.get("term_id", "") or "")
-    rows = int(params.get("rows", 24) or 24)
-    cols = int(params.get("cols", 100) or 100)
+    rows, cols = _term_dims(params)
     return backend.term_input(tid, str(params.get("data", "")), rows, cols)
 
 
 async def _h_term_resize(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     tid = str(params.get("term_id", "") or "")
-    rows = int(params.get("rows", 24) or 24)
-    cols = int(params.get("cols", 100) or 100)
+    rows, cols = _term_dims(params)
     return backend.term_resize(tid, rows, cols)
 
 

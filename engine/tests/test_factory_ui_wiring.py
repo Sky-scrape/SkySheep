@@ -29,12 +29,12 @@ def read_static(name: str) -> str:
     return (STATIC_DIR / name).read_text(encoding="utf-8")
 
 def read_factory_js() -> str:
-    """工厂前端按加载顺序拼接（主文件 + scene + drawer + draw 四个分区）。
+    """工厂前端按加载顺序拼接（主文件 + camera + scene + drawer + draw 五个分区）。
 
-    工厂拆成四个分区文件后，源码锚定断言对拼接文本跑，语义与拆分前一致。
+    工厂拆成分区文件后，源码锚定断言对拼接文本跑，语义与拆分前一致。
     """
     return "\n".join(read_static(n) for n in (
-        "app-factory.js", "app-factory-scene.js",
+        "app-factory.js", "app-factory-camera.js", "app-factory-scene.js",
         "app-factory-drawer.js", "app-factory-draw.js"))
 
 
@@ -55,9 +55,9 @@ def test_factory_dom_contract_ids_present():
         "factory-hud", "factory-clock", "factory-panel", "factory-panel-body",
         "factory-panel-filter", "factory-search", "factory-demo-badge",
         "factory-stage", "factory-canvas", "factory-labels", "factory-toolbar",
-        "factory-center", "factory-labels-toggle",
-        "factory-all-runs", "factory-drawer", "factory-notice",
-        "factory-weather",
+        "factory-work-view", "factory-center", "factory-labels-toggle",
+        "factory-all-runs", "factory-board", "factory-drawer", "factory-notice",
+        "factory-weather", "factory-live-pill", "factory-view-switch",
         # 顶栏只剩一盏「需留意」灯（读数已经长在场景里）
         "factory-attention", "factory-attn-num",
     ):
@@ -95,8 +95,8 @@ def test_factory_script_loads_after_app_js():
     i_app = html.index('<script src="/static/app.js"></script>')
     i_factory = html.index('<script src="/static/app-factory.js"></script>')
     assert i_app < i_factory, "app-factory.js 必须在 app.js 之后加载"
-    # 四个工厂分区按依赖顺序加载：主文件创建 FX 与各绑定源，绘制层最后
-    names = ["app-factory.js", "app-factory-scene.js",
+    # 五个工厂分区按依赖顺序加载：主文件创建 FX 与各绑定源，相机先于场景，绘制层最后
+    names = ["app-factory.js", "app-factory-camera.js", "app-factory-scene.js",
              "app-factory-drawer.js", "app-factory-draw.js"]
     pos = [html.index(f'<script src="/static/{n}"></script>') for n in names]
     assert pos == sorted(pos), f"工厂分区加载顺序应为 {' → '.join(names)}"
@@ -626,9 +626,10 @@ def test_factory_panel_is_a_directory_not_an_ops_console():
     # 键盘：面板内 ↑↓ / Home / End
     assert "function panelKeyNav(" in js
     assert "dom.panelBody.addEventListener(\"keydown\", panelKeyNav)" in js
-    # 样板厂边界：顶栏灰掉 + 「演示」标记
-    assert 'dom.hud.classList.toggle("demo", !!S.demo)' in js
-    assert 'dom.demoBadge.classList.toggle("hidden", !S.demo)' in js
+    # 样板厂边界：顶栏灰掉 + 「演示」标记（通过 isDemoMode 统一看板与场景的演示口径）
+    assert "function isDemoMode(" in js
+    assert 'dom.hud.classList.toggle("demo", demoOn)' in js
+    assert 'dom.demoBadge.classList.toggle("hidden", !demoOn)' in js
     # 目录默认折叠（场景优先），折叠按钮仍能翻回来
     assert "panelFolded: true" in js
     assert 'dom.panel.classList.toggle("folded", S.panelFolded)' in js
@@ -811,7 +812,7 @@ def test_factory_scene_wires_noticeboard():
                  "upcomingPositions", "Math.floor(index / 2)"):
         assert gone not in js, f"旧多包裹排布应已移除：{gone}"
     # 告示牌打开只读弹窗，任务详情仍保留在其他对象的点击路径。
-    i_up = js.index("function onPointerUp(")
+    i_up = js.index("function onPointerUp(ev) {\n")  # 真身在相机层（主文件有同名单行转发函数）
     up_body = js[i_up:js.index("\n  }", i_up)]
     assert 'hit.type === "upcoming"' in up_body
     assert "openUpcomingDialog()" in up_body
@@ -890,11 +891,11 @@ def test_factory_scene_waits_are_tiered_by_duration():
     assert "qLane.label.y * (S.cssH / S.bufH)" in js
     # 点排队包裹只开抽屉，不派工
     assert 'hit.type === "queued" && hit.key' in js
-    i_up = js.index("function onPointerUp(")
+    i_up = js.index("function onPointerUp(ev) {\n")
     up_body = js[i_up:js.index("\n  }", i_up)]
     assert "openLineDrawer(hit.key" in up_body
     # 命中测试要把排队包裹一起算上（小目标优先于脚下机台）
-    i_hit = js.index("function hitTest(")
+    i_hit = js.index("function hitTest(x, y) {\n")
     hit_body = js[i_hit:js.index("\n  }", i_hit)]
     assert 'h.type !== "queued"' in hit_body or 'h.type === "queued"' in hit_body
     # 样式：等超过 3 分钟转红
@@ -1037,7 +1038,8 @@ def test_factory_cross_file_helpers_are_forwarded():
     """
     main = read_static("app-factory.js")
     others = "".join(read_static(n) for n in (
-        "app-factory-scene.js", "app-factory-drawer.js", "app-factory-draw.js"))
+        "app-factory-camera.js", "app-factory-scene.js",
+        "app-factory-drawer.js", "app-factory-draw.js"))
     forwarded = set(re.findall(r"\breturn FX\.(\w+)\(", main))
     forwarded |= set(re.findall(r"= FX\.(\w+);", main))
     # 直接挂到 window 的（factoryEscape 一族）主文件裸调时按全局查表，无需转发
@@ -1053,7 +1055,7 @@ def test_factory_cross_file_helpers_are_forwarded():
 
 def test_service_worker_shell_includes_factory_module():
     sw = read_static("sw.js")
-    for name in ("app-factory.js", "app-factory-scene.js",
+    for name in ("app-factory.js", "app-factory-camera.js", "app-factory-scene.js",
                  "app-factory-drawer.js", "app-factory-draw.js"):
         assert f'"/static/{name}"' in sw, f"sw.js 壳清单缺少 {name}"
     m = re.search(r'SW_VERSION = "skysheep-shell-v(\d+)"', sw)
@@ -1165,7 +1167,8 @@ function makeEl(id) {
   };
 }
 
-const sandbox = {
+  let rafSeq = 0;
+  const sandbox = {
   window: null,
   document: {
     hidden: false,
@@ -1179,7 +1182,7 @@ const sandbox = {
   matchMedia: () => ({ matches: false, addEventListener() {} }),
   ResizeObserver: function () { this.observe = () => {}; this.disconnect = () => {}; },
   setTimeout, clearTimeout, setInterval, clearInterval,
-  requestAnimationFrame: () => 1, cancelAnimationFrame() {},
+  requestAnimationFrame: () => ++rafSeq, cancelAnimationFrame() {},
   Promise, Map, Set, Number, String, Object, Array, Math, JSON, Date, Error,
   escapeHtml(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, c => c); },
   addNotice(m) { notices.push(String(m)); },
@@ -1198,7 +1201,7 @@ const sandbox = {
 sandbox.window = sandbox;
 vm.createContext(sandbox);
 const mods = [
-  "app-factory.js", "app-factory-scene.js",
+  "app-factory.js", "app-factory-camera.js", "app-factory-scene.js",
   "app-factory-drawer.js", "app-factory-draw.js",
 ];
 for (const f of mods) {
@@ -1343,4 +1346,465 @@ console.log(JSON.stringify({
     assert res["twoHasOkFlag"] is True
     assert res["overrideDoneCount"] == 1
     assert res["nodeAfter"] == "done" and res["tokensAfter"] == 150
+
+
+def test_factory_visual_enhancements_wiring_and_runtime():
+    """工厂可视化增强：作业区取景、实时脉冲胶囊、看板模式、DAG 流程带与返工/调度抽屉。"""
+    import json
+    import shutil
+    import subprocess
+
+    import pytest
+
+    js_all = read_factory_js()
+    for sym in (
+        "function fitWorkCamera(",
+        "function openDispatchDrawer(",
+        "function openReworkDrawer(",
+        "function renderBoard(",
+        "function setViewMode(",
+        "S.selectedKey === m.rec.key",
+        "live-cap",
+        "fb-lane",
+    ):
+        assert sym in js_all, f"缺少工厂可视化增强符号 {sym}"
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+
+    probe = r"""
+const vm = require("vm");
+const fs = require("fs");
+const path = require("path");
+const dir = process.argv[1];
+
+const els = new Map();
+function makeClassList(initial) {
+  const s = new Set(initial || []);
+  return {
+    toggle(c, on) {
+      const next = on === undefined ? !s.has(c) : !!on;
+      next ? s.add(c) : s.delete(c);
+    },
+    add(c) { s.add(c); },
+    remove(c) { s.delete(c); },
+    contains(c) { return s.has(c); },
+  };
+}
+function makeEl(id, initialClasses) {
+  return {
+    id, style: {}, dataset: {}, value: "", checked: false,
+    innerHTML: "", textContent: "",
+    classList: makeClassList(initialClasses),
+    setAttribute() {}, getAttribute() { return ""; },
+    addEventListener() {}, removeEventListener() {},
+    querySelectorAll() { return []; },
+    querySelector() { return makeEl(id + "-child"); },
+    appendChild() {}, remove() {}, focus() {},
+    getContext() { return null; },
+    clientWidth: 1000, clientHeight: 700, width: 1000, height: 700,
+    getBoundingClientRect() { return { left: 0, top: 0, width: 1000, height: 700 }; },
+  };
+}
+function ensureEl(id) {
+  if (!els.has(id)) els.set(id, makeEl(id));
+  return els.get(id);
+}
+
+  let rafSeq = 0;
+  const sandbox = {
+  window: null,
+  document: {
+    hidden: false,
+    getElementById: ensureEl,
+    querySelectorAll() { return []; },
+    createElement(tag) { return makeEl(tag); },
+    addEventListener() {}, removeEventListener() {},
+  },
+  navigator: { reducedMotion: false },
+  performance: { now: () => 1000 },
+  matchMedia: () => ({ matches: false, addEventListener() {} }),
+  ResizeObserver: function () { this.observe = () => {}; this.disconnect = () => {}; },
+  setTimeout, clearTimeout, setInterval, clearInterval,
+  requestAnimationFrame: () => ++rafSeq, cancelAnimationFrame() {},
+  Promise, Map, Set, Number, String, Object, Array, Math, JSON, Date, Error,
+  escapeHtml(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, c => c); },
+  addNotice() {},
+  request() { return Promise.resolve({ ok: true, runs: [] }); },
+  confirmModal() { return Promise.resolve(true); },
+};
+sandbox.window = sandbox;
+vm.createContext(sandbox);
+const mods = [
+  "app-factory.js", "app-factory-camera.js", "app-factory-scene.js",
+  "app-factory-drawer.js", "app-factory-draw.js",
+];
+for (const f of mods) {
+  vm.runInContext(fs.readFileSync(path.join(dir, f), "utf8"), sandbox, { filename: f });
+}
+const FX = sandbox.FX;
+const defaultViewMode = FX.S.viewMode;
+FX.dom.view = ensureEl("view-factory");
+FX.dom.stage = ensureEl("factory-stage");
+FX.dom.canvas = ensureEl("factory-canvas");
+FX.dom.labels = ensureEl("factory-labels");
+FX.dom.panelBody = ensureEl("factory-panel-body");
+FX.dom.drawer = ensureEl("factory-drawer");
+FX.dom.board = ensureEl("factory-board");
+FX.dom.livePill = ensureEl("factory-live-pill");
+FX.dom.workBtn = ensureEl("factory-work-view");
+FX.dom.centerBtn = ensureEl("factory-center");
+FX.dom.viewSwitch = ensureEl("factory-view-switch");
+FX.dom.attentionLamp = ensureEl("factory-attention");
+FX.dom.attnNum = ensureEl("factory-attn-num");
+FX.dom.hud = ensureEl("factory-hud");
+FX.dom.demoBadge = ensureEl("factory-demo-badge");
+FX.S.cssW = 1000; FX.S.cssH = 700; FX.S.bufW = 1000; FX.S.bufH = 700;
+
+const nowSec = Date.now() / 1000;
+FX.S.state = {
+  now: nowSec,
+  projects: [
+    {
+      id: 1, name: "Alpha", root_ok: true,
+      lines: [
+        {
+          key: "pipe:5", kind: "pipeline", id: 5, project_id: 1,
+          name: "发布流", status: "running", enabled: true,
+          nodes: [
+            { id: 51, title: "拉取", status: "done" },
+            { id: 52, title: "构建", status: "running" },
+          ],
+          health: { total: 4, success_rate: 0.75, streak: 0, tail: ["done", "error", "done"] },
+        },
+        {
+          key: "cron:9", kind: "cron", id: 9, project_id: 1,
+          name: "夜间检查", status: "idle", last_status: "error", last_run_at: nowSec - 500, enabled: true,
+          health: {
+            total: 3, success_rate: 0.33, streak: 2,
+            tokens_7d: 25000, wasted_7d: 2, tail: ["error", "error", "done"],
+          },
+        },
+        {
+          key: "team:8", kind: "cron", id: 8, project_id: 1,
+          name: "评审团队", status: "idle", enabled: true,
+          is_team: true, team_meta: { found: true, members: 2, director_ai: true },
+          health: {},
+        },
+      ],
+    },
+    { id: 2, name: "Beta", root_ok: true, lines: [] },
+  ],
+  runs: [
+    {
+      id: 101, kind: "pipeline", task_id: 5, pipeline_id: 5, project_id: 1,
+      name: "发布流", status: "running", started_at: nowSec - 25, trigger: "manual",
+    },
+    {
+      id: 102, kind: "cron", task_id: 9, project_id: 1,
+      name: "夜间检查", status: "error", outcome: "failed",
+      started_at: nowSec - 600, finished_at: nowSec - 500, duration_s: 100,
+    },
+    {
+      id: 103, kind: "cron", task_id: 9, project_id: 1, project_name: "Alpha",
+      name: "夜间检查", status: "done", outcome: "ok", session_id: "sess-1",
+      result_excerpt: "已输出验收总结与建议", in_tokens: 800, out_tokens: 400,
+      started_at: nowSec - 300, finished_at: nowSec - 200, duration_s: 100,
+    },
+  ],
+  live: {
+    chat: 1, subagent: 1,
+    runs: [
+      {
+        id: "t-1", kind: "turn", session_id: "sess-1",
+        title: "Alpha 对话", state: "tool_running", detail: "read_file",
+      },
+      {
+        id: "s-1", kind: "subagent", session_id: "sess-1",
+        title: "verifier", state: "tool_running", detail: "pytest",
+      },
+    ],
+  },
+  counters: { running: 1, done_today: 2, tokens_today: 420, attention: 1, queued: 1 },
+  attention: [{ project_id: 1, line_key: "cron:9", kind: "error", text: "夜间检查 上次失败" }],
+  waiting: [{ key: "cron:9", name: "夜间检查", due_at: nowSec - 30 }],
+  config: { enabled: true, max_parallel_runs: 3 },
+};
+FX.S.workbench = {
+  pending_permissions: [
+    {
+      request_id: "perm-1", session_id: "sess-1", project_id: 1, project_name: "Alpha",
+      session_title: "Alpha 对话", tool_name: "write_file", safety: "write",
+      detail: "write README.md",
+    },
+  ],
+  teams: [
+    {
+      session_id: "sess-1", project_id: 1, project_name: "Alpha",
+      template: "审校团队", director_mode: "ai", members: 2,
+      rounds_used: 2, max_rounds: 6, tasks_done: 1, tasks_total: 2,
+    },
+  ],
+  relays: [
+    {
+      id: "rel-1", session_id: "sess-2", project_id: 2, project_name: "Beta",
+      goal: "双模型审查", state: "running", step: 2,
+    },
+  ],
+  session_projects: { "sess-1": 1 },
+  inspect: { enabled: true, last_at: nowSec - 60, last_summary: "夜间检查带病跑完", last_report: "" },
+};
+
+FX.S.mounted = true;
+FX.setViewMode("scene");
+FX.S.cssW = 1000; FX.S.cssH = 700; FX.S.bufW = 1000; FX.S.bufH = 700;
+FX.buildWorld(FX.S.state);
+FX.refreshProjectStats(true);
+FX.fitCamera(false);
+const panoZoom = FX.S.cam.zoom;
+FX.fitWorkCamera(false);
+const workZoom = FX.S.cam.zoom;
+const workMode = FX.S.camMode;
+
+// 验证重构后的相机与手势：1) 跨过原点 x=0 拖拽 1:1 跟手无滞后/回跳
+FX.S.cam.x = FX.S.cam.tx = 12;
+FX.S.cam.y = FX.S.cam.ty = 0;
+FX.S.cam.zoom = FX.S.cam.tz = 1;
+FX.onPointerDown({ button: 0, pointerId: 7, clientX: 200, clientY: 200 });
+FX.onPointerMove({ pointerId: 7, clientX: 212, clientY: 200 });
+const atZeroX = FX.S.cam.x;
+const atZeroTx = FX.S.cam.tx;
+FX.onPointerMove({ pointerId: 7, clientX: 240, clientY: 200 });
+const afterZeroX = FX.S.cam.x;
+const afterZeroTx = FX.S.cam.tx;
+const panDirectMatch = (atZeroX === atZeroTx) && (afterZeroX === afterZeroTx) &&
+  Math.abs(atZeroX) < 1e-6 && afterZeroX < 0;
+FX.onPointerUp({ pointerId: 7, clientX: 240, clientY: 200 });
+
+// 2) 从可点击名牌上按住拖动 >5px 走平移而不触发打开抽屉；未拖动轻点则打开调度厅抽屉
+const hallLabel = { dataset: { openHall: "1" }, closest() { return hallLabel; } };
+FX.dom.drawer.innerHTML = "";
+FX.onPointerDown({ button: 0, pointerId: 8, clientX: 100, clientY: 100, target: hallLabel });
+FX.onPointerMove({ pointerId: 8, clientX: 130, clientY: 115 });
+FX.onPointerUp({ pointerId: 8, clientX: 130, clientY: 115, target: hallLabel });
+const labelDragOpenedDrawer = FX.dom.drawer.innerHTML.includes("并发额度");
+FX.onPointerDown({ button: 0, pointerId: 9, clientX: 100, clientY: 100, target: hallLabel });
+FX.onPointerUp({ pointerId: 9, clientX: 101, clientY: 101, target: hallLabel });
+const labelTapOpenedDrawer = FX.dom.drawer.innerHTML.includes("并发额度");
+FX.dom.drawer.innerHTML = "";
+
+// 3) 视口感知的南向边界收敛（不拖出半屏空白沙漠）& 放大到南部场院时地平线自然归零
+FX.fitCamera(false);
+FX.onPointerDown({ button: 0, pointerId: 10, clientX: 300, clientY: 400 });
+FX.onPointerMove({ pointerId: 10, clientX: 300, clientY: -2000 });
+FX.onPointerUp({ pointerId: 10, clientX: 300, clientY: -2000 });
+const southClampedY = FX.S.cam.y;
+const southBoundsSafe = southClampedY < FX.S.world.bounds.maxY - 60;
+FX.S.cam.x = FX.S.cam.tx = 0;
+FX.S.cam.y = FX.S.cam.ty = 80;
+FX.S.cam.zoom = FX.S.cam.tz = 2.0;
+const horizonZoomedSouth = FX.sceneHorizon();
+
+FX.fitWorkCamera(false);
+FX.renderAll();
+const livePillHtml = FX.dom.livePill.innerHTML;
+const livePillHiddenActive = FX.dom.livePill.classList.contains("hidden");
+
+FX.openLiveDrawer();
+const liveDrawerHtml = FX.dom.drawer.innerHTML;
+
+FX.openDispatchDrawer();
+const dispatchHtml = FX.dom.drawer.innerHTML;
+
+FX.openReworkDrawer(1);
+const reworkHtml = FX.dom.drawer.innerHTML;
+
+FX.openLineDrawer("pipe:5", { focus: true });
+const lineSelected = FX.S.selectedKey;
+const lineFocusPid = FX.S.focusPid;
+const lineDrawerHtml = FX.dom.drawer.innerHTML;
+
+FX.openProjectDrawer(1);
+const projectDrawerHtml = FX.dom.drawer.innerHTML;
+
+// 未建世界前调用 fitWorkCamera 应保持 work 模式不被回落成 panorama
+const prevWorld = FX.S.world;
+FX.S.world = null;
+FX.fitWorkCamera(false);
+const camModeBeforeWorld = FX.S.camMode;
+FX.S.world = prevWorld;
+
+FX.setViewMode("board");
+const rafStoppedOnBoard = FX.S.raf === 0;
+const boardModeActive = FX.dom.view.classList.contains("board-mode");
+const boardHiddenAfterSwitch = FX.dom.board.classList.contains("hidden");
+const boardHtml = FX.dom.board.innerHTML;
+
+// 验证真实空产线项目在看板模式下不被样板厂遮盖，切到场景后才进样板厂
+const savedRealState = FX.S.state;
+const savedRealWb = FX.S.workbench;
+FX.S.state = {
+  now: nowSec,
+  projects: [{ id: 2, name: "BetaReal", root_ok: true, lines: [] }],
+  runs: [],
+  live: { chat: 1, subagent: 0, runs: [] },
+  counters: { running: 0, done_today: 0, tokens_today: 0, attention: 0, queued: 0 },
+  attention: [],
+  config: { enabled: true, demo: true },
+};
+FX.S.demo = FX.buildDemoState({ demo: true });
+FX.S.workbench = savedRealWb;
+FX.setViewMode("board");
+const boardRealPriority = (
+  !FX.isDemoMode() && FX.activeState() === FX.S.state &&
+  FX.activeWorkbench() === savedRealWb
+);
+FX.setViewMode("scene");
+const sceneDemoActive = FX.isDemoMode() && FX.activeState() === FX.S.demo;
+FX.S.demo = null;
+FX.S.state = savedRealState;
+FX.S.workbench = savedRealWb;
+FX.setViewMode("board");
+
+// 局部搜索刷新验证（renderBoardLanesOnly 直接过滤 #fb-lanes）
+const lanesHost = makeEl("fb-lanes");
+FX.dom.board.querySelector = (sel) => (sel === "#fb-lanes" ? lanesHost : makeEl("board-child"));
+FX.S.filter.q = "夜间";
+FX.renderBoardLanesOnly();
+const lanesFilterWorks = lanesHost.innerHTML.includes("夜间检查") && !lanesHost.innerHTML.includes("发布流");
+FX.S.filter.q = "";
+
+FX.S.state.counters = { running: 0, done_today: 0, tokens_today: 0, attention: 0, queued: 0 };
+FX.S.state.live = { chat: 0, subagent: 0, runs: [] };
+FX.S.state.waiting = [];
+FX.S.workbench = { pending_permissions: [], teams: [], relays: [], session_projects: {}, inspect: {} };
+FX.renderAll();
+const livePillHiddenIdle = FX.dom.livePill.classList.contains("hidden");
+
+console.log(JSON.stringify({
+  defaultViewMode,
+  workMode,
+  workZoomCloser: workZoom >= panoZoom && workZoom > 0,
+  panDirectMatch,
+  labelDragOpenedDrawer,
+  labelTapOpenedDrawer,
+  southBoundsSafe,
+  horizonZoomedSouth,
+  livePillHtml,
+  livePillHiddenActive,
+  livePillHiddenIdle,
+  liveHasPermCard: (
+    liveDrawerHtml.includes('data-perm-decide="allow_once"') &&
+    liveDrawerHtml.includes("允许一次")
+  ),
+  liveHasCollab: liveDrawerHtml.includes("审校团队") && liveDrawerHtml.includes("双模型审查"),
+  dispatchHasQueue: dispatchHtml.includes("排队等待") && dispatchHtml.includes("并发额度"),
+  dispatchHasPermAndCollab: (
+    dispatchHtml.includes("fx-perm-card") && dispatchHtml.includes("进行中的团队与接力")
+  ),
+  reworkHasFailed: reworkHtml.includes("夜间检查") && reworkHtml.includes("fx-verdict"),
+  reworkHasBurnAndInspect: reworkHtml.includes("高耗低效产线") && reworkHtml.includes("最近运行巡检"),
+  lineSelected,
+  lineFocusPid,
+  lineHasDagStrip: lineDrawerHtml.includes("fx-dag-strip"),
+  lineHasPipeCancel: lineDrawerHtml.includes("data-cancel-pipeline"),
+  projectDrawerHasInfo: (
+    projectDrawerHtml.includes("厂区概览") &&
+    projectDrawerHtml.includes("审校团队")
+  ),
+  camModeBeforeWorld,
+  boardModeActive,
+  boardHiddenAfterSwitch,
+  boardHasLane: boardHtml.includes("fb-lane"),
+  boardHasDag: boardHtml.includes("fb-dag-node"),
+  boardHasLiveChip: boardHtml.includes("fb-live-chip"),
+  boardHasBriefAndInspect: (
+    boardHtml.includes("fb-brief") &&
+    boardHtml.includes("已输出验收总结与建议") &&
+    boardHtml.includes("fb-inspect-bar")
+  ),
+  boardHasPermAndBurn: boardHtml.includes("fx-perm-card") && boardHtml.includes("高耗低效"),
+  boardHasQuickAddLine: (
+    boardHtml.includes("data-board-add-line") && boardHtml.includes("data-board-proj-toggle")
+  ),
+  boardRealPriority,
+  sceneDemoActive,
+  rafStoppedOnBoard,
+  boardHasSearch: boardHtml.includes('id="fb-search"'),
+  boardHasAttnStrip: boardHtml.includes("fb-attn-strip") && boardHtml.includes("data-board-ack"),
+  boardHasProportionalTicks: (
+    boardHtml.includes("left:44%") && boardHtml.includes("left:66%") && boardHtml.includes("left:88%")
+  ),
+  lanesFilterWorks,
+}));
+"""
+    proc = subprocess.run(
+        [node, "-e", probe, str(STATIC_DIR)],
+        capture_output=True, text=True, encoding="utf-8", check=False, timeout=20,
+    )
+    assert proc.returncode == 0, f"node probe failed: {proc.stderr}"
+    res = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert res["workMode"] == "work" and res["workZoomCloser"] is True
+    assert res["panDirectMatch"] is True
+    assert res["labelDragOpenedDrawer"] is False
+    assert res["labelTapOpenedDrawer"] is True
+    assert res["southBoundsSafe"] is True
+    assert res["horizonZoomedSouth"] == 0
+    assert (
+        "等你确认 1" in res["livePillHtml"]
+        and "在跑 1" in res["livePillHtml"]
+        and "协作 2" in res["livePillHtml"]
+    )
+    assert res["livePillHiddenActive"] is False and res["livePillHiddenIdle"] is True
+    assert res["liveHasPermCard"] is True and res["liveHasCollab"] is True
+    assert res["dispatchHasQueue"] is True and res["dispatchHasPermAndCollab"] is True
+    assert res["reworkHasFailed"] is True and res["reworkHasBurnAndInspect"] is True
+    assert res["lineSelected"] == "pipe:5" and res["lineFocusPid"] == 1
+    assert res["lineHasDagStrip"] is True
+    assert res["lineHasPipeCancel"] is True
+    assert res["projectDrawerHasInfo"] is True
+    assert res["camModeBeforeWorld"] == "work"
+    assert 'step="1"' in read_static("app-factory-drawer.js")
+    assert '<option value="workdays">' in read_static("app-factory-drawer.js")
+    assert res["boardModeActive"] is True and res["boardHiddenAfterSwitch"] is False
+    assert res["boardHasLane"] is True and res["boardHasDag"] is True and res["boardHasLiveChip"] is True
+    assert res["boardHasBriefAndInspect"] is True
+    assert res["boardHasPermAndBurn"] is True
+    assert res["boardHasQuickAddLine"] is True
+    assert res["defaultViewMode"] == "board"
+    assert res["boardRealPriority"] is True and res["sceneDemoActive"] is True
+    assert res["rafStoppedOnBoard"] is True
+    assert res["boardHasSearch"] is True
+    assert res["boardHasAttnStrip"] is True
+    assert res["boardHasProportionalTicks"] is True
+    assert res["lanesFilterWorks"] is True
+
+
+def test_factory_option_b_board_default_and_desktop_wiring():
+    """方案 B 契约：默认进入调度看板，像素场景冻结扩展作可切换挂机视图。"""
+    html = read_static("index.html")
+    i_sw = html.index('id="factory-view-switch"')
+    sw_seg = html[i_sw:html.index("</div>", i_sw)]
+    assert sw_seg.index('data-fview="board"') < sw_seg.index('data-fview="scene"')
+    assert 'class="fh-tab active" data-fview="board"' in sw_seg
+    assert 'id="factory-stage" class="hidden"' in html
+    assert 'id="factory-board" aria-label="产线调度看板"' in html
+
+    app_js = read_static("app.js")
+    assert 'prefs.factory_view === "scene" ? "scene" : "board"' in app_js
+
+    css = read_static("app.css")
+    sec_start = css.index("工厂（第三顶层视图）")
+    narrow_start = css.index("@media (max-width: 860px)", sec_start)
+    desktop_css = css[sec_start:narrow_start]
+    assert "#view-factory.board-mode #factory-panel { display: none; }" in desktop_css
+    assert "#view-factory.board-mode #factory-notice:not(.error) { display: none; }" in desktop_css
+    assert "var(--mono)" not in css[sec_start:], "工厂样式应使用 --font-mono 而非未定义的 --mono"
+
+    fjs = read_factory_js()
+    assert 'if (!S.mounted || S.viewMode !== "scene") { S.raf = 0; return; }' in fjs
+    assert 'if (S.viewMode !== "scene" && !force) return;' in fjs
+
+
 

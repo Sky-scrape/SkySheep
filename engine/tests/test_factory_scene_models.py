@@ -967,6 +967,31 @@ _DRIVER_JS = r'''
           }
         });
       });
+      var pl = fx.S.world.plateau;
+      var roadSlope = (pl.hh + 8) / (pl.hw + 14);
+      fx.S.world.models.forEach(function (m) {
+        if (!m.peripheral || m.roadsideTank) return;
+        var spanX = m.hw || m.r || 6;
+        var spanY = m.hh || (m.r ? m.r * 0.5 : 3);
+        (m.path || [m]).forEach(function (pt) {
+          var corners = [
+            [pt.x - spanX, pt.y], [pt.x + spanX, pt.y],
+            [pt.x, pt.y - spanY], [pt.x, pt.y + spanY],
+          ];
+          corners.forEach(function (c) {
+            var pr = Math.abs(c[0] - pl.cx) / pl.hw + Math.abs(c[1] - pl.cy) / pl.hh;
+            if (pr <= 1.02) {
+              note(report.cameraIssues, n + " 项目时外围 " + m.kind +
+                " (" + m.facility + ") 落在中央台地内 (" + c[0] + "," + c[1] + ")");
+            }
+          });
+          var ry = pl.cy + (pl.hh + 8) - Math.abs(pt.x - pl.cx) * roadSlope;
+          if (Math.abs(pt.y - ry) < spanY + 7) {
+            note(report.cameraIssues, n + " 项目时外围 " + m.kind +
+              " (" + m.facility + ") 压在前缘干道上");
+          }
+        });
+      });
       var pad = 30;
       var z = cam.zoom;
       // 取景契约：bounds 的四角必须在缓冲区内——全景不许把场景内容裁在画幅边上
@@ -991,6 +1016,26 @@ _DRIVER_JS = r'''
           note(report.cameraIssues, "远景转运桥缺失或未标记 bg");
         }
       }
+    });
+    // 第二环（9 项目）：同样校验所有外围物件不压中央台地与前缘干道
+    fx.buildWorld({ projects: makeProjects(9), counters: {} });
+    var pl2 = fx.S.world.plateau;
+    var roadSlope2 = (pl2.hh + 8) / (pl2.hw + 14);
+    fx.S.world.models.forEach(function (m) {
+      if (!m.peripheral || m.roadsideTank) return;
+      var sx = m.hw || m.r || 6, sy = m.hh || (m.r ? m.r * 0.5 : 3);
+      (m.path || [m]).forEach(function (pt) {
+        [[pt.x - sx, pt.y], [pt.x + sx, pt.y],
+         [pt.x, pt.y - sy], [pt.x, pt.y + sy]].forEach(function (c) {
+          if (Math.abs(c[0] - pl2.cx) / pl2.hw + Math.abs(c[1] - pl2.cy) / pl2.hh <= 1.02) {
+            note(report.cameraIssues, "9 项目时外围 " + m.kind + " (" + m.facility + ") 落在中央台地内");
+          }
+        });
+        var ry2 = pl2.cy + (pl2.hh + 8) - Math.abs(pt.x - pl2.cx) * roadSlope2;
+        if (Math.abs(pt.y - ry2) < sy + 7) {
+          note(report.cameraIssues, "9 项目时外围 " + m.kind + " (" + m.facility + ") 压在前缘干道上");
+        }
+      });
     });
     report.gridIssues = [];
     var fullGrid = fx.gridSlots(25);
@@ -1041,12 +1086,19 @@ _DRIVER_JS = r'''
     fx.onWheel({ deltaY: -100, preventDefault: function () { prevented += 1; } });
     var zoomIn = fx.S.cam.tz;
     fx.onWheel({ deltaY: 100, preventDefault: function () { prevented += 1; } });
+    var zoomOut = fx.S.cam.tz;
+    fx.fitCamera(false);
+    var resetCam = [fx.S.cam.x, fx.S.cam.y, fx.S.cam.zoom];
     report.fixedCamera = {
       before: cameraBefore, after: cameraAfter, prevented: prevented,
-      zoomLocked: zoomIn === zoomBefore && fx.S.cam.tz === zoomBefore,
-      centered: fx.S.cam.x === (fx.S.world.bounds.minX + fx.S.world.bounds.maxX) / 2 &&
-                fx.S.cam.y <= (fx.S.world.bounds.minY + fx.S.world.bounds.maxY) / 2,
-      afterWheel: [fx.S.cam.x, fx.S.cam.y, fx.S.cam.tx, fx.S.cam.ty]
+      pannedInsideBounds: (cameraAfter[0] !== cameraBefore[0] || cameraAfter[1] !== cameraBefore[1]) &&
+        cameraAfter[0] >= fx.S.world.bounds.minX && cameraAfter[0] <= fx.S.world.bounds.maxX &&
+        cameraAfter[1] >= fx.S.world.bounds.minY && cameraAfter[1] <= fx.S.world.bounds.maxY,
+      zoomedControlled: zoomIn > zoomBefore && zoomOut < zoomIn &&
+        zoomOut >= Math.max(0.05, zoomBefore * 0.8) && zoomIn <= 2.8,
+      resetCentered: resetCam[0] === (fx.S.world.bounds.minX + fx.S.world.bounds.maxX) / 2 &&
+        resetCam[1] <= (fx.S.world.bounds.minY + fx.S.world.bounds.maxY) / 2 &&
+        Math.abs(resetCam[2] - zoomBefore) < 1e-6,
     };
   } catch (e) {
     report.fatal = String((e && e.stack) || e);
@@ -1060,7 +1112,7 @@ _DRIVER_JS = r'''
 def _build_probe_source() -> str:
     """按加载顺序拼接工厂四个分区文件（共享 window.FX），探针从 FX 取内部 API。"""
     js = "\n".join((STATIC_DIR / n).read_text(encoding="utf-8") for n in (
-        "app-factory.js", "app-factory-scene.js",
+        "app-factory.js", "app-factory-camera.js", "app-factory-scene.js",
         "app-factory-drawer.js", "app-factory-draw.js"))
     exports = ", ".join(f"{name}: window.FX.{name}" for name in _EXPORTED)
     tail = f"\nwindow.__factoryTest = {{ {exports} }};\n"
@@ -1104,10 +1156,11 @@ def test_factory_scene_hidden_grid_keeps_center_and_stable_perimeter(scene_repor
     assert scene_report["gridIssues"] == [], scene_report["gridIssues"]
 
 
-def test_factory_scene_camera_stays_centered_without_mouse_zoom_or_pan(scene_report):
+def test_factory_scene_camera_pan_zoom_clamped_and_resets(scene_report):
     camera = scene_report["fixedCamera"]
-    assert camera["before"] == camera["after"] == camera["afterWheel"]
-    assert camera["zoomLocked"] and camera["centered"]
+    assert camera["pannedInsideBounds"]
+    assert camera["zoomedControlled"]
+    assert camera["resetCentered"]
     assert camera["prevented"] == 2
 
 

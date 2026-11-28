@@ -50,7 +50,6 @@ import re
 import shutil
 import tempfile
 import time
-import uuid
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -62,8 +61,8 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 from ..config import skysheep_home
 from ..messages import ImageBlock
 from ..sanitize import untrusted_data_wrap
+from ._screenshots import save_screenshot_copy
 from .base import Safety, Tool, ToolContext, ToolError, truncate_output
-from .computer import _prune_screenshots
 from .web import _resolve_public_ips
 
 # ---- 定位 msedge ----
@@ -140,7 +139,13 @@ class CdpConnection:
         msg: dict[str, Any] = {"id": mid, "method": method, "params": params or {}}
         if session_id:
             msg["sessionId"] = session_id
-        await self._ws.send(json.dumps(msg, ensure_ascii=False))
+        try:
+            await asyncio.wait_for(
+                self._ws.send(json.dumps(msg, ensure_ascii=False)),
+                timeout=timeout,
+            )
+        except TimeoutError:
+            raise ToolError(f"发送 CDP 请求超时：{method}（>{timeout:.0f} 秒）。") from None
         loop = asyncio.get_running_loop()
         end = loop.time() + timeout
         while True:
@@ -972,19 +977,11 @@ class WebPageTool(Tool):
         ctx.images.append(
             ImageBlock(media_type="image/png", data=base64.b64encode(png).decode())
         )
-        # 副本与 screenshot 工具同一目录、同一保留策略（_prune_screenshots）
+        # 副本与 screenshot 工具同一目录、同一保留策略（save_screenshot_copy / _prune_screenshots）
         shots = skysheep_home() / "screenshots"
-        path = shots / f"webpage_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}.png"
-        saved = False
-        try:
-            shots.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(png)
-            _prune_screenshots(shots)
-            saved = True
-        except OSError:
-            pass  # 副本保存失败不影响主流程（图像已附加进对话）
+        path = await asyncio.to_thread(save_screenshot_copy, shots, png, prefix="webpage_")
         lines = [
             f"网页截图完成（{len(png):,} 字节），图像已附加在本条消息之后（模型可直接查看）",
         ]
-        lines.append(f"- 副本已保存: {path}" if saved else "- 副本保存失败（不影响本次截图）")
+        lines.append(f"- 副本已保存: {path}" if path is not None else "- 副本保存失败（不影响本次截图）")
         return "\n".join(lines)
